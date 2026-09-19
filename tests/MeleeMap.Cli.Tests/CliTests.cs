@@ -7,7 +7,10 @@ public class CliTests
     {
         Array.Empty<string>(), new[] { "extract", "source.dat" },
         new[] { "roundtrip", "source.dat", "--output" },
-        new[] { "inspect", "source.dat", "--unknown" }
+        new[] { "inspect", "source.dat", "--unknown" },
+        new[] { "extract", "source.dat", "--session" },
+        new[] { "extract", "source.dat", "--session", "one", "--session", "two" },
+        new[] { "inspect", "source.dat", "--session", "one" }
     }.Select(args => new object[] { args });
 
     [Theory]

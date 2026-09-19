@@ -36,7 +36,6 @@ public sealed class StageArchive
 
     private int Short(int offset) => System.Buffers.Binary.BinaryPrimitives.ReadInt16BigEndian(Layout.Bytes.AsSpan(32 + offset, 2));
     private int Int(int offset) => Layout.Read(32 + offset);
-    private float Float(int offset) => BitConverter.Int32BitsToSingle(Int(offset));
 
     private int Count(int owner, int pointer, int countOffset, int stride)
     {
@@ -50,43 +49,14 @@ public sealed class StageArchive
         return count;
     }
 
-    /// <summary>Initial validation tier: archive bounds, model hierarchy/lists, counted buffers, collision indices/ranges.</summary>
-    public void Validate()
+    /// <summary>Validation of archive bounds, model hierarchy/lists, and collision consistency; source exceptions return warnings.</summary>
+    public IReadOnlyList<ValidationIssue> Validate()
     {
         foreach (var name in new[] { "map_head", "coll_data", "grGroundParam" })
             Require(File[name] != null, "STAGE_ROOT_MISSING", $"Required stage root '{name}' is missing.");
-        var info = Inspect();
-        ModelIdentity.Capture(Layout, new ModelIdentityCatalog());
-        int c = Layout.Roots.Single(r => r.Name == "coll_data").Offset;
-        // Retail archives commonly serialize 0x2C bytes; the decomp's x2C field is inferred.
-        int vertices = info.Collision!.Vertices, lines = info.Collision.Lines;
-        int vs = Int(c), ls = Int(c + 8);
-        for (int i = 0; i < vertices; i++)
-            Require(float.IsFinite(Float(vs + i * 8)) && float.IsFinite(Float(vs + i * 8 + 4)),
-                "COLLISION_NONFINITE", $"Vertex {i} is not finite.");
-        for (int i = 0; i < lines; i++)
-        {
-            int line = ls + i * 16;
-            Require(Short(line) >= 0 && Short(line) < vertices && Short(line + 2) >= 0 && Short(line + 2) < vertices,
-                "COLLISION_VERTEX", $"Line {i} has an invalid vertex index.");
-            foreach (int offset in new[] { 4, 6, 8, 10 })
-            {
-                int link = Short(line + offset);
-                Require(link >= -1 && link < lines, "COLLISION_LINK", $"Line {i} has an invalid link at 0x{offset:X}.");
-            }
-        }
-        var used = new bool[lines];
-        for (int i = 0; i < 5; i++)
-        {
-            int start = Short(c + 16 + i * 4), count = Short(c + 18 + i * 4);
-            Require(count >= 0 && (count == 0 || start >= 0 && start + count <= lines), "COLLISION_RANGE", $"Category {i} is out of bounds.");
-            for (int j = start; j < start + count; j++)
-            {
-                Require(!used[j], "COLLISION_RANGE_OVERLAP", $"Line {j} belongs to multiple categories.");
-                used[j] = true;
-            }
-        }
-        Require(used.All(x => x), "COLLISION_RANGE_MISSING", "Some lines have no category.");
+        Inspect();
+        var models = ModelIdentity.Capture(Layout, new ModelIdentityCatalog());
+        return CollisionData.Read(Layout).Validate(models);
     }
 
     public void Roundtrip(string output, bool compare)
