@@ -316,3 +316,19 @@ have alpha 1. Direct, index8 and index16 attributes are supported. Blender store
 these values in FLOAT_COLOR/CORNER attributes and previews the first available
 channel as a color multiplier. No color edit field is accepted by model edits.
 The position writer verifies both original color channels on reload.
+
+### Alpha preview state
+
+`preview.alpha` adds the source material alpha, vertex-alpha selection and
+material multiplication flag, first texture alpha operation/blend factor, and
+pixel-processing blend mode/factors and both alpha comparison references with
+their combining operation. Missing PE descriptors use the source render flags'
+opaque/translucent and alpha-test defaults. Unsupported blending/custom TEV
+settings produce a preview warning. Blender combines Transparent and Emission
+shaders with dithered transparency; additive materials use a shader sum so black
+leaves the background intact. Older sessions without this metadata retain their
+previous preview behavior. No export edit fields are added.
+
+Source references: HSDLib `Common/HSD_MOBJ.cs`, `Common/HSD_TOBJ.cs`,
+`GX/Enums.cs`, `Tools/Textures/GXImageConverter.cs`, and renderer alpha operations;
+Melee `baselib/tobj.c` alpha expressions and `baselib/state.c` PE defaults.

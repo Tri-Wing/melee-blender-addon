@@ -1,4 +1,5 @@
 """One supported stage material per model, with native Blender corner UVs."""
+import json
 from pathlib import Path
 import bpy
 import bmesh
@@ -118,6 +119,7 @@ def configure_preview(material, preview, directory, stage):
     if warning:
         material['mme_preview_warning'] = warning
     if not texture or directory is None:
+        configure_alpha_preview(material, preview.get('alpha'))
         return
     directory = Path(directory).resolve()
     path = (directory / texture['file']).resolve()
@@ -126,6 +128,7 @@ def configure_preview(material, preview, directory, stage):
         raise StageError('Texture preview file is outside the protected session baseline.')
     image = bpy.data.images.load(str(path), check_existing=True)
     image.colorspace_settings.name = 'sRGB'
+    image.alpha_mode = 'STRAIGHT'
     image.pack()
     sampler = nodes.new('ShaderNodeTexImage')
     sampler.name = 'Stage Texture'
@@ -166,9 +169,10 @@ def configure_preview(material, preview, directory, stage):
     sampler.location = (-100, 0)
     emission.location = (200, 0)
     output.location = (400, 0)
+    configure_alpha_preview(material, preview.get('alpha'))
 
 
-def show_preview(context, switch_viewport=True):
+def update_uv_editor(context):
     obj = context.active_object
     material = obj.active_material if obj and obj.type == 'MESH' else None
     image = None
@@ -177,9 +181,7 @@ def show_preview(context, switch_viewport=True):
         image = node.image if node else None
     if context.screen:
         for area in context.screen.areas:
-            if area.type == 'VIEW_3D' and switch_viewport:
-                area.spaces.active.shading.type = 'MATERIAL'
-            elif area.type == 'IMAGE_EDITOR' and area.ui_type == 'UV' and image:
+            if area.type == 'IMAGE_EDITOR' and area.ui_type == 'UV' and image:
                 area.spaces.active.image = image
     return image
 
@@ -224,3 +226,105 @@ def configure_color_preview(material, layer_name):
     links.new(multiply.outputs[0], base)
     color.location = (-100, -300)
     multiply.location = (150, -100)
+    if material.get('mme_alpha_preview'):
+        configure_alpha_preview(material, json.loads(material['mme_alpha_preview']))
+
+
+def configure_alpha_preview(material, settings):
+    """Static HSD alpha operations and common framebuffer blends, without DAT edits."""
+    if not settings:
+        return
+    material['mme_alpha_preview'] = json.dumps(settings)
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    for node in list(nodes):
+        if node.get('mme_alpha_node'):
+            nodes.remove(node)
+    emission = next(n for n in nodes if n.type == 'EMISSION')
+    output = next(n for n in nodes if n.type == 'OUTPUT_MATERIAL')
+    emission.inputs['Strength'].default_value = 1
+
+    def node(kind):
+        result = nodes.new(kind)
+        result['mme_alpha_node'] = True
+        result.label = 'Stage alpha preview'
+        return result
+
+    def connect(value, socket):
+        if isinstance(value, (float, int)):
+            socket.default_value = value
+        else:
+            links.new(value, socket)
+
+    def math(op, a, b=0, c=None):
+        result = node('ShaderNodeMath')
+        result.operation = op
+        connect(a, result.inputs[0])
+        connect(b, result.inputs[1])
+        if c is not None:
+            connect(c, result.inputs[2])
+        return result.outputs[0]
+
+    vertex = nodes.get('Stage Vertex Color')
+    alpha = settings['material']
+    if settings['vertex']:
+        alpha = vertex.outputs['Alpha'] if vertex else 1
+        if settings['multiplyMaterial']:
+            alpha = math('MULTIPLY', alpha, settings['material'])
+    texture = nodes.get('Stage Texture')
+    if texture:
+        tex = texture.outputs['Alpha']
+        operation = settings['textureOperation']
+        if operation in (1, 2):
+            factor = tex if operation == 1 else settings['textureBlend']
+            alpha = math('ADD', math('MULTIPLY', alpha, math('SUBTRACT', 1, factor)),
+                         math('MULTIPLY', tex, factor))
+        elif operation == 3:
+            alpha = math('MULTIPLY', alpha, tex)
+        elif operation == 4:
+            alpha = tex
+        elif operation == 6:
+            alpha = math('ADD', alpha, tex)
+        elif operation == 7:
+            alpha = math('SUBTRACT', alpha, tex)
+    alpha = math('MINIMUM', 1, math('MAXIMUM', 0, alpha))
+
+    def compare(kind, reference):
+        reference /= 255
+        if kind in (0, 7):
+            return 1 if kind == 7 else 0
+        if kind == 1:
+            return math('LESS_THAN', alpha, reference)
+        if kind == 4:
+            return math('GREATER_THAN', alpha, reference)
+        if kind in (2, 5):
+            equal = math('COMPARE', alpha, reference, 0.000001)
+            return equal if kind == 2 else math('SUBTRACT', 1, equal)
+        return math('SUBTRACT', 1, math('GREATER_THAN' if kind == 3 else 'LESS_THAN', alpha, reference))
+
+    a = compare(settings['compare0'], settings['reference0'])
+    b = compare(settings['compare1'], settings['reference1'])
+    operation = settings['operation']
+    passed = (math('MULTIPLY', a, b) if operation == 0 else math('MAXIMUM', a, b) if operation == 1
+              else math('ABSOLUTE', math('SUBTRACT', a, b)))
+    if operation == 3:
+        passed = math('SUBTRACT', 1, passed)
+    transparent = node('ShaderNodeBsdfTransparent')
+    mode, src, dst = settings['blendMode'], settings['sourceFactor'], settings['destinationFactor']
+    if mode == 1 and dst == 1 and src in (1, 4):
+        # Additive effects transmit the background completely; black adds nothing.
+        connect(math('MULTIPLY', passed, alpha if src == 4 else 1), emission.inputs['Strength'])
+        shader = node('ShaderNodeAddShader')
+        links.new(transparent.outputs[0], shader.inputs[0])
+        links.new(emission.outputs[0], shader.inputs[1])
+    else:
+        opacity = passed if mode == 0 or (mode == 1 and src == 1 and dst == 0) else math('MULTIPLY', passed, alpha)
+        shader = node('ShaderNodeMixShader')
+        connect(opacity, shader.inputs[0])
+        links.new(transparent.outputs[0], shader.inputs[1])
+        links.new(emission.outputs[0], shader.inputs[2])
+    shader.name = 'Stage Alpha Surface'
+    links.new(shader.outputs[0], output.inputs['Surface'])
+    if hasattr(material, 'surface_render_method'):
+        material.surface_render_method = 'DITHERED'
+    elif hasattr(material, 'blend_method'):
+        material.blend_method = 'HASHED'

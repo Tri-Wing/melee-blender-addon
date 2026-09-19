@@ -31,6 +31,17 @@ public class TexturePreviewTests
         Assert.Empty(Directory.GetFiles(fixture.Directory, "*", SearchOption.AllDirectories));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void IntensityTexturesDecodeBlackAsTransparentAndWhiteAsOpaque(int format)
+    {
+        using var fixture = new Fixture(format);
+        var preview = TexturePreview.Extract(fixture.Archive, new("test", "test", 0, true), fixture.Directory);
+        var bytes = File.ReadAllBytes(Path.Combine(fixture.Directory, preview.Texture!.File));
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 255, 255, 255, 255 }, bytes.AsSpan(18, 8).ToArray());
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Directory { get; } = Path.Combine(Path.GetTempPath(), "mme-texture-" + Guid.NewGuid().ToString("N"));
@@ -47,7 +58,9 @@ public class TexturePreviewTests
             Put(8, 32); Put(44, 4); Put(108, 128); Put(128, 192); Short(132, 2); Short(134, 2); Put(136, format);
             foreach (int at in new[] { 32 + 0x1C, 32 + 0x20, 32 + 0x24 }) Put(at, BitConverter.SingleToInt32Bits(1));
             bytes[32 + 32 + 0x3C] = 1; bytes[32 + 32 + 0x3D] = 1;
-            if (format == 6)
+            if (format == 0) bytes[32 + 192] = 0x0F;
+            else if (format == 1) bytes[32 + 193] = 255;
+            else if (format == 6)
             {
                 // Red then green in the first tile's top row.
                 bytes[32 + 192] = 255; bytes[32 + 193] = 255;

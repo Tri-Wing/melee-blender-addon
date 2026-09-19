@@ -5,7 +5,7 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning);
+public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning, AlphaPreview? Alpha = null);
 public sealed record PreviewTexture(string File, int Width, int Height, int WrapS, int WrapT,
     int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation);
 
@@ -18,7 +18,10 @@ public static class TexturePreview
         int? color = r.Pointer(material.MobjOffset + 12);
         float[] diffuse = color.HasValue ? Enumerable.Range(0, 3).Select(i => r.Byte(color.Value + 4 + i) / 255f).Append(1f).ToArray()
             : [0.45f, 0.45f, 0.45f, 1];
-        if (!material.UsesUv) return new(diffuse, null, null);
+        var alpha = AlphaPreview.Read(archive, material.MobjOffset);
+        MaterialPreview Preview(PreviewTexture? texture, string? warning = null) => new(diffuse, texture,
+            string.IsNullOrEmpty(warning) ? alpha.Warning : string.IsNullOrEmpty(alpha.Warning) ? warning : warning + " " + alpha.Warning, alpha);
+        if (!material.UsesUv) return Preview(null);
         try
         {
             int t = r.Pointer(material.MobjOffset + 8)!.Value;
@@ -79,11 +82,11 @@ public static class TexturePreview
             string file = $"models/textures/{image:x8}-{r.Pointer(t + 0x50).GetValueOrDefault():x8}.tga";
             string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
-            return new(diffuse, new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation),
+            return Preview(new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation),
                 r.Pointer(t + 4) != null ? "Only the first base texture is previewed; additional texture layers are omitted." : null);
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)
-        { return new(diffuse, null, $"Texture preview unavailable: {e.Message}"); }
+        { return Preview(null, $"Texture preview unavailable: {e.Message}"); }
     }
 
     public static byte[] Tga(int width, int height, int rowWidth, byte[] bgra)

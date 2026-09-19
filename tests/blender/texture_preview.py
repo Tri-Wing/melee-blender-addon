@@ -33,7 +33,8 @@ with tempfile.TemporaryDirectory(prefix='mme-preview-') as tmp:
     entries = [m for m in stage['modelMaterials'] if m['usesUv']]
     assert entries
     for entry in entries:
-        assert entry['preview']['warning'] is None, entry['preview']
+        assert entry['preview']['texture'] is not None, entry['preview']
+        assert entry['preview']['warning'] in (None, 'Custom TEV alpha routing is approximated with the base texture alpha operation.'), entry['preview']
         material = next(m for m in bpy.data.materials if surface.material_id(m) == entry['id'])
         node = material.node_tree.nodes['Stage Texture']
         texture = entry['preview']['texture']
@@ -47,11 +48,9 @@ with tempfile.TemporaryDirectory(prefix='mme-preview-') as tmp:
     material = obj.active_material
     image = material.node_tree.nodes['Stage Texture'].image
     bpy.context.view_layer.objects.active = obj
-    assert bpy.ops.mme.texture_preview() == {'FINISHED'}
-    assert all(a.spaces.active.shading.type == 'MATERIAL' for a in bpy.context.screen.areas if a.type == 'VIEW_3D')
     uv_area = next(a for a in bpy.context.screen.areas if a.type != 'VIEW_3D')
     uv_area.type = 'IMAGE_EDITOR'; uv_area.ui_type = 'UV'
-    surface.show_preview(bpy.context)
+    surface.update_uv_editor(bpy.context)
     assert uv_area.spaces.active.image == image
     assert modeling.edits(s, stage) is None
     scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')

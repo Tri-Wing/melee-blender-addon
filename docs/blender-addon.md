@@ -242,7 +242,7 @@ full target list. No automatic rebasing of protected geometry is performed.
    the active UV map. UVs use Blender's bottom-origin convention; import/export
    reverses V relative to the game's coordinates. UV seams are retained per corner.
 4. Export normally. Several objects may use different materials in the same DAT.
-   Click **Texture Preview** to inspect mapping in Blender. Test the final
+   Test the final
    appearance in game; lighting and shader effects are approximate in the preview.
 
 Compatible source materials are placed in Blender's material list as well, so
@@ -272,10 +272,6 @@ import that DAT into a new scene. New extraction sessions include decoded images
 for the supported stage-material catalog. Existing `.blend` files without those
 images need a fresh import to enable this feature.
 
-Select a textured editable model and click **Texture Preview** in the Melee Map
-sidebar. This switches 3D views to Material Preview and shows the selected
-material's image in any open UV Editor. In the UV Editing workspace, click the
-button after selecting your model if the image editor is showing another image.
 Assigning a different stage material also updates open UV Editors.
 
 Images are packed into the `.blend` and remain available after saving/reopening.
@@ -411,10 +407,9 @@ conversion and output reload, but the fix still needs an in-game retest.
 Reload the add-on and re-import the DAT to load GX vertex colors. Available
 channels appear under Mesh Data > Color Attributes as **Stage Color 0** and
 **Stage Color 1**. Both retain RGBA values on face corners, preserving seams.
-Enable **Texture Preview** (or Material Preview shading) to see the first
-available channel multiply the base material/texture color. The second channel
-and alpha are stored, but game TEV channel routing and alpha effects are not
-emulated by this preview.
+The first available channel multiplies the base material/texture color. The second channel
+is stored for inspection. Material, texture and vertex alpha are previewed using
+the source settings; custom game TEV channel routing remains approximate.
 
 Vertex painting currently changes only the Blender preview. Vertex-only DAT
 exports retain the original colors; topology replacements still do not export
@@ -426,3 +421,21 @@ and read-only meshes also receive their supported base textures. These previews
 do not make the source materials available for assignment to replacement
 geometry. Unsupported texture coordinates and additional texture layers retain
 the existing preview limitations.
+
+## Alpha previews
+
+Transparency uses the source material and pixel-processing settings:
+
+- Texture alpha, including I4/I8 intensity textures where black has zero alpha.
+- Material alpha, vertex alpha and combined material/vertex alpha.
+- Base texture alpha mask, blend, multiply, replace, pass, add and subtract.
+- Alpha-test cutouts and standard transparency.
+- Additive blending, where black contributes no light and leaves the background visible.
+
+Opaque materials stay opaque even if their image contains black pixels or unused
+alpha. Custom TEV routing, multiple texture layers and uncommon framebuffer
+blending remain approximate; unsupported source settings are recorded in the
+material’s `mme_preview_warning` property. Material/texture animation is still not evaluated.
+These previews do not change DAT export behavior or enable alpha/material editing
+in exports. Rendered regression tests cover alpha sources, operations, cutouts,
+additive effects and opaque black on Blender 4.5 and 5.2.
