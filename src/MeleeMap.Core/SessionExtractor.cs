@@ -21,6 +21,7 @@ public static class SessionExtractor
         var catalog = new ModelIdentityCatalog();
         var identity = ModelIdentity.Capture(stage.Layout, catalog);
         var collision = CollisionData.Read(stage.Layout);
+        var lighting = StageLightingReader.Read(stage.Layout);
         var editableModels = ModelEditing.SelectAll(stage.Layout, identity, out var readOnlyReasons);
         var editable = ModelEditing.Select(stage.Layout, identity) ?? editableModels.FirstOrDefault();
         var reader = new ArchiveDataReader(stage.Layout);
@@ -147,6 +148,7 @@ public static class SessionExtractor
                 protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = 1,
                 source = new { file = "source.dat", filename = info.Filename, sha256 = info.Sha256, datVersion = info.DatVersion },
                 publicRoots = info.Roots, externalReferences = info.References,
+                lighting,
                 modelGroupCount = groups.Length,
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },

@@ -35,6 +35,7 @@ public class CorpusTests
                     var inventory = archive.Inspect();
                     Assert.NotEmpty(inventory.Roots);
                     archive.Validate();
+                    StageLightingReader.Read(archive.Layout);
                     var identities = new ModelIdentityCatalog();
                     var before = ModelIdentity.Capture(archive.Layout, identities);
                     string saved = Path.Combine(output, Path.GetFileName(file));

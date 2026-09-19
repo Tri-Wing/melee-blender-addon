@@ -51,6 +51,7 @@ def initialize(material, entry, definition, directory, stage):
     texture = entry['preview'].get('texture')
     material['mme_material_preview_files'] = json.dumps([f for f in stage['baselineFiles']
         if texture and f['file'] == texture['file']])
+    material['mme_material_lighting'] = json.dumps(stage.get('lighting', {}))
     material['mme_material_updating'] = True
     try:
         material.mme_diffuse = [linear(c / 255) for c in definition['diffuse']]
@@ -149,8 +150,13 @@ def update(material, context):
             preview['texture']['colorBlend'] = material.mme_texture_blend
         color_node = material.node_tree.nodes.get('Stage Vertex Color') if material.node_tree else None
         color_layer = color_node.layer_name if color_node else material.get('mme_vertex_color_layer', 'Stage Color 0')
+        from . import lighting
+        preview_stage = {
+            'baselineFiles': json.loads(material['mme_material_preview_files']),
+            'lighting': json.loads(material.get('mme_material_lighting', '{}'))}
+        light_objects = lighting.object_map(preview_stage, material.get('mme_model_material_source'))
         surface.configure_preview(material, preview, Path(material['mme_material_directory']),
-                                  {'baselineFiles': json.loads(material['mme_material_preview_files'])})
+                                  preview_stage, light_objects)
         if color_layer and material.mme_use_vertex_color:
             surface.configure_color_preview(material, color_layer)
         material.pop('mme_material_error', None)

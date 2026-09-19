@@ -279,9 +279,9 @@ The preview applies the source UV repeat, scale, rotation, translation, clamp,
 and mirror settings without changing the editable UV map. The UV Editor shows
 the original image; the viewport shows it with the source material transforms.
 
-This is an **unlit texture-placement preview** for the supported material catalog.
-Full game lighting, TEV color/alpha effects, mip filtering, animated materials,
-and unsupported material types are not reproduced. Unsupported/invalid images
+The texture preview also uses supported MOBJ lighting flags and imported LOBJ
+descriptor values. Full TEV channel routing, mip filtering, animated materials
+and lights, and unsupported material types are not reproduced. Unsupported/invalid images
 fall back to a solid material with a preview warning. Texture painting and shader
 node changes do not author game assets or affect DAT export.
 
@@ -480,9 +480,40 @@ Unlit Melee materials keep the emission preview used for exact base colors.
 Lit materials also use emission, fed by explicit normal/light calculations that
 follow HSD's diffuse and Blinn-Phong specular equations. Specular uses the DAT
 material's RGB and shininess and never reflects Blender's HDRI or world
-environment. The preview currently uses one fixed camera-relative light plus an
-ambient term, so light placement remains approximate until stage LOBJ lights
-and the complete GX channel pipeline are imported.
+environment. Fresh imports use the selected stage LOBJ set's ambient, infinite,
+point, and spot lights, including diffuse/specular flags and attenuation. The
+complete GX material-channel and texture-lightmap routing remains approximate.
+
+## Stage lights
+
+Fresh sessions import every model-group LOBJ set and the `map_plit` player-light
+set under **Melee Stage > Lights**. The set driving the material preview is named
+**Preview Light Set**; other sets are imported but hidden in the viewport. Each
+LOBJ retains its type, flags, color, diffuse/specular use, position/interest,
+attenuation parameters, source offset, and whether it has animation data.
+Infinite, point, and spot LOBJs use Blender light objects for inspection;
+ambient LOBJs use empties because Blender has no equivalent ambient-light object.
+
+The preview evaluates source ambient and directional/positional light colors,
+spot and distance attenuation, and each material's shininess directly in its
+emission graph. The objects in **Preview Light Set** drive that graph: rotate an
+infinite light, move a point light, move or rotate a spot light, or change a
+Blender light's color and energy to update the material preview. Ambient empties use the
+`mme_light_intensity` and `mme_light_enabled` custom properties; every imported
+light has `mme_light_enabled`. Native Blender illumination and world reflections
+are not mixed into the Melee shader.
+
+For infinite lights, the imported LOBJ vector and the Blender Sun's local `-Z`
+axis indicate the direction the rays travel. The diffuse/specular calculation
+uses the opposite vector from the surface toward the light source.
+
+These controls currently affect the Blender preview only. Their changes are
+ignored during export, so the source LOBJ records remain unchanged. Light
+animation is detected but the preview uses descriptor defaults without evaluating
+animation. Melee chooses among model-group
+sets through stage code, which is outside the DAT; when several distinct sets
+exist, extraction records a warning and prefers the only animated set when that
+choice is unambiguous.
 
 Geometry, UV and collision edits can be exported in the same operation. Editing
 a Blender material affects supported models assigned to that material. The DAT

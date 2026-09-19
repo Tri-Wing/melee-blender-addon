@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import bpy
 import bmesh
+from mathutils import Vector
 from .protocol import StageError, digest
 
 
@@ -10,7 +11,7 @@ def material_id(material):
     return material.get('mme_model_material_id') if material else None
 
 
-def create_materials(stage, directory=None):
+def create_materials(stage, directory=None, light_objects=None):
     from . import material_properties
     definitions = {entry['id']: entry for entry in stage.get('editableMaterialProperties', [])}
     result = {}
@@ -25,7 +26,7 @@ def create_materials(stage, directory=None):
             material['mme_model_material_id'] = entry['id']
         material['mme_model_material_source'] = stage['source']['sha256']
         material['mme_model_uses_uv'] = entry['usesUv']
-        configure_preview(material, entry.get('preview'), directory, stage)
+        configure_preview(material, entry.get('preview'), directory, stage, light_objects)
         if entry['id'] in definitions:
             material_properties.initialize(material, entry, definitions[entry['id']], directory, stage)
         result[entry['id']] = material
@@ -103,7 +104,7 @@ def preview_matrix(texture):
     return flip @ matrix @ flip
 
 
-def configure_preview(material, preview, directory, stage):
+def configure_preview(material, preview, directory, stage, light_objects=None):
     if not preview:
         return
     color = preview.get('color', [0.45, 0.45, 0.45, 1])
@@ -125,14 +126,9 @@ def configure_preview(material, preview, directory, stage):
         linear = [1, 1, 1]
     color_input.default_value = (*linear, 1)
     if diffuse_lighting or specular_lighting:
+        from . import lighting
         geometry = nodes.new('ShaderNodeNewGeometry')
         geometry.name = 'Stage Lighting Normal'
-        camera_normal = nodes.new('ShaderNodeVectorTransform')
-        camera_normal.name = 'Stage Camera Normal'
-        camera_normal.vector_type = 'NORMAL'
-        camera_normal.convert_from = 'WORLD'
-        camera_normal.convert_to = 'CAMERA'
-        links.new(geometry.outputs['Normal'], camera_normal.inputs['Vector'])
 
         def scalar(kind, operation, a=None, b=None):
             node = nodes.new(kind)
@@ -149,47 +145,244 @@ def configure_preview(material, preview, directory, stage):
                     links.new(b, node.inputs[1])
             return node
 
+        def vector(operation, a=None, b=None):
+            node = nodes.new('ShaderNodeVectorMath')
+            node.operation = operation
+            for value, socket in ((a, node.inputs[0]), (b, node.inputs[1])):
+                if value is None:
+                    continue
+                if isinstance(value, (tuple, list)):
+                    socket.default_value = value
+                else:
+                    links.new(value, socket)
+            return node
+
+        def rgb(name, value):
+            node = nodes.new('ShaderNodeRGB')
+            node.name = name
+            node.outputs[0].default_value = (*value[:3], 1)
+            return node.outputs[0]
+
+        def color_scale(name, color_value, amount):
+            node = nodes.new('ShaderNodeMixRGB')
+            node.name = name
+            node.blend_type = 'MULTIPLY'
+            node.inputs[0].default_value = 1
+            if isinstance(color_value, (tuple, list)):
+                node.inputs[1].default_value = (*color_value[:3], 1)
+            else:
+                links.new(color_value, node.inputs[1])
+            if isinstance(amount, (int, float)):
+                node.inputs[2].default_value = (amount, amount, amount, 1)
+            else:
+                links.new(amount, node.inputs[2])
+            return node.outputs[0]
+
+        def color_add(name, a, b):
+            node = nodes.new('ShaderNodeMixRGB')
+            node.name = name
+            node.blend_type = 'ADD'
+            node.inputs[0].default_value = 1
+            links.new(a, node.inputs[1])
+            links.new(b, node.inputs[2])
+            return node.outputs[0]
+
+        def linear_color(value):
+            return tuple(c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4
+                         for c in value[:3])
+
+        def drive(socket, variables, expression, index=None):
+            curve = (socket.driver_add('default_value', index) if index is not None
+                     else socket.driver_add('default_value'))
+            driver = curve.driver
+            driver.type = 'SCRIPTED'
+            for name, target, path in variables:
+                variable = driver.variables.new()
+                variable.name = name
+                variable.type = 'SINGLE_PROP'
+                if isinstance(target, bpy.types.Light):
+                    variable.targets[0].id_type = 'LIGHT'
+                variable.targets[0].id = target
+                variable.targets[0].data_path = path
+            driver.expression = expression
+
+        def light_color(source, obj):
+            value = linear_color(source['color'])
+            node = nodes.new('ShaderNodeRGB')
+            node.name = f"Stage Light Color {source.get('id', source['type'])}"
+            node.outputs[0].default_value = (*value, 1)
+            if obj is not None:
+                target = obj if source['type'] == 'ambient' else obj.data
+                for axis in range(3):
+                    drive(node.outputs[0], [('value', target, f'color[{axis}]')], 'value', axis)
+            return node.outputs[0]
+
+        def light_strength(source, obj):
+            node = nodes.new('ShaderNodeValue')
+            node.name = f"Stage Light Strength {source.get('id', source['type'])}"
+            node.outputs[0].default_value = 0 if source.get('hidden') else 1
+            if obj is not None:
+                energy_target = obj if source['type'] == 'ambient' else obj.data
+                energy_path = '["mme_light_intensity"]' if source['type'] == 'ambient' else 'energy'
+                drive(node.outputs[0], [('energy', energy_target, energy_path),
+                                       ('enabled', obj, '["mme_light_enabled"]')],
+                      'energy * enabled')
+            return node.outputs[0]
+
+        def driven_position(source, obj):
+            value = source['position']
+            initial = (value['x'], -value['z'], value['y'])
+            node = nodes.new('ShaderNodeCombineXYZ')
+            node.name = f"Stage Light Position {source.get('id', source['type'])}"
+            for axis, component in enumerate(initial):
+                node.inputs[axis].default_value = component
+                if obj is not None:
+                    drive(node.inputs[axis], [('value', obj, f'location[{axis}]')], 'value')
+            return node.outputs['Vector']
+
+        def driven_axis(source, obj):
+            value = source['position']
+            initial = Vector((value['x'], -value['z'], value['y']))
+            if source['type'] == 'infinite':
+                initial.negate()
+            elif source['type'] == 'spot':
+                initial -= lighting.game_vector(source['interest'])
+            initial.normalize()
+            node = nodes.new('ShaderNodeCombineXYZ')
+            node.name = f"Stage Light Direction {source.get('id', source['type'])}"
+            expressions = (
+                'cos(rz)*sin(ry)*cos(rx)+sin(rz)*sin(rx)',
+                'sin(rz)*sin(ry)*cos(rx)-cos(rz)*sin(rx)',
+                'cos(ry)*cos(rx)')
+            for axis, component in enumerate(initial):
+                node.inputs[axis].default_value = component
+                if obj is not None:
+                    variables = [('rx', obj, 'rotation_euler[0]'),
+                                 ('ry', obj, 'rotation_euler[1]'),
+                                 ('rz', obj, 'rotation_euler[2]')]
+                    drive(node.inputs[axis], variables, expressions[axis])
+            return node.outputs['Vector']
+
+        active_lights = lighting.preview_lights(stage)
+        game_lights = bool(active_lights)
+        if not active_lights:
+            # Compatibility for sessions extracted before LOBJ support.
+            active_lights = [
+                dict(type='ambient', color=[.65, .65, .65, 1], diffuse=True,
+                     specular=False, hidden=False),
+                dict(type='infinite', color=[.4, .4, .4, 1], diffuse=True,
+                     specular=True, hidden=False, position=dict(x=.35, y=.82, z=.45))]
+
+        normal = geometry.outputs['Normal']
+        if not game_lights:
+            camera_normal = nodes.new('ShaderNodeVectorTransform')
+            camera_normal.name = 'Stage Camera Normal'
+            camera_normal.vector_type = 'NORMAL'
+            camera_normal.convert_from = 'WORLD'
+            camera_normal.convert_to = 'CAMERA'
+            links.new(normal, camera_normal.inputs['Vector'])
+            normal = camera_normal.outputs['Vector']
+        incoming = geometry.outputs['Incoming']
+        if game_lights:
+            view = vector('MULTIPLY', incoming, (-1, -1, -1)).outputs['Vector']
+            view = vector('NORMALIZE', view).outputs['Vector']
+        else:
+            view = (0, 0, 1)
+
+        def light_vector(source, obj):
+            value = source['position']
+            position = (value['x'], -value['z'], value['y']) if game_lights else (value['x'], value['z'], value['y'])
+            if source['type'] == 'infinite':
+                if game_lights:
+                    return driven_axis(source, obj), 1
+                length = sum(v * v for v in position) ** .5
+                return tuple(v / length for v in position) if length else (0, 0, 1), 1
+            position_socket = driven_position(source, obj) if game_lights else position
+            delta = vector('SUBTRACT', position_socket, geometry.outputs['Position'])
+            direction = vector('NORMALIZE', delta.outputs['Vector']).outputs['Vector']
+            distance = vector('DISTANCE', position_socket, geometry.outputs['Position']).outputs['Value']
+            att = source['attenuation']
+            distance2 = scalar('ShaderNodeMath', 'MULTIPLY', distance, distance).outputs[0]
+            denominator = scalar('ShaderNodeMath', 'MULTIPLY', distance2, att['k2']).outputs[0]
+            denominator = scalar('ShaderNodeMath', 'ADD', denominator,
+                                 scalar('ShaderNodeMath', 'MULTIPLY', distance, att['k1']).outputs[0]).outputs[0]
+            denominator = scalar('ShaderNodeMath', 'ADD', denominator, att['k0']).outputs[0]
+            if source['type'] == 'spot':
+                axis = driven_axis(source, obj) if game_lights else (0, 0, 1)
+                spot_dot = vector('DOT_PRODUCT', direction, axis).outputs['Value']
+                spot_dot = scalar('ShaderNodeMath', 'MAXIMUM', spot_dot, 0).outputs[0]
+                spot2 = scalar('ShaderNodeMath', 'MULTIPLY', spot_dot, spot_dot).outputs[0]
+                numerator = scalar('ShaderNodeMath', 'MULTIPLY', spot2, att['a2']).outputs[0]
+                numerator = scalar('ShaderNodeMath', 'ADD', numerator,
+                                   scalar('ShaderNodeMath', 'MULTIPLY', spot_dot, att['a1']).outputs[0]).outputs[0]
+                numerator = scalar('ShaderNodeMath', 'ADD', numerator, att['a0']).outputs[0]
+                numerator = scalar('ShaderNodeMath', 'MAXIMUM', numerator, 0).outputs[0]
+            else:
+                numerator = 1
+            denominator = scalar('ShaderNodeMath', 'MAXIMUM', denominator, 1e-8).outputs[0]
+            return direction, scalar('ShaderNodeMath', 'DIVIDE', numerator, denominator).outputs[0]
+
+        illumination = rgb('Stage Ambient Light', (0, 0, 0) if diffuse_lighting else (1, 1, 1))
+        if diffuse_lighting:
+            for source in active_lights:
+                if source['type'] != 'ambient':
+                    continue
+                obj = (light_objects or {}).get(source.get('id'))
+                contribution = color_scale('Stage Ambient Light Color', light_color(source, obj),
+                                           light_strength(source, obj))
+                illumination = color_add('Stage Ambient Light Add', illumination, contribution)
+        specular_light = rgb('Stage Specular Light', (0, 0, 0))
+        first_diffuse = first_specular = True
+        for source in active_lights:
+            obj = (light_objects or {}).get(source.get('id'))
+            if source['type'] == 'ambient' or (source.get('hidden') and obj is None):
+                continue
+            direction, attenuation = light_vector(source, obj)
+            strength = light_strength(source, obj)
+            source_color = light_color(source, obj)
+            ndotl = vector('DOT_PRODUCT', normal, direction)
+            if diffuse_lighting and source.get('diffuse'):
+                ndotl.name = 'Stage Diffuse N dot L' if first_diffuse else 'Stage Diffuse N dot L (additional)'
+                positive = scalar('ShaderNodeMath', 'MAXIMUM', ndotl.outputs['Value'], 0).outputs[0]
+                amount = scalar('ShaderNodeMath', 'MULTIPLY', positive, attenuation).outputs[0]
+                amount = scalar('ShaderNodeMath', 'MULTIPLY', amount, strength).outputs[0]
+                contribution = color_scale('Stage Diffuse Light Color', source_color, amount)
+                illumination = color_add('Stage Diffuse Light Add', illumination, contribution)
+                first_diffuse = False
+            if specular_lighting and source.get('specular'):
+                half_vector = vector('ADD', direction, view)
+                half_vector = vector('NORMALIZE', half_vector.outputs['Vector']).outputs['Vector']
+                ndoth = vector('DOT_PRODUCT', normal, half_vector)
+                ndoth.name = 'Stage Specular N dot H' if first_specular else 'Stage Specular N dot H (additional)'
+                positive = scalar('ShaderNodeMath', 'MAXIMUM', ndoth.outputs['Value'], 0).outputs[0]
+                exponent = max(1, min(128, preview.get('shininess', 50)))
+                power = scalar('ShaderNodeMath', 'POWER', positive, exponent)
+                power.name = 'Stage Specular Power' if first_specular else 'Stage Specular Power (additional)'
+                front = scalar('ShaderNodeMath', 'GREATER_THAN', ndotl.outputs['Value'], 0).outputs[0]
+                amount = scalar('ShaderNodeMath', 'MULTIPLY', power.outputs[0], front).outputs[0]
+                amount = scalar('ShaderNodeMath', 'MULTIPLY', amount, attenuation).outputs[0]
+                amount = scalar('ShaderNodeMath', 'MULTIPLY', amount, strength).outputs[0]
+                contribution = color_scale('Stage Specular Light Color', source_color, amount)
+                specular_light = color_add('Stage Specular Light Add', specular_light, contribution)
+                first_specular = False
+
         diffuse = nodes.new('ShaderNodeMixRGB')
         diffuse.name = 'Stage Diffuse Lighting'
         diffuse.blend_type = 'MULTIPLY'
         diffuse.inputs[0].default_value = 1
         diffuse.inputs[1].default_value = (*linear, 1)
         color_input = diffuse.inputs[1]
-        if diffuse_lighting:
-            dot = nodes.new('ShaderNodeVectorMath')
-            dot.name = 'Stage Diffuse N dot L'
-            dot.operation = 'DOT_PRODUCT'
-            dot.inputs[1].default_value = (.35, -.45, .82)
-            links.new(camera_normal.outputs['Vector'], dot.inputs[0])
-            positive = scalar('ShaderNodeMath', 'MAXIMUM', dot.outputs['Value'], 0)
-            directional = scalar('ShaderNodeMath', 'MULTIPLY', positive.outputs[0], .4)
-            light = scalar('ShaderNodeMath', 'ADD', directional.outputs[0], .65)
-            links.new(light.outputs[0], diffuse.inputs[2])
-        else:
-            diffuse.inputs[2].default_value = (1, 1, 1, 1)
+        links.new(illumination, diffuse.inputs[2])
         result = diffuse.outputs[0]
 
         if specular_lighting:
-            half_dot = nodes.new('ShaderNodeVectorMath')
-            half_dot.name = 'Stage Specular N dot H'
-            half_dot.operation = 'DOT_PRODUCT'
-            half_dot.inputs[1].default_value = (.184, -.236, .954)
-            links.new(camera_normal.outputs['Vector'], half_dot.inputs[0])
-            positive = scalar('ShaderNodeMath', 'MAXIMUM', half_dot.outputs['Value'], 0)
-            # HSD evaluates pow(max(dot(N, H), 0), shininess). Unlike a BSDF,
-            # this does not reflect Blender's HDRI or world environment.
-            exponent = max(1, min(128, preview.get('shininess', 50)))
-            power = scalar('ShaderNodeMath', 'POWER', positive.outputs[0], exponent)
-            power.name = 'Stage Specular Power'
             specular = preview.get('specularColor') or [.25, .25, .25, 1]
-            specular_linear = tuple(
-                c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4 for c in specular[:3]) + (1,)
             specular_color = nodes.new('ShaderNodeMixRGB')
             specular_color.name = 'Stage Specular Color'
             specular_color.blend_type = 'MULTIPLY'
             specular_color.inputs[0].default_value = 1
-            specular_color.inputs[1].default_value = specular_linear
-            links.new(power.outputs[0], specular_color.inputs[2])
+            specular_color.inputs[1].default_value = (*linear_color(specular), 1)
+            links.new(specular_light, specular_color.inputs[2])
             add = nodes.new('ShaderNodeMixRGB')
             add.name = 'Stage Specular Add'
             add.blend_type = 'ADD'
@@ -199,7 +392,6 @@ def configure_preview(material, preview, directory, stage):
             result = add.outputs[0]
         links.new(result, shader.inputs['Color'])
         geometry.location = (-900, -500)
-        camera_normal.location = (-700, -500)
         diffuse.location = (50, -150)
     links.new(shader.outputs[0], output.inputs['Surface'])
     warning = preview.get('warning')

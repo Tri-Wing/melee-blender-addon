@@ -25,6 +25,7 @@ with tempfile.TemporaryDirectory(prefix='mme-tint-') as tmp:
     assert entry['preview']['specularLighting'] and entry['preview']['diffuseLighting']
     assert [round(c*255) for c in entry['preview']['specularColor'][:3]] == [0,128,255]
     assert entry['preview']['shininess'] == 100
+    assert [round(c*255) for c in entry['preview']['ambientColor'][:3]] == [0,0,0]
     scene.import_session(bpy.context, tmp / 'session')
     s = bpy.context.scene
     material = modeling.target_object(s, info).active_material

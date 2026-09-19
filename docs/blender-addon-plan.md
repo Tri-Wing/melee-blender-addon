@@ -257,10 +257,15 @@ Melee Stage
     Group 001 [locked identity]
     ...
   Collision
+  Lights
+    Preview Light Set [Blender preview controls; unchanged on DAT export]
+    Other Light Sets [hidden, read-only]
   Reference
 ```
 
-The POC does not import deferred systems into the scene. There are no placeholder objects for particles, lights, or stage-specific data until their Blender representations are implemented.
+The initial POC did not import deferred systems. The current implementation now
+imports static LOBJ descriptor representations under Lights; particles and other
+stage-specific systems still have no placeholders.
 
 Each generated object has custom properties including:
 
@@ -669,7 +674,7 @@ Planned map-editor expansion areas include:
 - Joint, material, texture, and shape animation editing.
 - Dynamic collision and collision-to-model attachments.
 - General points, spawn points, camera and blast-zone controls, and stage parameters.
-- Cameras, lights, fog, splines, shadows, particles, and effects.
+- Cameras, editable/animated lights, fog, splines, shadows, particles, and effects.
 - Items, articles, audio references, and stage-specific parameter schemas.
 - Creating new stage archives from templates and, later, from an empty project.
 

@@ -304,14 +304,36 @@ materials, animated materials and read-only geometry. These entries use the same
 `mme_preview_model_id` rather than `mme_model_material_id`. No animation is
 evaluated: source base colors and the first supported UV0 texture are displayed.
 The preview also carries `diffuseLighting` and `specularLighting` from the MOBJ
-render flags, plus the material's `specularColor` and `shininess`. Blender uses
+render flags, plus the material's ambient/diffuse/specular colors and `shininess`. Blender uses
 an unlit emission shader when both flags are false. Lit previews evaluate
 normal/light diffuse and colored Blinn-Phong specular terms directly and feed
-the result to emission, avoiding Blender environment reflections. They use a
-fixed camera-relative preview light until stage LOBJ lights are imported.
+the result to emission, avoiding Blender environment reflections. Fresh sessions
+use the selected static LOBJ set; older sessions retain the fixed-light fallback.
 Unsupported coordinates fall back to the source diffuse color with a warning;
 additional texture layers are omitted with a warning. Preview images are hashed
 as session baseline files and packed into the Blender scene.
+
+### LOBJ lighting
+
+Top-level `lighting` contains `previewSetId`, `lightSets`, and an optional
+selection warning. Model-group sets come from each 0x34-byte map GOBJ descriptor;
+the `map-plit` set comes from the separate public root used for player lighting.
+Each set contains flattened LOBJ descriptors with type, raw flags, normalized
+RGBA, position/interest WOBJs, computed GX attenuation coefficients, original
+point/spot parameters, animation presence, and source offset. Lists and linked
+descriptors are bounds-checked and cycle-checked.
+
+Melee stage code, rather than the DAT, marks the model group whose lights become
+current. Extraction selects the only animated model-group set when exactly one
+exists, otherwise the first nonempty model-group set, and retains every set for
+inspection. The warning makes this heuristic explicit. Blender imports all sets
+and uses `previewSetId` for material nodes. The selected set's Blender objects
+drive the preview shader's direction/position, color, intensity, and enabled
+state. Infinite LOBJ vectors describe ray travel, so Blender maps them to a
+Sun's local `-Z` axis and negates them for the surface-to-light shading vector.
+These preview-control changes are excluded from DAT edits; descriptor
+defaults are exported unchanged. LOBJ/WOBJ animation evaluation and light export
+are deferred.
 
 ### Vertex colors
 

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import uuid
 import bpy
-from . import collision, modeling, surface
+from . import collision, lighting, modeling, surface
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, joint_matrices, mesh_pose
 
@@ -24,7 +24,9 @@ def collision_object(scene):
 
 
 def properties(item):
-    return {key: item[key] for key in item.keys() if key.startswith('mme_') and key != 'mme_dirty'}
+    preview_controls = {'mme_light_enabled', 'mme_light_intensity'}
+    return {key: item[key] for key in item.keys()
+            if key.startswith('mme_') and key != 'mme_dirty' and key not in preview_controls}
 
 
 def inventory(scene, editable_id=None):
@@ -43,10 +45,12 @@ def inventory(scene, editable_id=None):
         if o.mode == 'EDIT':
             o.update_from_editmode()
         row = {'props': properties(o), 'parent': o.parent.get('mme_id', o.parent.name) if o.parent else None,
-               'matrix': [list(r) for r in o.matrix_basis],
-               'parentInverse': [list(r) for r in o.matrix_parent_inverse],
                'collections': sorted(c.get('mme_id', c.name) for c in o.users_collection),
                'type': o.type, 'inScene': o.name in scene.objects}
+        if o.get('mme_role') != 'light':
+            # LOBJ transforms are preview controls until light export is implemented.
+            row['matrix'] = [list(r) for r in o.matrix_basis]
+            row['parentInverse'] = [list(r) for r in o.matrix_parent_inverse]
         if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
                 or (o.type == 'MESH' and o.data.shape_keys)):
             raise StageError(f'{o.name}: modifiers, constraints, shape keys and animation are not supported.')
@@ -104,7 +108,7 @@ def import_session(context, directory):
     local_matrices = {}
     nodes, joints, world = joint_matrices(groups, local_matrices)
     sid = uuid.uuid4().hex
-    created_objects, created_collections, created_meshes = [], [], []
+    created_objects, created_collections, created_meshes, created_data = [], [], [], []
     material = None
     source_materials = {}
 
@@ -124,10 +128,12 @@ def import_session(context, directory):
         root = collection('Melee Stage', scene.collection, 'stage', 'stage')
         models = collection('Models', root, 'models', 'models')
         collisions = collection('Collision', root, 'collisions', 'collisions')
+        lights = collection('Lights', root, 'lights', 'lights')
         collection('Reference', root, 'reference', 'reference')
+        light_objects = lighting.create(lights, stage, tag, created_objects, created_data, collection)
         material = bpy.data.materials.new('Melee Preview Grey')
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
-        source_materials = surface.create_materials(stage, directory)
+        source_materials = surface.create_materials(stage, directory, light_objects)
         scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
         objects = {}
         for entry, group in zip(stage['modelGroups'], groups):
@@ -237,6 +243,9 @@ def import_session(context, directory):
         for mesh in created_meshes:
             if mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
+        for data in created_data:
+            if data.users == 0:
+                bpy.data.lights.remove(data)
         for source_material in source_materials.values():
             if source_material.users == 0:
                 bpy.data.materials.remove(source_material)
