@@ -40,6 +40,40 @@ public class CollisionCompilerTests
     }
 
     [Theory]
+    [InlineData("floor", 2, 1)]
+    [InlineData("ceiling", -2, 1)]
+    [InlineData("right-wall", 1, -2)]
+    [InlineData("left-wall", 1, 2)]
+    public void EnforcesFacingForEachCategory(string category, float dx, float dy)
+    {
+        var (source, ids, edit) = Fixture();
+        for (int i = 0; i < edit.Vertices.Length; i++)
+            edit.Vertices[i] = edit.Vertices[i] with { X = i * dx, Y = i * dy };
+        for (int i = 0; i < edit.Lines.Length; i++)
+            edit.Lines[i] = edit.Lines[i] with { Category = category };
+        Assert.Equal(2, CollisionCompiler.Compile(source, ids, edit).Lines.Length);
+        for (int i = 0; i < edit.Lines.Length; i++)
+            edit.Lines[i] = edit.Lines[i] with { Vertex0Id = edit.Lines[i].Vertex1Id, Vertex1Id = edit.Lines[i].Vertex0Id };
+        Assert.Equal("COLLISION_FACING", Assert.Throws<StageException>(() => CollisionCompiler.Compile(source, ids, edit)).Code);
+    }
+
+    [Fact]
+    public void CeilingNeedsReversedEndpointsAndRebuiltLinks()
+    {
+        var (source, ids, edit) = Fixture();
+        for (int i = 0; i < edit.Lines.Length; i++)
+            edit.Lines[i] = edit.Lines[i] with { Category = "ceiling" };
+        Assert.Equal("COLLISION_FACING", Assert.Throws<StageException>(() => CollisionCompiler.Compile(source, ids, edit)).Code);
+        for (int i = 0; i < edit.Lines.Length; i++)
+            edit.Lines[i] = edit.Lines[i] with { Vertex0Id = edit.Lines[i].Vertex1Id, Vertex1Id = edit.Lines[i].Vertex0Id };
+        var result = CollisionCompiler.Compile(source, ids, edit);
+        Assert.Equal(2, result.Ranges[1].Count);
+        Assert.All(result.Lines, line => Assert.True(result.Vertices[line.Vertex0].X > result.Vertices[line.Vertex1].X));
+        Assert.Equal(1, result.Lines[0].Previous0);
+        Assert.Equal(0, result.Lines[1].Next0);
+    }
+
+    [Theory]
     [InlineData("dynamic", "COLLISION_DYNAMIC_READ_ONLY")]
     [InlineData("zero", "COLLISION_ZERO_LENGTH")]
     [InlineData("flags", "COLLISION_UNKNOWN_FLAGS")]

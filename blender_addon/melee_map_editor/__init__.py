@@ -8,9 +8,9 @@ import uuid
 from pathlib import Path
 import bmesh
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene
+from . import collision, scene, topology, materials, inspector
 from .protocol import StageError, read, run
 
 
@@ -160,15 +160,60 @@ class MME_OT_assign(bpy.types.Operator):
             layer = bm.edges.layers.int.get(key)
             if layer is None:
                 raise StageError('Collision attributes are missing. Undo the edit or re-import.')
+            if self.property == 'type':
+                collision.serialize(obj, read(scene.session(context.scene) / 'collision/collision.json'))
+                collision.assign_type(bm, selected, collision.CATEGORIES.index(context.scene.mme_collision_type))
             for e in selected:
-                if self.property == 'type':
-                    e[layer] = collision.CATEGORIES.index(context.scene.mme_collision_type)
-                elif self.property == 'material':
+                if self.property == 'material':
                     e[layer] = (e[layer] & 0xFF00) | context.scene.mme_collision_material
-                else:
+                elif self.property in ('drop', 'ledge'):
                     e[layer] ^= 0x100 if self.property == 'drop' else 0x200
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
             obj['mme_dirty'] = True
+        return execute_safely(self, context, action)
+
+
+class MME_OT_topology(bpy.types.Operator):
+    bl_idname = 'mme.collision_topology'
+    bl_label = 'Edit Collision Topology'
+    bl_options = {'REGISTER', 'UNDO'}
+    operation: EnumProperty(items=[(x, label, '') for x, label in (
+        ('split', 'Split Edge'), ('extend', 'Extend Collision'),
+        ('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))])
+    offset_x: FloatProperty(name='Offset X', default=10)
+    offset_z: FloatProperty(name='Offset Z', default=0)
+    joint: IntProperty(name='Joint for isolated vertices', default=1, min=1)
+
+    def invoke(self, context, event):
+        if self.operation in ('extend', 'connect'):
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
+
+    def draw(self, context):
+        if self.operation == 'extend':
+            self.layout.prop(self, 'offset_x')
+            self.layout.prop(self, 'offset_z')
+            self.layout.label(text='Inherits type, material and flags from the end edge.')
+        elif self.operation == 'connect':
+            self.layout.prop(context.scene, 'mme_collision_type')
+            materials.draw_surface(self.layout, context.scene)
+            self.layout.prop(self, 'joint')
+            self.layout.label(text='Connected endpoints retain their existing joint.')
+
+    def execute(self, context):
+        def action():
+            obj = scene.collision_object(context.scene)
+            if context.edit_object != obj:
+                raise StageError('Enter Collision Editing first.')
+            directory = scene.session(context.scene)
+            if not read(directory / 'stage.json')['capabilities']['collisionEdit']:
+                raise StageError('Collision is read-only for this stage.')
+            source = read(directory / 'collision/collision.json')
+            topology.edit(obj, source, self.operation, self.offset_x, self.offset_z,
+                          collision.CATEGORIES.index(context.scene.mme_collision_type),
+                          context.scene.mme_collision_material, self.joint)
+            obj['mme_dirty'] = True
+            context.scene.mme_status = 'Collision topology updated. Validate before exporting.'
         return execute_safely(self, context, action)
 
 
@@ -217,20 +262,29 @@ class MME_PT_stage(bpy.types.Panel):
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')
-        layout.label(text='Topology changes are not available yet.')
+        layout.label(text='Use these tools to create or reconnect edges.')
+        for left, right in ((('split', 'Split Edge'), ('extend', 'Extend Collision')),
+                            (('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))):
+            row = layout.row(align=True)
+            for action, label in (left, right):
+                row.operator('mme.collision_topology', text=label).operation = action
+        layout.label(text='Native vertex/edge deletion is supported.')
+        layout.label(text='Arrows show edge direction.')
         row = layout.row(align=True)
         row.prop(s, 'mme_collision_type', text='')
         row.operator('mme.assign_collision', text='Assign Type').property = 'type'
         row = layout.row(align=True)
-        row.prop(s, 'mme_collision_material')
+        materials.draw_surface(row, s)
         row.operator('mme.assign_collision', text='Assign').property = 'material'
         row = layout.row(align=True)
         row.operator('mme.assign_collision', text='Toggle Drop-through').property = 'drop'
         row.operator('mme.assign_collision', text='Toggle Ledge-grab').property = 'ledge'
-        layout.label(text='Floor: green / Ceiling: red')
+        layout.label(text='Solid floor: dark green')
+        layout.label(text='Drop-through floor: bright green')
+        layout.label(text='Ceiling: red')
         layout.label(text='Right wall: blue / Left wall: amber')
         layout.label(text='Dynamic: purple (read-only)')
-        layout.label(text='White mark: drop-through / ledge flag')
+        layout.label(text='White mark: ledge-grab flag')
         layout.operator('mme.validate_stage', icon='CHECKMARK')
         layout.operator('mme.export_stage', icon='EXPORT')
         if s.mme_export_directory:
@@ -239,6 +293,101 @@ class MME_PT_stage(bpy.types.Panel):
         import textwrap
         for line in textwrap.wrap(s.mme_status, width=38):
             box.label(text=line)
+
+
+class MME_PT_edge(bpy.types.Panel):
+    bl_label = 'Selected Edge Metadata'
+    bl_idname = 'MME_PT_edge'
+    bl_parent_id = 'MME_PT_stage'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Melee Map'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    @staticmethod
+    def details(context):
+        obj = scene.collision_object(context.scene)
+        if context.edit_object != obj:
+            raise StageError('Enter Collision Editing and select an edge.')
+        return inspector.describe(obj, inspector.source(scene.session(context.scene)))
+
+    def draw(self, context):
+        layout = self.layout
+        try:
+            info = self.details(context)
+        except (StageError, OSError, ValueError, KeyError) as exc:
+            import textwrap
+            for line in textwrap.wrap(str(exc), 38):
+                layout.label(text=line)
+            return
+        layout.label(text=f"Edge {info['handle']}" + (f" (active of {info['selected']})" if info['selected'] > 1 else ''))
+        layout.label(text='Type: ' + info['category'].replace('-', ' ').title())
+        layout.label(text=f"Surface: {info['surfaceName']} ({info['surface']})")
+        drop = 'On' if info['drop'] else 'Off'
+        layout.label(text='Drop-through: ' + drop + (' (floor only)' if info['category'] != 'floor' else ''))
+        layout.label(text='Ledge-grab flag: ' + ('On' if info['ledge'] else 'Off'))
+        layout.label(text='Disabled / empty: ' + ('Yes' if info['disabled'] else 'No'))
+        layout.label(text=f"Collision joint: {info['joint']}")
+        layout.label(text=f"Direction: vertex {info['start']} → {info['end']}")
+        layout.label(text=f"Length: {info['length']:.4f} game units")
+        layout.label(text='Endpoints (game X, Y):')
+        for label, key in (('Start', 'startPosition'), ('End', 'endPosition')):
+            x, depth, y = info[key]
+            layout.label(text=f'{label}: ({x:.4f}, {y:.4f})')
+            if abs(depth) > 0.00001:
+                layout.label(text=f'Off collision plane: Blender Y = {depth:.4f}', icon='ERROR')
+        for label, key in (('At start', 'start'), ('At end', 'end')):
+            neighbors = ', '.join(map(str, info['adjacent'][key])) or 'none'
+            layout.label(text=f'{label}: adjacent edges {neighbors}')
+        baseline = info['baseline']
+        layout.label(text=f"Original line index: {baseline['sourceIndex']} (zero-based)" if baseline else 'New edge (no original line index)')
+        layout.label(text='Read-only display of actual edge values.')
+
+
+class MME_PT_edge_raw(bpy.types.Panel):
+    bl_label = 'Raw Flags and Source Metadata'
+    bl_idname = 'MME_PT_edge_raw'
+    bl_parent_id = 'MME_PT_edge'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Melee Map'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        try:
+            info = MME_PT_edge.details(context)
+        except (StageError, OSError, ValueError, KeyError):
+            layout.label(text='Select a valid collision edge.')
+            return
+        layout.label(text=f"Stored high flags: 0x{info['high']:04X}")
+        layout.label(text=f"Low flags: 0x{info['low']:04X}")
+        if info['exportHigh'] is not None:
+            layout.label(text=f"Export high flags: 0x{info['exportHigh']:04X}")
+        layout.label(text=f"Unknown high bits: 0x{info['high'] & ~0x8F:04X}")
+        layout.label(text=f"Unknown property bits: 0x{info['low'] & 0xFC00:04X}")
+        for label, key in (('Edge UUID', 'id'), ('Joint UUID', 'jointId'),
+                           ('Start vertex UUID', 'startId'), ('End vertex UUID', 'endId')):
+            layout.label(text=label + ':')
+            layout.label(text=info[key])
+        for label, key in (('Start Blender XYZ', 'startPosition'), ('End Blender XYZ', 'endPosition')):
+            layout.label(text=label + ':')
+            layout.label(text=', '.join(f'{v:.4f}' for v in info[key]))
+        if info['baseline']:
+            record = info['baseline']['source']
+            layout.separator()
+            layout.label(text='Original source records (before edits):')
+            layout.label(text=f"Flags: 0x{record['highFlags']:04X} / 0x{record['lowFlags']:04X}")
+            layout.label(text=f"Vertex indices: {record['vertex0']} → {record['vertex1']}")
+            for label, key in (('Previous', 'previous0'), ('Next', 'next0'),
+                               ('Alternate previous', 'previous1'), ('Alternate next', 'next1')):
+                layout.label(text=f'{label}: {record[key]}')
+            layout.label(text='Source indices are zero-based; -1 = none.')
+            layout.label(text='Export rebuilds links from edited topology.')
 
 
 _draw_handle = None
@@ -255,33 +404,57 @@ def draw_collision():
         obj = scene.collision_object(context.scene)
         if not obj.visible_get():
             return
-        batches = [[] for _ in collision.CATEGORIES]
+        batches = {}
         markers = []
+
+        def directed_line(points):
+            from mathutils import Vector
+            a, b = points
+            delta = b - a
+            if delta.length < 0.00001:
+                return points
+            direction = delta.normalized()
+            side = Vector((-direction.z, 0, direction.x))
+            size = min(1.2, delta.length * 0.2)
+            tip = a + delta * 0.65
+            base = tip - direction * size
+            return [a, b, tip, base + side * size * 0.5, tip, base - side * size * 0.5]
+
         if obj.mode == 'EDIT':
             bm = bmesh.from_edit_mesh(obj.data)
             layer = bm.edges.layers.int.get('mme_category')
             low = bm.edges.layers.int.get('mme_low')
-            if layer is None or low is None:
+            vertex = bm.verts.layers.int.get('mme_vertex')
+            start = bm.edges.layers.int.get('mme_start')
+            if layer is None or low is None or vertex is None or start is None:
                 return
             for edge in bm.edges:
                 if edge.hide:
                     continue
                 category = edge[layer]
-                if 0 <= category < len(batches):
+                if 0 <= category < len(collision.CATEGORIES):
                     points = [obj.matrix_world @ v.co for v in edge.verts]
-                    batches[category].extend(points)
-                    if edge[low] & 0x300:
+                    if edge.verts[0][vertex] != edge[start]:
+                        points.reverse()
+                    color = collision.overlay_color(category, edge[low])
+                    batches.setdefault(color, []).extend(directed_line(points))
+                    if edge[low] & 0x200:
                         markers.append((points[0] + points[1]) * 0.5)
         else:
             attr = obj.data.attributes.get('mme_category')
             low = obj.data.attributes.get('mme_low')
-            if attr is None or low is None:
+            vertex = obj.data.attributes.get('mme_vertex')
+            start = obj.data.attributes.get('mme_start')
+            if attr is None or low is None or vertex is None or start is None:
                 return
             for edge, value, flags in zip(obj.data.edges, attr.data, low.data):
-                if 0 <= value.value < len(batches):
+                if 0 <= value.value < len(collision.CATEGORIES):
                     points = [obj.matrix_world @ obj.data.vertices[i].co for i in edge.vertices]
-                    batches[value.value].extend(points)
-                    if flags.value & 0x300:
+                    if vertex.data[edge.vertices[0]].value != start.data[edge.index].value:
+                        points.reverse()
+                    color = collision.overlay_color(value.value, flags.value)
+                    batches.setdefault(color, []).extend(directed_line(points))
+                    if flags.value & 0x200:
                         markers.append((points[0] + points[1]) * 0.5)
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
         depth = gpu.state.depth_test_get()
@@ -290,11 +463,11 @@ def draw_collision():
             gpu.state.depth_test_set('NONE')
             gpu.state.line_width_set(2)
             shader.bind()
-            for coords, color in zip(batches, collision.COLORS):
+            for color, coords in batches.items():
                 if coords:
                     shader.uniform_float('color', color)
                     batch_for_shader(shader, 'LINES', {'pos': coords}).draw(shader)
-            # White crosses indicate lines with drop-through or ledge flags.
+            # White crosses indicate ledge-grab flags; floor color shows drop-through.
             if markers:
                 from mathutils import Vector
                 coords = []
@@ -325,9 +498,9 @@ def update_dirty(scene_arg, depsgraph):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_assign, MME_OT_open_export, MME_PT_stage)
+           MME_OT_edit_collision, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
-               'mme_collision_type', 'mme_collision_material')
+               'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 
 
 def register():
@@ -340,7 +513,10 @@ def register():
     bpy.types.Scene.mme_export_directory = StringProperty(subtype='DIR_PATH')
     bpy.types.Scene.mme_collision_type = EnumProperty(name='Type', items=[
         (x, x.replace('-', ' ').title(), '') for x in collision.CATEGORIES[:-1]])
-    bpy.types.Scene.mme_collision_material = IntProperty(name='Material ID', min=0, max=255)
+    bpy.types.Scene.mme_collision_material = IntProperty(name='Surface ID', min=0, max=255)
+    bpy.types.Scene.mme_collision_surface = EnumProperty(name='Surface',
+        description='Collision surface response (friction and contact effects)',
+        items=materials.ITEMS, get=materials.get_surface, set=materials.set_surface)
     bpy.app.handlers.depsgraph_update_post.append(update_dirty)
     if not bpy.app.background:
         _draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_collision, (), 'WINDOW', 'POST_VIEW')

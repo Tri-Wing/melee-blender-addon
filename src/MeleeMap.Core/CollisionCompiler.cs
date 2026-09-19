@@ -83,6 +83,21 @@ public static class CollisionCompiler
             -1, -1, -1, -1, (ushort)((l.HighFlags & ~15) | (1 << Array.IndexOf(Categories, l.Category))), l.LowFlags)).ToArray();
         for (int i = 0; i < lines.Length; i++)
             Require(vertices[lines[i].Vertex0] != vertices[lines[i].Vertex1], "COLLISION_ZERO_LENGTH", $"Line {sorted[i].Id} has coincident endpoints after welding.");
+        // mplib.c: mpLineIntersectionH and the Floor/Ceiling/Wall lookup
+        // routines require endpoints ordered for the requested collision side.
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var a = vertices[lines[i].Vertex0]; var b = vertices[lines[i].Vertex1];
+            bool facing = sorted[i].Category switch
+            {
+                "floor" => b.X > a.X,
+                "ceiling" => b.X < a.X,
+                "right-wall" => b.Y < a.Y,
+                "left-wall" => b.Y > a.Y,
+                _ => false
+            };
+            Require(facing, "COLLISION_FACING", $"Line {sorted[i].Id} direction does not match {sorted[i].Category}. Floors must run left-to-right, ceilings right-to-left, right walls downward, and left walls upward. Reassign the collision type to orient endpoints; vertical floors/ceilings and horizontal walls are invalid.");
+        }
         var incident = new Dictionary<int, List<int>>();
         for (int i = 0; i < lines.Length; i++)
             foreach (int v in new[] { lines[i].Vertex0, lines[i].Vertex1 })

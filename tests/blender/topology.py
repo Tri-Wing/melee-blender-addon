@@ -1,0 +1,159 @@
+"""Run with Blender 4.5.0 --background --factory-startup --python-exit-code 1."""
+import os
+from pathlib import Path
+import sys
+import tempfile
+import bpy
+import bmesh
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'blender_addon'))
+from melee_map_editor import scene, collision, topology
+from melee_map_editor.protocol import read, run, StageError
+CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
+CORPUS = Path(os.environ.get('MELEEMAP_CORPUS', ROOT / 'example_assets'))
+bpy.ops.preferences.addon_enable(module='melee_map_editor')
+bpy.context.preferences.addons['melee_map_editor'].preferences.cli_path = str(CLI)
+
+
+def select(obj, vertices=(), edges=()):
+    bm = bmesh.from_edit_mesh(obj.data)
+    for v in bm.verts:
+        v.select_set(False)
+    for e in bm.edges:
+        e.select_set(False)
+    vh = bm.verts.layers.int['mme_vertex']
+    eh = bm.edges.layers.int['mme_line']
+    for v in bm.verts:
+        if v[vh] in vertices:
+            v.select_set(True)
+    for e in bm.edges:
+        if e[eh] in edges:
+            e.select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+
+with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
+    tmp = Path(tmp)
+    run(CLI, 'dotnet', 'extract', CORPUS / 'GrNLa.dat', '--session', tmp / 'session')
+    obj = scene.import_session(bpy.context, tmp / 'session')
+    source = read(tmp / 'session/collision/collision.json')
+    s = bpy.context.scene
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    original = collision.serialize(obj, source)
+    # Invalid selections are rejected before touching geometry or metadata.
+    for operation, vertices, edges in [('extend', (), (1,)), ('connect', (1, 2), ())]:
+        select(obj, vertices=vertices, edges=edges)
+        try:
+            topology.edit(obj, source, operation)
+        except StageError:
+            pass
+        else:
+            raise AssertionError('Expected invalid selection rejection')
+        assert collision.serialize(obj, source) == original
+    select(obj, edges=(1,))
+    bpy.ops.ed.undo_push(message='Before collision split')
+    assert bpy.ops.mme.collision_topology(operation='split') == {'FINISHED'}
+    split = scene.prepare(s)[1]
+    assert len(split['vertices']) == len(split['lines']) == 17
+    bpy.ops.ed.undo_push(message='After collision split')
+    bpy.ops.ed.undo()
+    obj = scene.collision_object(bpy.context.scene)
+    assert collision.serialize(obj, source) == original
+    bpy.ops.ed.redo()
+    s = bpy.context.scene
+    obj = scene.collision_object(s)
+    assert collision.serialize(obj, source) == split
+    new_id = collision.identity(source, 'lines', 17)
+    new = next(e for e in split['lines'] if e['id'] == new_id)
+    old = next(e for e in split['lines'] if e['id'] == source['lines'][0]['id'])
+    assert old['vertex1Id'] == new['vertex0Id']
+    assert new['vertex1Id'] == source['lines'][0]['vertex1Id']
+    assert new['lowFlags'] == old['lowFlags'] == source['lines'][0]['lowFlags']
+    assert new['jointId'] == old['jointId']
+    scene.apply(s, CLI, 'dotnet', tmp / 'split.dat')
+    run(CLI, 'dotnet', 'extract', tmp / 'split.dat', '--session', tmp / 'split-session')
+    assert len(read(tmp / 'split-session/collision/collision.json')['lines']) == 17
+    # Reverse an entire closed chain; reversing it twice restores identical edit input.
+    select(obj, edges=range(1, 18))
+    bpy.ops.mme.collision_topology(operation='reverse')
+    try:
+        scene.validate(s, CLI, 'dotnet')
+    except StageError as exc:
+        assert 'COLLISION_FACING' in str(exc)
+    else:
+        raise AssertionError('Reversed edges with unchanged categories must fail')
+    reversed_lines = collision.serialize(obj, source)['lines']
+    previous = {e['id']: e for e in split['lines']}
+    for edge in reversed_lines:
+        assert edge['vertex0Id'] == previous[edge['id']]['vertex1Id']
+    bpy.ops.mme.collision_topology(operation='reverse')
+    assert collision.serialize(obj, source) == split
+    # Native edge deletion, then reconnect the gap with explicit settings.
+    select(obj, edges=(1,))
+    bpy.ops.mesh.delete(type='EDGE')
+    deleted = scene.prepare(s)[1]
+    assert len(deleted['lines']) == 16
+    scene.validate(s, CLI, 'dotnet')
+    start = next(i+1 for i, v in enumerate(source['vertices']) if v['id'] == source['lines'][0]['vertex0Id'])
+    select(obj, vertices=(start, 17))
+    s.mme_collision_type = 'floor'
+    s.mme_collision_material = 7
+    bpy.ops.mme.collision_topology(operation='connect')
+    connected = scene.prepare(s)[1]
+    assert len(connected['lines']) == 17
+    added = next(e for e in connected['lines'] if e['id'] not in {x['id'] for x in deleted['lines']})
+    assert added['category'] == 'floor' and added['lowFlags'] == 7
+    scene.validate(s, CLI, 'dotnet')
+    # Reopen the gap and extend one terminal, selecting only the new vertex afterward.
+    bm = bmesh.from_edit_mesh(obj.data)
+    handle = next(e[bm.edges.layers.int['mme_line']] for e in bm.edges
+                  if collision.identity(source, 'lines', e[bm.edges.layers.int['mme_line']]) == added['id'])
+    select(obj, edges=(handle,))
+    bpy.ops.mesh.delete(type='EDGE')
+    select(obj, vertices=(start,))
+    bpy.ops.mme.collision_topology(operation='extend', offset_x=0, offset_z=20)
+    extended = scene.prepare(s)[1]
+    assert len(extended['lines']) == 17 and len(extended['vertices']) == 18
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert sum(v.select for v in bm.verts) == 1
+    scene.apply(s, CLI, 'dotnet', tmp / 'extended.dat')
+    # IDs survive saving/loading .blend and the session baseline remains intact.
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.wm.save_as_mainfile(filepath=str(tmp / 'topology.blend'))
+    bpy.ops.wm.open_mainfile(filepath=str(tmp / 'topology.blend'))
+    s = bpy.context.scene
+    obj = scene.collision_object(s)
+    assert scene.prepare(s)[1] == extended
+    scene.validate(s, CLI, 'dotnet')
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    # Native deletion of the new terminal removes its edge and vertex cleanly.
+    select(obj, vertices=(18,))
+    bpy.ops.mesh.delete(type='VERT')
+    assert len(scene.prepare(s)[1]['lines']) == 16
+    scene.validate(s, CLI, 'dotnet')
+    # Reversing one segment of a connected chain must fail export, then recover.
+    select(obj, edges=(2,))
+    bpy.ops.mme.collision_topology(operation='reverse')
+    try:
+        scene.validate(s, CLI, 'dotnet')
+    except StageError as exc:
+        assert 'COLLISION_ORIENTATION' in str(exc) or 'COLLISION_FACING' in str(exc)
+    else:
+        raise AssertionError('Expected incompatible direction rejection')
+    bpy.ops.mme.collision_topology(operation='reverse')
+    scene.validate(s, CLI, 'dotnet')
+    # Unsupported native subdivision must not silently duplicate identities.
+    select(obj, edges=(2,))
+    bpy.ops.mesh.subdivide(number_cuts=1)
+    try:
+        scene.prepare(s)
+    except StageError as exc:
+        assert 'native topology' in str(exc), str(exc)
+    else:
+        raise AssertionError('Native subdivision should be rejected')
+print('BLENDER_TOPOLOGY_OK: split, reverse, native deletion, connect, extend, save/load, exports, metadata guard')

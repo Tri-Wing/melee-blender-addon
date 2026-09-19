@@ -139,7 +139,16 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     bm.edges[0].select_set(True)
     original_low = bm.edges[0][bm.edges.layers.int['mme_low']]
     selected_id = read(directory / 'collision/collision.json')['lines'][bm.edges[0][bm.edges.layers.int['mme_line']]-1]['id']
-    s.mme_collision_material = 7
+    # Named selection shares the original integer storage, including old .blend values.
+    s.mme_collision_material = 15
+    assert s.mme_collision_surface == 'SURFACE_15'
+    s.mme_collision_surface = 'SURFACE_7'
+    assert s.mme_collision_material == 7
+    s.mme_collision_material = 211
+    assert s.mme_collision_surface == 'CUSTOM'
+    s.mme_collision_surface = 'CUSTOM'
+    assert s.mme_collision_material == 211
+    s.mme_collision_surface = 'SURFACE_7'
     assert bpy.ops.mme.assign_collision(property='material') == {'FINISHED'}
     assert bpy.ops.mme.assign_collision(property='drop') == {'FINISHED'}
     assert bpy.ops.mme.assign_collision(property='ledge') == {'FINISHED'}
@@ -178,6 +187,7 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     bpy.ops.wm.open_mainfile(filepath=str(tmp / 'edited.blend'))
     s = bpy.context.scene
     assert scene.prepare(s)[1] == expected
+    assert s.mme_collision_surface == 'SURFACE_7' and s.mme_collision_material == 7
     scene.apply(s, CLI, 'dotnet', tmp / 'after-load.dat')
     scene.validate(s, CLI, 'dotnet')
     # Existing exports are replaced after validation.
