@@ -35,7 +35,13 @@ public class CorpusTests
                     var inventory = archive.Inspect();
                     Assert.NotEmpty(inventory.Roots);
                     archive.Validate();
-                    archive.Roundtrip(Path.Combine(output, Path.GetFileName(file)), compare: true);
+                    var identities = new ModelIdentityCatalog();
+                    var before = ModelIdentity.Capture(archive.Layout, identities);
+                    string saved = Path.Combine(output, Path.GetFileName(file));
+                    archive.Roundtrip(saved, compare: true);
+                    // No-edit preservation retains descriptor offsets; edited/relocated archives
+                    // must provide an explicit catalog relocation mapping instead.
+                    before.RequireUnchanged(ModelIdentity.Capture(new StageArchive(saved).Layout, identities));
                 }
                 catch (Exception e) { failures.Add($"{Path.GetFileName(file)}: {e.Message}"); }
             }

@@ -27,7 +27,7 @@ public static class Cli
             var stage = new StageArchive(args[1]);
             object data;
             if (command == "inspect") data = stage.Inspect();
-            else if (command == "validate") { stage.Validate(); data = new { valid = true, validationTier = "archive-and-collision-indices" }; }
+            else if (command == "validate") { stage.Validate(); data = new { valid = true, validationTier = "archive-model-hierarchy-and-collision-indices" }; }
             else { stage.Roundtrip(output!, compare); data = new { output = Path.GetFullPath(output!), compared = compare }; }
             stdout.WriteLine(JsonSerializer.Serialize(new { protocolVersion = 1, ok = true, command, data }, Json));
             return 0;

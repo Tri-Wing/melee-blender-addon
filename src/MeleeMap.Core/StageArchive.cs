@@ -50,12 +50,13 @@ public sealed class StageArchive
         return count;
     }
 
-    /// <summary>Initial validation tier: archive bounds, required roots, counted buffers, collision indices/ranges.</summary>
+    /// <summary>Initial validation tier: archive bounds, model hierarchy/lists, counted buffers, collision indices/ranges.</summary>
     public void Validate()
     {
         foreach (var name in new[] { "map_head", "coll_data", "grGroundParam" })
             Require(File[name] != null, "STAGE_ROOT_MISSING", $"Required stage root '{name}' is missing.");
         var info = Inspect();
+        ModelIdentity.Capture(Layout, new ModelIdentityCatalog());
         int c = Layout.Roots.Single(r => r.Name == "coll_data").Offset;
         // Retail archives commonly serialize 0x2C bytes; the decomp's x2C field is inferred.
         int vertices = info.Collision!.Vertices, lines = info.Collision.Lines;
