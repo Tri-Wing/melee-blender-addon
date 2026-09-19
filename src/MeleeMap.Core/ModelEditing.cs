@@ -1,0 +1,110 @@
+using System.Text.Json.Serialization;
+using MeleeMap.Core.Gx;
+using static MeleeMap.Core.ArchiveLayout;
+
+namespace MeleeMap.Core;
+
+public sealed record ModelEdit([property: JsonRequired] string Id,
+    [property: JsonRequired] Vector3Data[] Positions, [property: JsonRequired] int[] TriangleIndices);
+public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
+    [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes);
+public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
+    int PobjIndex, int PobjOffset, int DobjOffset);
+
+/// <summary>One structurally eligible, rigid, opaque POBJ per archive for the first model-edit milestone.</summary>
+public static class ModelEditing
+{
+    public const int MaxTriangles = 14000;
+
+    public static EditableModel? Select(ArchiveLayout archive, ModelIdentitySnapshot identity)
+    {
+        var r = new ArchiveDataReader(archive); var nodes = identity.Nodes;
+        var byId = nodes.GroupBy(n => n.Id).ToDictionary(g => g.Key, g => g.First());
+        foreach (var p in nodes.Where(n => n.Kind == "pobj"))
+        {
+            var d = byId[p.OwnerId!]; var j = byId[d.OwnerId!];
+            var group = nodes.First(n => n.GroupIndex == p.GroupIndex && n.Kind is "group" or "sentinel-group");
+            if (group.Kind != "group" || j.Kind != "jobj" || p.Index != 0
+                || nodes.Count(n => n.OwnerId == d.Id && n.Kind == "pobj") != 1
+                || nodes.Count(n => n.SourceOffset == p.SourceOffset && n.Kind == "pobj") != 1
+                || nodes.Count(n => n.SourceOffset == d.SourceOffset && n.Kind == "dobj") != 1) continue;
+            try
+            {
+                // Custom classes, bindings, shape animation and translucent materials
+                // need dedicated writers. Joint animation is retained without edits.
+                int? material = r.Pointer(d.SourceOffset + 8);
+                if (material == null || r.Pointer(p.SourceOffset) != null || r.Pointer(d.SourceOffset) != null
+                    || r.Pointer(material.Value) != null || r.Int(material.Value + 4) != 1
+                    || r.Pointer(material.Value + 8) != null || r.Pointer(material.Value + 20) != null
+                    || r.Pointer(p.SourceOffset + 20) != null || (r.UShort(p.SourceOffset + 12) & ~0xC001) != 0
+                    || r.Pointer(group.SourceOffset + 12) != null
+                    || (r.Int(j.SourceOffset + 4) & (16 | 0x20000 | 0x1000 | 0xE00)) != 0) continue;
+                if (archive.Pointers.Count(x => x.Value == p.SourceOffset) != 1
+                    || !archive.Pointers.TryGetValue(d.SourceOffset + 12, out int target) || target != p.SourceOffset
+                    || archive.Pointers.Count(x => x.Value == d.SourceOffset) != 1) continue;
+                bool HasInteriorReference(int start, int size) => archive.Pointers.Values.Any(x => x > start && x < start + size)
+                    || archive.Roots.Concat(archive.References).Any(x => x.Offset >= start && x.Offset < start + size);
+                if (HasInteriorReference(p.SourceOffset, 24) || HasInteriorReference(d.SourceOffset, 16)) continue;
+                if (HasMaterialAnimation(group, j, d.Index)) continue;
+                var mesh = GxMeshDecoder.Decode(archive, p.SourceOffset);
+                if (mesh.Envelopes != null || mesh.BoundJobjSourceOffset != null) continue;
+                return new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset);
+            }
+            catch (StageException) { /* An uncertain preview target stays read-only. */ }
+        }
+        return null;
+
+        bool HasMaterialAnimation(ModelIdentityNode group, ModelIdentityNode joint, int dobjIndex)
+        {
+            var path = new List<ModelIdentityNode>(); var cursor = joint;
+            while (cursor.OwnerId != group.Id) { path.Add(cursor); cursor = byId[cursor.OwnerId!]; }
+            if (cursor.Index != 0) return true;
+            path.Reverse();
+            int? array = r.Pointer(group.SourceOffset + 8);
+            if (array == null) return false;
+            for (int field = array.Value; ; field += 4)
+            {
+                int? animation = r.Pointer(field);
+                if (animation == null) return false;
+                foreach (var node in path)
+                {
+                    int sibling = nodes.Where(n => n.OwnerId == node.OwnerId && n.Kind.EndsWith("jobj"))
+                        .OrderBy(n => n.Index).TakeWhile(n => n.Id != node.Id).Count();
+                    animation = animation.HasValue ? r.Pointer(animation.Value) : null;
+                    for (int i = 0; i < sibling && animation.HasValue; i++) animation = r.Pointer(animation.Value + 4);
+                }
+                int? mat = animation.HasValue ? r.Pointer(animation.Value + 8) : null;
+                for (int i = 0; i < dobjIndex && mat.HasValue; i++) mat = r.Pointer(mat.Value);
+                if (mat.HasValue && (r.Pointer(mat.Value + 4) != null || r.Pointer(mat.Value + 8) != null || r.Int(mat.Value + 12) != 0)) return true;
+            }
+        }
+    }
+
+    public static MeshData Compile(ModelEdits edits, EditableModel target)
+    {
+        Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.CoordinateSpace == "game-joint-local",
+            "MODEL_EDIT_VERSION", "Model edits must use the current protocol and game-joint-local coordinates.");
+        Require(edits.Meshes is { Length: 1 } && edits.Meshes[0] != null && edits.Meshes[0].Id == target.Id,
+            "MODEL_EDIT_TARGET", "Only the session's designated rigid mesh can be edited in this version.");
+        var edit = edits.Meshes[0];
+        Require(edit.Positions is { Length: > 0 and <= 65535 } && edit.TriangleIndices is { Length: > 0 }
+            && edit.TriangleIndices.Length % 3 == 0 && edit.TriangleIndices.Length <= MaxTriangles * 3,
+            "MODEL_EDIT_COUNT", $"Model edits require vertices and triangles (at most 65535 vertices and {MaxTriangles} triangles).");
+        Require(edit.Positions.All(v => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z)), "MODEL_NONFINITE", "Model positions must be finite.");
+        Require(edit.TriangleIndices.All(i => i >= 0 && i < edit.Positions.Length), "MODEL_INDEX", "Model triangle index is out of bounds.");
+        var positions = new List<Vector3Data>(); var normals = new List<Vector3Data>();
+        for (int i = 0; i < edit.TriangleIndices.Length; i += 3)
+        {
+            var a = edit.Positions[edit.TriangleIndices[i]]; var b = edit.Positions[edit.TriangleIndices[i + 1]]; var c = edit.Positions[edit.TriangleIndices[i + 2]];
+            double ux = (double)b.X - a.X, uy = (double)b.Y - a.Y, uz = (double)b.Z - a.Z;
+            double vx = (double)c.X - a.X, vy = (double)c.Y - a.Y, vz = (double)c.Z - a.Z;
+            double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            double length = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (length == 0) continue; // GX strips commonly contain deliberate degenerate triangles.
+            var normal = new Vector3Data((float)(nx / length), (float)(ny / length), (float)(nz / length));
+            positions.AddRange([a, b, c]); normals.AddRange([normal, normal, normal]);
+        }
+        Require(positions.Count > 0, "MODEL_EMPTY", "The replacement model has no nondegenerate triangles.");
+        return new(positions.ToArray(), normals.ToArray(), Enumerable.Range(0, positions.Count).ToArray());
+    }
+}

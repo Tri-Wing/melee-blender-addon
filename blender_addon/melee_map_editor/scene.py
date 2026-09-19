@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import uuid
 import bpy
-from . import collision
+from . import collision, modeling
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, joint_matrices, mesh_pose
 
@@ -27,7 +27,7 @@ def properties(item):
     return {key: item[key] for key in item.keys() if key.startswith('mme_') and key != 'mme_dirty'}
 
 
-def inventory(scene):
+def inventory(scene, editable_id=None):
     sid = scene.mme_session_id
     collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid]
@@ -49,7 +49,11 @@ def inventory(scene):
         if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
                 or (o.type == 'MESH' and o.data.shape_keys)):
             raise StageError(f'{o.name}: modifiers, constraints, shape keys and animation are not supported.')
-        if o.type == 'MESH' and o.get('mme_role') != 'collision':
+        if o.type == 'MESH' and o.get('mme_id') == editable_id:
+            # Native Join brings material slots along with geometry. The model
+            # writer emits one grey material, so these slots are not protected.
+            pass
+        elif o.type == 'MESH' and o.get('mme_role') != 'collision':
             row['geometry'] = digest({'vertices': [list(v.co) for v in o.data.vertices],
                 'edges': [list(e.vertices) for e in o.data.edges],
                 'faces': [list(p.vertices) for p in o.data.polygons],
@@ -60,6 +64,28 @@ def inventory(scene):
     for key in result:
         result[key].sort(key=lambda r: r['props']['mme_id'])
     return result
+
+
+def protected_inventory_matches(scene, editable_id):
+    current = inventory(scene, editable_id)
+    expected = scene.get('mme_guard')
+    if digest(current) == expected:
+        return True
+    # Older .blend files included the target's material slots in their guard.
+    # All imported previews share one material. Try the surviving preview slot
+    # lists against the OLD hash; never rebaseline hierarchy or other geometry.
+    target = next((row for row in current['objects']
+                   if row['props']['mme_id'] == editable_id), None)
+    if target is not None:
+        candidates = {tuple(m.name if m else None for m in obj.data.materials)
+                      for obj in scene.objects if obj.type == 'MESH'
+                      and obj.get('mme_session_id') == scene.mme_session_id
+                      and obj.get('mme_role') == 'pobj'}
+        for materials in candidates:
+            target['editableMaterials'] = list(materials)
+            if digest(current) == expected:
+                return True
+    return False
 
 
 def import_session(context, directory):
@@ -153,7 +179,13 @@ def import_session(context, directory):
         scene.mme_session = str(directory)
         scene.mme_session_id = sid
         context.view_layer.update()
-        scene['mme_guard'] = digest(inventory(scene))
+        editable = stage.get('editableMesh')
+        scene['mme_editable_mesh'] = json.dumps(editable)
+        if editable:
+            target = modeling.target_object(scene)
+            target.name = f"Editable Model - Group {editable['groupIndex']:03d} JOBJ {editable['jobjIndex']:03d} DOBJ {editable['dobjIndex']:03d}"
+            scene['mme_model_baseline'] = modeling.fingerprint(target)
+        scene['mme_guard'] = digest(inventory(scene, editable['id'] if editable else None))
         scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
         scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
@@ -179,7 +211,8 @@ def import_session(context, directory):
 def prepare(scene):
     directory = session(scene)
     stage = load_session(directory)
-    if digest(inventory(scene)) != scene.get('mme_guard'):
+    editable = modeling.target_info(scene)
+    if not protected_inventory_matches(scene, editable['id'] if editable else None):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
     obj = collision_object(scene)
@@ -188,22 +221,28 @@ def prepare(scene):
     obj['mme_dirty'] = dirty
     if dirty and not stage['capabilities']['collisionEdit']:
         raise StageError('This stage has read-only collision (dynamic attachments or source warnings). Undo collision changes.')
+    modeling.edits(scene, stage)
     return directory, edits if dirty else None
 
 
 def apply(scene, cli, dotnet, output):
     directory, edits = prepare(scene)
-    target = directory / 'edits/collision.json'
+    model_edits = modeling.edits(scene, load_session(directory))
+    payloads = {}
+    if edits is not None:
+        payloads[directory / 'edits/collision.json'] = edits
+    if model_edits is not None:
+        payloads[directory / 'edits/models.json'] = model_edits
     # Edits are temporary process input; the .blend is the authoritative edited scene.
     if (directory / 'edits').exists() and any((directory / 'edits').iterdir()):
         raise StageError('Session has external pending edits. Use a fresh import to avoid mixing edits.')
     try:
-        if edits is not None:
+        for target, payload in payloads.items():
             target.parent.mkdir(exist_ok=True)
-            target.write_text(json.dumps(edits, allow_nan=False), encoding='utf-8')
+            target.write_text(json.dumps(payload, allow_nan=False), encoding='utf-8')
         return run(cli, dotnet, 'apply', directory, '--output', output)
     finally:
-        if edits is not None:
+        for target in payloads:
             target.unlink(missing_ok=True)
 
 

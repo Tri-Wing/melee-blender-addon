@@ -1,11 +1,12 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MeleeMap.Core.Gx;
 using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices, int CollisionLines);
+public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices, int CollisionLines, bool ModelChanged, int? ModelTriangles);
 
 public static class SessionApplier
 {
@@ -70,8 +71,9 @@ public static class SessionApplier
         }
         var ids = new CollisionSourceIds(SourceIds("vertices", collision.Vertices.Length), SourceIds("lines", collision.Lines.Length), SourceIds("joints", collision.Joints.Length));
         string editPath = Path.Combine(directory, "edits/collision.json");
+        string modelPath = Path.Combine(directory, "edits/models.json");
         foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
-            Require(edit == editPath, "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
+            Require(edit == editPath || edit == modelPath, "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
         if (changed)
@@ -80,6 +82,19 @@ public static class SessionApplier
             Require(edits != null, "COLLISION_EDIT_FORMAT", "Empty collision edit document.");
             collision = CollisionCompiler.Compile(collision, ids, edits!);
             bytes = CollisionArchiveWriter.Write(source.Layout, collision);
+        }
+        bool modelChanged = File.Exists(modelPath);
+        EditableModel? modelTarget = null; MeshData? model = null;
+        if (modelChanged)
+        {
+            modelTarget = ModelEditing.Select(source.Layout, modelBaseline);
+            Require(modelTarget != null && m.TryGetProperty("editableMesh", out var declared)
+                && declared.ValueKind == JsonValueKind.Object && declared.GetProperty("id").GetString() == modelTarget.Id,
+                "MODEL_EDIT_TARGET", "Session has no supported editable model target. Re-import with the updated backend.");
+            var edits = JsonSerializer.Deserialize<ModelEdits>(File.ReadAllText(modelPath), Json);
+            Require(edits != null, "MODEL_EDIT_FORMAT", "Empty model edit document.");
+            model = ModelEditing.Compile(edits!, modelTarget!);
+            bytes = ModelArchiveWriter.Write(new ArchiveLayout(bytes), modelTarget!, model);
         }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -94,11 +109,12 @@ public static class SessionApplier
                     pair.First.Ranges.SequenceEqual(pair.Second.Ranges)
                     && (pair.First.Left, pair.First.Bottom, pair.First.Right, pair.First.Top, pair.First.VertexStart, pair.First.VertexCount)
                         == (pair.Second.Left, pair.Second.Bottom, pair.Second.Right, pair.Second.Top, pair.Second.VertexStart, pair.Second.VertexCount)), "COLLISION_WRITE_MISMATCH", "Reloaded collision differs from compiled edits.");
-            if (!changed) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
+            if (modelChanged) ModelArchiveWriter.Verify(reloaded.Layout, modelTarget!, model!);
+            if (!changed && !modelChanged) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
-        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length);
+        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, model?.TriangleIndices.Length / 3);
 
         string Contained(string relative)
         {

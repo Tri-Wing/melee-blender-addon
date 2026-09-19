@@ -127,9 +127,9 @@ public class ApplyTests
     }
 
     [PrimaryFixtureFact]
-    public void RejectsUnsupportedModelEditsAndOldProtocol()
+    public void RejectsUnsupportedEditsAndOldProtocol()
     {
-        using var session = new Session(); var path = Path.Combine(session.Directory, "edits/models.json"); File.WriteAllText(path, "{}");
+        using var session = new Session(); var path = Path.Combine(session.Directory, "edits/animations.json"); File.WriteAllText(path, "{}");
         Assert.Equal("EDIT_UNSUPPORTED", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code); File.Delete(path);
         string manifest = Path.Combine(session.Directory, "stage.json"); var node = JsonNode.Parse(File.ReadAllText(manifest))!; node["protocolVersion"] = 1; File.WriteAllText(manifest, node.ToJsonString());
         Assert.Equal("SESSION_VERSION", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);

@@ -21,6 +21,7 @@ public static class SessionExtractor
         var catalog = new ModelIdentityCatalog();
         var identity = ModelIdentity.Capture(stage.Layout, catalog);
         var collision = CollisionData.Read(stage.Layout);
+        var editable = ModelEditing.Select(stage.Layout, identity);
         var reader = new ArchiveDataReader(stage.Layout);
         var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
         var deferredMeshes = new List<object>();
@@ -123,8 +124,11 @@ public static class SessionExtractor
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
-                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = false, dynamicCollisionEdit = false, apply = true },
+                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editable != null, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
+                editableMesh = editable == null ? null : new { editable.Id, editable.GroupIndex, editable.JobjIndex,
+                    editable.DobjIndex, editable.PobjIndex, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
+                    representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles },
                 selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings, baselineFiles
             });
             Directory.Move(temporary, directory);

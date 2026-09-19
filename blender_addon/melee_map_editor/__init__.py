@@ -10,7 +10,7 @@ import bmesh
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene, topology, materials, inspector
+from . import collision, scene, topology, materials, inspector, modeling
 from .protocol import StageError, read, run
 
 
@@ -139,6 +139,28 @@ class MME_OT_edit_collision(bpy.types.Operator):
         return execute_safely(self, context, action)
 
 
+class MME_OT_edit_model(bpy.types.Operator):
+    bl_idname = 'mme.edit_model'
+    bl_label = 'Edit Supported Model'
+
+    def execute(self, context):
+        def action():
+            obj = modeling.target_object(context.scene)
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            for collection in bpy.data.collections:
+                if collection.get('mme_session_id') == context.scene.mme_session_id:
+                    collection.hide_viewport = False
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.hide_set(False)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            context.tool_settings.mesh_select_mode = (True, False, False)
+            bpy.ops.object.mode_set(mode='EDIT')
+            context.scene.mme_status = 'Editing the supported model. Changed geometry exports with a flat grey material; collision is edited separately.'
+        return execute_safely(self, context, action)
+
+
 class MME_OT_assign(bpy.types.Operator):
     bl_idname = 'mme.assign_collision'
     bl_label = 'Assign Collision Property'
@@ -258,7 +280,19 @@ class MME_PT_stage(bpy.types.Panel):
             layout.label(text='Collision: edited' if obj.get('mme_dirty') else 'Collision: unchanged')
         except StageError:
             layout.label(text='Collision object missing', icon='ERROR')
-        layout.label(text='Grey models: read-only static pose')
+        editable = modeling.target_info(s)
+        if editable:
+            layout.operator('mme.edit_model', icon='EDITMODE_HLT')
+            layout.label(text=f"Model target: Group {editable['groupIndex']:03d} / JOBJ {editable['jobjIndex']:03d}")
+            try:
+                dirty = modeling.target_object(s).get('mme_dirty', False)
+                layout.label(text='Model: edited — exports flat grey' if dirty else 'Model: unchanged — original preserved')
+            except StageError:
+                layout.label(text='Editable model missing', icon='ERROR')
+            layout.label(text='Other models and object transforms are read-only.')
+        else:
+            layout.label(text='No supported model target in this stage.' if 'mme_editable_mesh' in s
+                              else 'Re-import to enable model editing.')
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')
@@ -488,6 +522,7 @@ def update_dirty(scene_arg, depsgraph):
     if not scene_arg.mme_session:
         return
     try:
+        modeling.update_dirty(scene_arg, depsgraph)
         obj = scene.collision_object(scene_arg)
         # Small collision meshes make this cheap; model geometry is checked on export.
         dirty = collision.fingerprint(obj) != scene_arg.get('mme_collision_fingerprint')
@@ -498,7 +533,7 @@ def update_dirty(scene_arg, depsgraph):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 
