@@ -13,7 +13,7 @@ public static class Cli
         {
             if (args.Length < 2) throw Usage();
             string command = args[0];
-            if (command is not ("inspect" or "validate" or "roundtrip" or "extract")) throw Usage();
+            if (command is not ("inspect" or "validate" or "roundtrip" or "extract" or "apply")) throw Usage();
             string? output = null;
             string? session = null;
             bool compare = false;
@@ -21,18 +21,22 @@ public static class Cli
             {
                 if (args[i] == "--json") continue;
                 if (command == "roundtrip" && args[i] == "--compare") { compare = true; continue; }
-                if (command == "roundtrip" && args[i] == "--output" && ++i < args.Length && output == null) { output = args[i]; continue; }
+                if ((command is "roundtrip" or "apply") && args[i] == "--output" && ++i < args.Length && output == null) { output = args[i]; continue; }
                 if (command == "extract" && args[i] == "--session" && ++i < args.Length && session == null) { session = args[i]; continue; }
                 throw Usage();
             }
-            if (command == "roundtrip" && output == null) throw Usage();
+            if ((command is "roundtrip" or "apply") && output == null) throw Usage();
             if (command == "extract" && session == null) throw Usage();
-            var stage = new StageArchive(args[1]);
             object data;
-            if (command == "inspect") data = stage.Inspect();
-            else if (command == "validate") { var warnings = stage.Validate(); data = new { valid = true, validationTier = "archive-model-hierarchy-and-collision-consistency", warnings }; }
-            else if (command == "extract") data = SessionExtractor.Extract(stage, session!);
-            else { stage.Roundtrip(output!, compare); data = new { output = Path.GetFullPath(output!), compared = compare }; }
+            if (command == "apply") data = SessionApplier.Apply(args[1], output!);
+            else
+            {
+                var stage = new StageArchive(args[1]);
+                if (command == "inspect") data = stage.Inspect();
+                else if (command == "validate") { var warnings = stage.Validate(); data = new { valid = true, validationTier = "archive-model-hierarchy-and-collision-consistency", warnings }; }
+                else if (command == "extract") data = SessionExtractor.Extract(stage, session!);
+                else { stage.Roundtrip(output!, compare); data = new { output = Path.GetFullPath(output!), compared = compare }; }
+            }
             stdout.WriteLine(JsonSerializer.Serialize(new { protocolVersion = 1, ok = true, command, data }, Json));
             return 0;
         }
@@ -45,5 +49,5 @@ public static class Cli
         }
     }
 
-    private static StageException Usage() => new("USAGE", "Usage: meleemap inspect|validate <input.dat> [--json], meleemap roundtrip <input.dat> --output <new.dat> [--compare], or meleemap extract <input.dat> --session <new-directory>");
+    private static StageException Usage() => new("USAGE", "Usage: meleemap inspect|validate <input.dat> [--json], meleemap roundtrip <input.dat> --output <new.dat> [--compare], meleemap extract <input.dat> --session <new-directory>, or meleemap apply <session-directory> --output <new.dat>");
 }

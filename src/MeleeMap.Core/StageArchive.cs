@@ -15,10 +15,12 @@ public sealed class StageArchive
     public HSDRawFile File { get; }
     public string Path { get; }
 
-    public StageArchive(string path)
+    public StageArchive(string path) : this(path, System.IO.File.ReadAllBytes(path)) { }
+
+    public StageArchive(string path, byte[] bytes)
     {
         Path = System.IO.Path.GetFullPath(path);
-        Layout = new ArchiveLayout(System.IO.File.ReadAllBytes(Path));
+        Layout = new ArchiveLayout(bytes);
         File = new HSDRawFile(Layout.Bytes);
     }
 

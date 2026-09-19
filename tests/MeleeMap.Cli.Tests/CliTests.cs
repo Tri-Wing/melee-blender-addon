@@ -10,7 +10,9 @@ public class CliTests
         new[] { "inspect", "source.dat", "--unknown" },
         new[] { "extract", "source.dat", "--session" },
         new[] { "extract", "source.dat", "--session", "one", "--session", "two" },
-        new[] { "inspect", "source.dat", "--session", "one" }
+        new[] { "inspect", "source.dat", "--session", "one" },
+        new[] { "apply", "session" }, new[] { "apply", "session", "--output" },
+        new[] { "apply", "session", "--output", "new.dat", "--compare" }
     }.Select(args => new object[] { args });
 
     [Theory]

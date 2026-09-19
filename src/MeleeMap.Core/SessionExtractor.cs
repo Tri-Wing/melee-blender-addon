@@ -4,14 +4,14 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record ExtractionResult(string SessionDirectory, int ModelGroups, int CollisionLines, string MeshId, int Triangles);
+public sealed record ExtractionResult(string SessionDirectory, int ModelGroups, int CollisionLines, string MeshId, int Triangles, int MeshCount);
 
 public static class SessionExtractor
 {
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 2;
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
 
-    /// <summary>Extract a complete identity/collision session and the first supported rigid polygon.
+    /// <summary>Extract a complete identity/collision session and every supported polygon.
     /// Payloads stay in game coordinates; a Blender adapter applies the declared reversible transform.</summary>
     public static ExtractionResult Extract(StageArchive stage, string directory)
     {
@@ -22,16 +22,16 @@ public static class SessionExtractor
         var identity = ModelIdentity.Capture(stage.Layout, catalog);
         var collision = CollisionData.Read(stage.Layout);
         var reader = new ArchiveDataReader(stage.Layout);
-        ModelIdentityNode? selected = null; MeshData? mesh = null;
+        var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
         var deferredMeshes = new List<object>();
         foreach (var node in identity.Nodes.Where(n => n.Kind == "pobj"))
         {
-            if (selected != null) { deferredMeshes.Add(new { id = node.Id, reason = "single-target-extraction" }); continue; }
-            try { mesh = GxMeshDecoder.Decode(stage.Layout, node.SourceOffset); selected = node; }
+            try { meshes.Add((node, GxMeshDecoder.Decode(stage.Layout, node.SourceOffset))); }
             catch (StageException e) when (e.Code is "GX_UNSUPPORTED_BINDING" or "GX_ATTRIBUTE" or "GX_PRIMITIVE")
             { deferredMeshes.Add(new { id = node.Id, reason = e.Code, message = e.Message }); }
         }
-        Require(selected != null && mesh != null, "EXTRACT_NO_MODEL_TARGET", "No supported rigid model target found; session extraction has not been published.");
+        Require(meshes.Count > 0, "EXTRACT_NO_MODEL_TARGET", "No supported model target found; session extraction has not been published.");
+        var selected = meshes[0].Node;
         var groups = identity.Nodes.Where(n => n.Kind is "group" or "sentinel-group").ToArray();
         var vertexIds = collision.Vertices.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var lineIds = collision.Lines.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
@@ -62,15 +62,33 @@ public static class SessionExtractor
                         id = n.Id, flags = unchecked((uint)reader.Int(n.SourceOffset + 4)),
                         transformSpace = "game", rotationEncoding = "source-jobj-xyz",
                         rotation = Vec(n.SourceOffset + 0x14), scale = Vec(n.SourceOffset + 0x20), translation = Vec(n.SourceOffset + 0x2C),
+                        inverseBindMatrix = InverseBind(n.SourceOffset),
                         childSourceOffset = reader.Pointer(n.SourceOffset + 8), nextSourceOffset = reader.Pointer(n.SourceOffset + 12)
                     }),
-                    meshes = group.GroupIndex == selected!.GroupIndex ? new[] { $"mesh-{selected.Id}.json" } : Array.Empty<string>()
+                    meshes = meshes.Where(m => m.Node.GroupIndex == group.GroupIndex).Select(m => $"mesh-{m.Node.Id}.json")
                 });
             }
-            string meshPath = $"models/group-{selected!.GroupIndex:D3}/mesh-{selected.Id}.json";
-            Write(meshPath, new { protocolVersion = ProtocolVersion, id = selected.Id, ownerId = selected.OwnerId, groupIndex = selected.GroupIndex,
-                pobjIndex = selected.Index, sourceOffset = selected.SourceOffset, coordinateSpace = "game", representation = "untextured-grey",
-                positions = mesh!.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices });
+            string meshPath = $"models/group-{selected.GroupIndex:D3}/mesh-{selected.Id}.json";
+            foreach (var (node, mesh) in meshes)
+            {
+                string? JointId(int? offset)
+                {
+                    if (!offset.HasValue) return null;
+                    var joint = identity.Nodes.FirstOrDefault(n => n.GroupIndex == node.GroupIndex && n.SourceOffset == offset && n.Kind.EndsWith("jobj"));
+                    Require(joint != null, "GX_BINDING_TARGET", "Mesh binding points outside its model group.");
+                    return joint!.Id;
+                }
+                Write($"models/group-{node.GroupIndex:D3}/mesh-{node.Id}.json", new
+                {
+                    protocolVersion = ProtocolVersion, id = node.Id, ownerId = node.OwnerId, groupIndex = node.GroupIndex,
+                    pobjIndex = node.Index, sourceOffset = node.SourceOffset, coordinateSpace = "game", representation = "untextured-grey",
+                    pobjFlags = reader.UShort(node.SourceOffset + 12),
+                    vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
+                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices,
+                    boundJobjId = JointId(mesh.BoundJobjSourceOffset), envelopeIndices = mesh.EnvelopeIndices,
+                    envelopes = mesh.Envelopes?.Select(e => e.Select(w => new { jobjId = JointId(w.JobjSourceOffset), weight = w.Weight }))
+                });
+            }
             Write("collision/collision.json", new
             {
                 protocolVersion = ProtocolVersion, coordinateSpace = "game", ranges = collision.Ranges,
@@ -94,6 +112,8 @@ public static class SessionExtractor
                     readOnly = true, source = a
                 })
             });
+            var baselineFiles = Directory.GetFiles(temporary, "*.json", SearchOption.AllDirectories)
+                .Select(path => new { file = Path.GetRelativePath(temporary, path).Replace('\\', '/'), sha256 = SessionApplier.Hash(File.ReadAllBytes(path)) }).ToArray();
             Write("stage.json", new
             {
                 protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = 1,
@@ -102,16 +122,23 @@ public static class SessionExtractor
                 modelGroupCount = groups.Length,
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
-                capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = 1, allModelGeometry = false,
-                    collisionEdit = false, modelEdit = false, dynamicCollisionEdit = false, apply = false },
-                deferredCapabilities = new[] { "remaining-model-geometry", "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters", "Blender-integration" },
-                selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings
+                capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
+                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = false, dynamicCollisionEdit = false, apply = true },
+                deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters", "Blender-integration" },
+                selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings, baselineFiles
             });
             Directory.Move(temporary, directory);
         }
         finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, recursive: true); }
-        return new(directory, groups.Length, collision.Lines.Length, selected!.Id, mesh!.TriangleIndices.Length / 3);
+        return new(directory, groups.Length, collision.Lines.Length, selected.Id, meshes.Sum(m => m.Mesh.TriangleIndices.Length / 3), meshes.Count);
 
+        float[]? InverseBind(int joint)
+        {
+            int? matrix = reader.Pointer(joint + 0x38);
+            if (!matrix.HasValue) return null;
+            reader.Check(matrix.Value, 48);
+            return Enumerable.Range(0, 12).Select(i => reader.Float(matrix.Value + i * 4)).ToArray();
+        }
         string? Link(int index) => index < 0 ? null : lineIds[index];
         Vector3Data Vec(int offset) => new(reader.Float(offset), reader.Float(offset + 4), reader.Float(offset + 8));
         void Write(string relative, object data)

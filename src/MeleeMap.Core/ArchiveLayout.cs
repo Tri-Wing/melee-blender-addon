@@ -70,7 +70,7 @@ public sealed class ArchiveLayout
     }
 
     public int Read(int offset) => BinaryPrimitives.ReadInt32BigEndian(Bytes.AsSpan(offset, 4));
-    public static void Require(bool condition, string code, string message)
+    public static void Require([System.Diagnostics.CodeAnalysis.DoesNotReturnIf(false)] bool condition, string code, string message)
     {
         if (!condition) throw new StageException(code, message);
     }

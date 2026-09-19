@@ -18,6 +18,22 @@ public sealed class ModelIdentityCatalog
         return id;
     }
 
+    public static ModelIdentityCatalog Restore(IEnumerable<ModelIdentityNode> nodes)
+    {
+        var result = new ModelIdentityCatalog();
+        var byId = new Dictionary<string, ModelLocator>();
+        foreach (var node in nodes)
+        {
+            string kind = node.Kind.EndsWith("jobj") ? "jobj" : node.Kind is "group" or "sentinel-group" ? "group" : node.Kind;
+            var locator = new ModelLocator(kind, node.SourceOffset);
+            Require(Guid.TryParseExact(node.Id, "N", out _), "MODEL_IDENTITY_MAPPING", "Invalid persisted model ID.");
+            Require(!result.ids.TryGetValue(locator, out var old) || old == node.Id, "MODEL_IDENTITY_MAPPING", "A source descriptor has conflicting IDs.");
+            Require(!byId.TryGetValue(node.Id, out var previous) || previous == locator, "MODEL_IDENTITY_MAPPING", "A persisted ID refers to multiple descriptors.");
+            result.ids[locator] = node.Id; byId[node.Id] = locator;
+        }
+        return result;
+    }
+
     public ModelIdentityCatalog Relocate(Func<ModelLocator, int> offsetMapping)
     {
         var result = new ModelIdentityCatalog();

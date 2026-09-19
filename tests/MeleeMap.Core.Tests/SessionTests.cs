@@ -18,7 +18,7 @@ public sealed class PrimaryFixtureFactAttribute : FactAttribute
 public class SessionTests
 {
     [PrimaryFixtureFact]
-    public void ExtractsCompleteCollisionIdentityGraphAndOneMeshWithoutChangingSource()
+    public void ExtractsCompleteCollisionIdentityGraphAndAllPrimaryGeometryWithoutChangingSource()
     {
         string source = Path.Combine(CorpusTests.CorpusDirectory, "GrNLa.dat");
         var stage = new StageArchive(source); var original = CollisionData.Read(stage.Layout);
@@ -26,12 +26,14 @@ public class SessionTests
         try
         {
             var result = SessionExtractor.Extract(stage, directory);
-            Assert.Equal(10, result.ModelGroups); Assert.Equal(16, result.CollisionLines); Assert.Equal(14, result.Triangles);
+            Assert.Equal(10, result.ModelGroups); Assert.Equal(16, result.CollisionLines); Assert.Equal(13597, result.Triangles); Assert.Equal(93, result.MeshCount);
             Assert.Equal(stage.Layout.Bytes, File.ReadAllBytes(Path.Combine(directory, "source.dat")));
             Assert.Equal(stage.Layout.Bytes, File.ReadAllBytes(source));
             using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "stage.json")));
             var root = manifest.RootElement;
-            Assert.Equal(1, root.GetProperty("protocolVersion").GetInt32());
+            Assert.Equal(SessionExtractor.ProtocolVersion, root.GetProperty("protocolVersion").GetInt32());
+            Assert.True(root.GetProperty("capabilities").GetProperty("allModelGeometry").GetBoolean());
+            Assert.Empty(root.GetProperty("deferredMeshes").EnumerateArray());
             Assert.Equal(Convert.ToHexString(SHA256.HashData(stage.Layout.Bytes)).ToLowerInvariant(), root.GetProperty("source").GetProperty("sha256").GetString());
             Assert.Equal(10, root.GetProperty("modelGroups").GetArrayLength());
             var baseline = ModelIdentity.Capture(stage.Layout, new());
@@ -45,6 +47,23 @@ public class SessionTests
             Assert.Equal(baseline.Nodes.Select(n => (n.Kind, n.GroupIndex, n.Index, n.SourceOffset)), stored.Select(n => (n.Kind, n.GroupIndex, n.Index, n.SourceOffset)));
             Assert.All(stored, n => Assert.True(Guid.TryParseExact(n.Id, "N", out _)));
             var ids = stored.Select(n => n.Id).ToHashSet();
+            int meshCount = 0, triangleCount = 0, envelopeCount = 0;
+            foreach (var path in Directory.GetFiles(Path.Combine(directory, "models"), "mesh-*.json", SearchOption.AllDirectories))
+            {
+                using var file = JsonDocument.Parse(File.ReadAllText(path)); var payload = file.RootElement;
+                int n = payload.GetProperty("positions").GetArrayLength(); meshCount++;
+                triangleCount += payload.GetProperty("triangleIndices").GetArrayLength() / 3;
+                Assert.All(payload.GetProperty("triangleIndices").EnumerateArray(), index => Assert.InRange(index.GetInt32(), 0, n - 1));
+                if (payload.GetProperty("envelopes").ValueKind != JsonValueKind.Null)
+                {
+                    envelopeCount++; var weights = payload.GetProperty("envelopes");
+                    Assert.Equal(n, payload.GetProperty("envelopeIndices").GetArrayLength());
+                    Assert.All(payload.GetProperty("envelopeIndices").EnumerateArray(), index => Assert.InRange(index.GetInt32(), 0, weights.GetArrayLength() - 1));
+                    foreach (var envelope in weights.EnumerateArray())
+                        Assert.All(envelope.EnumerateArray(), weight => Assert.Contains(weight.GetProperty("jobjId").GetString()!, ids));
+                }
+            }
+            Assert.Equal(93, meshCount); Assert.Equal(13597, triangleCount); Assert.Equal(2, envelopeCount);
             Assert.All(stored.Where(n => n.OwnerId != null), n => Assert.Contains(n.OwnerId!, ids));
             using var collision = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "collision/collision.json")));
             var c = collision.RootElement;
