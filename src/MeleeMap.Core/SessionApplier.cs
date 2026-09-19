@@ -21,7 +21,7 @@ public static class SessionApplier
 
     private static ApplyResult ApplyCore(string directory, string output)
     {
-        Require(!File.Exists(output) && !Directory.Exists(output), "OUTPUT_EXISTS", "Output already exists; choose a new filename.");
+        Require(!Directory.Exists(output), "OUTPUT_DIRECTORY", "Output must be a file, not a directory.");
         Require(!output.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.Ordinal), "OUTPUT_SESSION", "Output must be outside the session directory.");
         using var manifest = Load("stage.json"); var m = manifest.RootElement;
         Require(m.GetProperty("protocolVersion").GetInt32() == SessionExtractor.ProtocolVersion && m.GetProperty("assetType").GetString() == "melee-stage"
@@ -95,7 +95,7 @@ public static class SessionApplier
                     && (pair.First.Left, pair.First.Bottom, pair.First.Right, pair.First.Top, pair.First.VertexStart, pair.First.VertexCount)
                         == (pair.Second.Left, pair.Second.Bottom, pair.Second.Right, pair.Second.Top, pair.Second.VertexStart, pair.Second.VertexCount)), "COLLISION_WRITE_MISMATCH", "Reloaded collision differs from compiled edits.");
             if (!changed) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
-            File.Move(temp, output);
+            File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length);

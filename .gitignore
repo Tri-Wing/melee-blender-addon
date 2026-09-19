@@ -4,3 +4,6 @@ TestResults/
 artifacts/
 example_assets/
 *.user
+
+**/__pycache__/
+*.pyc

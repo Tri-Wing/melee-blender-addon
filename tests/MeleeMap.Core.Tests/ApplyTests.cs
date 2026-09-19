@@ -31,14 +31,17 @@ public class ApplyTests
     }
 
     [PrimaryFixtureFact]
-    public void NoEditApplyIsByteIdenticalAndRefusesOverwrite()
+    public void NoEditApplyIsByteIdenticalAndOverwritesExistingOutput()
     {
         using var session = new Session();
         var result = SessionApplier.Apply(session.Directory, session.Output);
         Assert.False(result.CollisionChanged);
         Assert.Equal(session.Source.Layout.Bytes, File.ReadAllBytes(session.Output));
-        Assert.Equal("OUTPUT_EXISTS", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
-        Assert.Equal("OUTPUT_EXISTS", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, Path.Combine(session.Directory, "source.dat"))).Code);
+        File.WriteAllText(session.Output, "Existing output to replace");
+        SessionApplier.Apply(session.Directory, session.Output);
+        Assert.Equal(session.Source.Layout.Bytes, File.ReadAllBytes(session.Output));
+        Assert.Equal("OUTPUT_SESSION", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, Path.Combine(session.Directory, "source.dat"))).Code);
+        Assert.Equal(session.Source.Layout.Bytes, File.ReadAllBytes(Path.Combine(session.Directory, "source.dat")));
     }
 
     [PrimaryFixtureFact]
@@ -46,6 +49,7 @@ public class ApplyTests
     {
         using var session = new Session(); var edits = session.Edits(); var original = edits.Vertices[0];
         edits.Vertices[0] = original with { Y = original.Y + 1 }; session.Write(edits);
+        File.WriteAllBytes(session.Output, session.Source.Layout.Bytes);
         var result = SessionApplier.Apply(session.Directory, session.Output); Assert.True(result.CollisionChanged);
         var output = new StageArchive(session.Output); var collision = CollisionData.Read(output.Layout);
         Assert.Contains(new CollisionVertex(original.X, original.Y + 1), collision.Vertices);
@@ -83,6 +87,20 @@ public class ApplyTests
         session.Write(edits);
         Assert.Equal("COLLISION_AMBIGUOUS_VERTEX", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.False(File.Exists(session.Output)); Assert.Empty(System.IO.Directory.GetFiles(session.Root, "*.tmp"));
+    }
+
+    [PrimaryFixtureFact]
+    public void InvalidEditLeavesExistingOutputIntact()
+    {
+        using var session = new Session();
+        byte[] original = session.Source.Layout.Bytes;
+        File.WriteAllBytes(session.Output, original);
+        var edits = session.Edits();
+        edits.Lines[0] = edits.Lines[0] with { Vertex1Id = edits.Lines[0].Vertex0Id };
+        session.Write(edits);
+        Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output));
+        Assert.Equal(original, File.ReadAllBytes(session.Output));
+        Assert.Empty(System.IO.Directory.GetFiles(session.Root, "*.tmp"));
     }
 
     [PrimaryFixtureFact]
