@@ -1,0 +1,4 @@
+[submodule "HSDLib"]
+	path = HSDLib
+	url = https://github.com/Tri-Wing/HSDLib.git
+	branch = blender_plugin
