@@ -24,7 +24,7 @@ def collision_object(scene):
 
 
 def properties(item):
-    preview_controls = {'mme_light_enabled', 'mme_light_intensity'}
+    preview_controls = {'mme_light_enabled', 'mme_light_intensity', 'mme_light_color'}
     return {key: item[key] for key in item.keys()
             if key.startswith('mme_') and key != 'mme_dirty' and key not in preview_controls}
 
@@ -48,7 +48,7 @@ def inventory(scene, editable_id=None):
                'collections': sorted(c.get('mme_id', c.name) for c in o.users_collection),
                'type': o.type, 'inScene': o.name in scene.objects}
         if o.get('mme_role') != 'light':
-            # LOBJ transforms are preview controls until light export is implemented.
+            # LOBJ transforms are editable light data rather than protected hierarchy.
             row['matrix'] = [list(r) for r in o.matrix_basis]
             row['parentInverse'] = [list(r) for r in o.matrix_parent_inverse]
         if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
@@ -271,15 +271,20 @@ def prepare(scene):
     modeling.edits(scene, stage)
     from . import material_properties
     material_properties.edits(scene, stage)
+    lighting.edits(scene, stage)
     return directory, edits if dirty else None
 
 
 def apply(scene, cli, dotnet, output):
     directory, edits = prepare(scene)
-    model_edits = modeling.edits(scene, load_session(directory))
+    stage = load_session(directory)
+    model_edits = modeling.edits(scene, stage)
     from . import material_properties
-    material_edits = material_properties.edits(scene, load_session(directory))
+    material_edits = material_properties.edits(scene, stage)
+    light_edits = lighting.edits(scene, stage)
     payloads = {}
+    if light_edits is not None:
+        payloads[directory / 'edits/lights.json'] = light_edits
     if material_edits is not None:
         payloads[directory / 'edits/materials.json'] = material_edits
     if edits is not None:

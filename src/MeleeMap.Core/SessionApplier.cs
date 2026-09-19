@@ -6,7 +6,9 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices, int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false);
+public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices,
+    int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false,
+    bool LightChanged = false);
 
 public static class SessionApplier
 {
@@ -17,7 +19,7 @@ public static class SessionApplier
     {
         try { return ApplyCore(Path.GetFullPath(directory), Path.GetFullPath(output)); }
         catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
-        { throw new StageException("SESSION_FORMAT", $"Malformed session or collision edit: {e.Message}"); }
+        { throw new StageException("SESSION_FORMAT", $"Malformed session or edit: {e.Message}"); }
     }
 
     private static ApplyResult ApplyCore(string directory, string output)
@@ -73,8 +75,10 @@ public static class SessionApplier
         string editPath = Path.Combine(directory, "edits/collision.json");
         string modelPath = Path.Combine(directory, "edits/models.json");
         string materialPath = Path.Combine(directory, "edits/materials.json");
+        string lightPath = Path.Combine(directory, "edits/lights.json");
         foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
-            Require(edit == editPath || edit == modelPath || edit == materialPath, "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
+            Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath,
+                "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
         if (changed)
@@ -130,6 +134,18 @@ public static class SessionApplier
             materialWrite = MaterialProperties.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline, edits!, declared, assignments);
             bytes = materialWrite.Bytes;
         }
+        StageLightWrite? lightWrite = null;
+        if (File.Exists(lightPath))
+        {
+            var declared = m.TryGetProperty("lighting", out var lighting)
+                ? lighting.GetProperty("lightSets").EnumerateArray()
+                    .SelectMany(set => set.GetProperty("lights").EnumerateArray())
+                    .Select(light => light.GetProperty("id").GetString()!).ToArray() : [];
+            var edits = JsonSerializer.Deserialize<StageLightEdits>(File.ReadAllText(lightPath), Json);
+            Require(edits != null, "LIGHT_EDIT_FORMAT", "Empty light edit document.");
+            lightWrite = StageLightEditing.Write(source.Layout, new ArchiveLayout(bytes), edits!, declared);
+            bytes = lightWrite.Bytes;
+        }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -149,11 +165,15 @@ public static class SessionApplier
                 else ModelArchiveWriter.Verify(reloaded.Layout, target, mesh,
                     materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int replacementMaterial) ? replacementMaterial : material?.MobjOffset, culling);
             if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, modelBaseline, materialWrite);
-            if (!changed && !modelChanged && materialWrite == null) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
+            if (lightWrite != null) StageLightEditing.Verify(reloaded.Layout, lightWrite);
+            if (!changed && !modelChanged && materialWrite == null && lightWrite == null)
+                Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
-        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null, materialWrite != null);
+        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length,
+            modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null,
+            materialWrite != null, lightWrite != null);
 
         string Contained(string relative)
         {

@@ -499,24 +499,37 @@ spot and distance attenuation, and each material's shininess directly in its
 emission graph. The objects in **Preview Light Set** drive that graph: rotate an
 infinite light, move a point light, move or rotate a spot light, or change a
 Blender light's color and energy to update the material preview. Ambient empties use the
-`mme_light_intensity` and `mme_light_enabled` custom properties; every imported
-light has `mme_light_enabled`. Native Blender illumination and world reflections
+color-picker property `mme_light_color` plus `mme_light_intensity` and
+`mme_light_enabled`; every imported light has `mme_light_enabled`. Native Blender illumination and world reflections
 are not mixed into the Melee shader.
 
 For infinite lights, the imported LOBJ vector and the Blender Sun's local `-Z`
 axis indicate the direction the rays travel. The diffuse/specular calculation
 uses the opposite vector from the surface toward the light source.
 
-These controls currently affect the Blender preview only. Their changes are
-ignored during export, so the source LOBJ records remain unchanged. Light
-animation is detected but the preview uses descriptor defaults without evaluating
+These controls export to the static LOBJ descriptors. **Enabled** updates the
+hidden flag. Blender color multiplied by energy is encoded into the LOBJ RGB
+bytes; the product must remain in the representable 0–1 range. Infinite rotation,
+point position, and spot position/rotation update cloned WOBJ records. Infinite
+vector length and spot interest distance are retained from the source. Ambient
+color and intensity export through the same RGB conversion.
+Hidden non-preview light sets can also be unhidden and edited for export, though
+only **Preview Light Set** drives the Blender material preview. When several
+model groups contain the same baseline light descriptors, edits made to the
+preview representative are exported to every equivalent copy. This covers
+stages whose code selects a different duplicate at runtime, while distinct
+light sets remain independently editable.
+
+LOBJ color alpha, type, diffuse/specular flags, attenuation, spot size/functions,
+and animation curves remain unchanged. Existing animation can override edited
+static values in game. The preview uses descriptor defaults without evaluating
 animation. Melee chooses among model-group
 sets through stage code, which is outside the DAT; when several distinct sets
 exist, extraction records a warning and prefers the only animated set when that
 choice is unambiguous.
 
-Geometry, UV and collision edits can be exported in the same operation. Editing
-a Blender material affects supported models assigned to that material. The DAT
+Geometry, UV, collision, material, and static light edits can be exported in the
+same operation. Editing a Blender material affects supported models assigned to that material. The DAT
 writer copies edited material records before changing bindings, so other source
 meshes sharing the original records retain their appearance. Blender copies
 with the same source identity but conflicting property values are rejected.

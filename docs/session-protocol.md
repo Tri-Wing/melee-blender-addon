@@ -26,6 +26,8 @@ models/group-001/mesh-<opaque-id>.json
 collision/collision.json
 edits/collision.json                     # optional replacement collision graph
 edits/models.json                        # optional batch of rigid model replacements
+edits/materials.json                     # optional static material changes
+edits/lights.json                        # optional static LOBJ changes
 ```
 
 ## Manifest and protected identity
@@ -329,11 +331,35 @@ exists, otherwise the first nonempty model-group set, and retains every set for
 inspection. The warning makes this heuristic explicit. Blender imports all sets
 and uses `previewSetId` for material nodes. The selected set's Blender objects
 drive the preview shader's direction/position, color, intensity, and enabled
-state. Infinite LOBJ vectors describe ray travel, so Blender maps them to a
+state. The Blender exporter replicates preview-set edits across model-group sets
+whose baseline light descriptors are equivalent because stage code can select
+any of those duplicate copies at runtime. Infinite LOBJ vectors describe ray travel, so Blender maps them to a
 Sun's local `-Z` axis and negates them for the surface-to-light shading vector.
-These preview-control changes are excluded from DAT edits; descriptor
-defaults are exported unchanged. LOBJ/WOBJ animation evaluation and light export
-are deferred.
+`edits/lights.json` accepts a nonempty list of light IDs with optional `enabled`,
+three-byte `color`, game-space `position`, and game-space `interest` fields:
+
+```json
+{
+  "protocolVersion": 2,
+  "lights": [
+    {"id": "group-003-light-001", "enabled": true,
+     "color": [180, 220, 255], "position": {"x": 0, "y": -20, "z": 0}}
+  ]
+}
+```
+
+Ambient lights accept visibility and color. Infinite and point lights also
+accept position; spot lights accept position and interest. The backend
+recomputes the light catalog from `source.dat`, rejects duplicate, unknown,
+nonfinite, or type-incompatible edits, clones edited WOBJ records, and preserves
+LOBJ animation and attenuation records. Blender derives infinite position from
+Sun rotation while preserving vector length, and derives spot interest from
+position/rotation while preserving the original interest distance. Apply results
+include `lightChanged`.
+
+Static descriptor edits can still be overridden by existing LOBJ/WOBJ animation
+at runtime. Animation curves, light type, diffuse/specular flags, attenuation,
+spot cutoff/functions, and alpha remain read-only.
 
 ### Vertex colors
 

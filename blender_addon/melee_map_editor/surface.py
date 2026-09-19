@@ -214,7 +214,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             if obj is not None:
                 target = obj if source['type'] == 'ambient' else obj.data
                 for axis in range(3):
-                    drive(node.outputs[0], [('value', target, f'color[{axis}]')], 'value', axis)
+                    path = f'["mme_light_color"][{axis}]' if source['type'] == 'ambient' else f'color[{axis}]'
+                    drive(node.outputs[0], [('value', target, path)], 'value', axis)
             return node.outputs[0]
 
         def light_strength(source, obj):

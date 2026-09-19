@@ -40,6 +40,8 @@ with tempfile.TemporaryDirectory(prefix='mme-lighting-') as tmp:
     assert all(o.get('mme_light_animated') for o in preview_objects)
     assert preview_objects[0].type == 'EMPTY'
     assert all(o.type == 'LIGHT' and o.data.type == 'SUN' for o in preview_objects[1:])
+    assert preview_objects[0].id_properties_ui('mme_light_color').as_dict()['subtype'] == 'COLOR'
+    assert len(preview_objects[0]['mme_light_color']) == 3
 
     info = next(i for i in stage['editableMeshes']
                 if (i['groupIndex'], i['jobjIndex'], i['dobjIndex']) == (3, 4, 0))
@@ -63,6 +65,8 @@ with tempfile.TemporaryDirectory(prefix='mme-lighting-') as tmp:
     bpy.context.scene.frame_set(bpy.context.scene.frame_current)
     actual = Vector(tuple(socket.default_value for socket in direction_node.inputs[:3]))
     assert (actual - expected).length < 1e-6
+    scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')
+    assert (tmp / 'noop.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
     original_direction = actual.copy()
     first_obj.rotation_euler.y += .4
     first_obj.data.color = (.1, .2, .3)
@@ -86,6 +90,7 @@ with tempfile.TemporaryDirectory(prefix='mme-lighting-') as tmp:
     for obj in preview_objects[1:]:
         obj.data.energy = 0
     ambient_obj['mme_light_intensity'] = 1
+    ambient_obj['mme_light_color'] = [linear(128 / 255)] * 3
     ambient_obj.update_tag()
     check = bpy.data.scenes.new('LOBJ render')
     bpy.context.window.scene = check
@@ -135,7 +140,30 @@ with tempfile.TemporaryDirectory(prefix='mme-lighting-') as tmp:
         direction_levels.append(sum(image.pixels[(4 * 8 + 4) * 4:(4 * 8 + 4) * 4 + 3]))
     assert direction_levels[0] > direction_levels[1] + .5, direction_levels
     bpy.context.window.scene = s
-    scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')
-    assert (tmp / 'noop.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
+    ambient_obj['mme_light_intensity'] = 1
+    ambient_obj['mme_light_color'] = [linear(value / 255) for value in (20, 40, 60)]
+    ambient_obj.update_tag()
+    for obj in preview_objects[1:]:
+        obj.data.energy = 1
+    first_obj.rotation_euler = (0, 0, 0)
+    first_obj.data.color = tuple(linear(value / 255) for value in (64, 128, 192))
+    first_obj['mme_light_enabled'] = False
+    first_obj.update_tag()
+    result = scene.apply(s, CLI, 'dotnet', tmp / 'lights.dat')
+    assert result['lightChanged']
+    assert (tmp / 'lights.dat').read_bytes() != (CORPUS / 'GrNLa.dat').read_bytes()
+    run(CLI, 'dotnet', 'extract', tmp / 'lights.dat', '--session', tmp / 'exported')
+    exported = read(tmp / 'exported/stage.json')
+    exported_source = next(light for light_set in exported['lighting']['lightSets']
+                           for light in light_set['lights'] if light['id'] == first_source['id'])
+    exported_ambient = next(light for light_set in exported['lighting']['lightSets']
+                            for light in light_set['lights'] if light['id'] == ambient_source['id'])
+    assert [round(value * 255) for value in exported_ambient['color'][:3]] == [20, 40, 60]
+    assert exported_source['hidden']
+    assert [round(value * 255) for value in exported_source['color'][:3]] == [64, 128, 192]
+    magnitude = Vector((first['x'], first['y'], first['z'])).length
+    exported_position = exported_source['position']
+    assert Vector((exported_position['x'], exported_position['y'] + magnitude,
+                   exported_position['z'])).length < 1e-5
 
-print('LIGHTING PASS: imported LOBJ transforms, colors and intensities drive the preview')
+print('LIGHTING PASS: imported LOBJ controls drive preview and static DAT export')

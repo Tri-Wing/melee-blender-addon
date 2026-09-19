@@ -258,8 +258,8 @@ Melee Stage
     ...
   Collision
   Lights
-    Preview Light Set [Blender preview controls; unchanged on DAT export]
-    Other Light Sets [hidden, read-only]
+    Preview Light Set [static LOBJ preview and export controls]
+    Other Light Sets [hidden static LOBJ export controls]
   Reference
 ```
 
@@ -674,7 +674,7 @@ Planned map-editor expansion areas include:
 - Joint, material, texture, and shape animation editing.
 - Dynamic collision and collision-to-model attachments.
 - General points, spawn points, camera and blast-zone controls, and stage parameters.
-- Cameras, editable/animated lights, fog, splines, shadows, particles, and effects.
+- Cameras, light animation and unsupported LOBJ fields, fog, splines, shadows, particles, and effects.
 - Items, articles, audio references, and stage-specific parameter schemas.
 - Creating new stage archives from templates and, later, from an empty project.
 
