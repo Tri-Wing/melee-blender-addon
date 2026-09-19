@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='mme-animated-') as tmp:
     infos = [i for i in modeling.targets(s) if i.get('positionsOnly')]
     assert len(infos) == 45 and len(modeling.targets(s)) == 90
     previews = {m['id']: m for m in stage['modelPreviews']}
-    assert set(previews) == {i['id'] for i in infos}
+    assert {i['id'] for i in infos} <= set(previews)
     textured = 0
     for info in infos:
         material = modeling.target_object(s, info).active_material

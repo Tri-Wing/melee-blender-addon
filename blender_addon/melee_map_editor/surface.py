@@ -182,3 +182,45 @@ def show_preview(context, switch_viewport=True):
             elif area.type == 'IMAGE_EDITOR' and area.ui_type == 'UV' and image:
                 area.spaces.active.image = image
     return image
+
+
+def import_colors(mesh, source):
+    """Keep GX color seams as corner attributes, including the second channel."""
+    layers = []
+    for channel in range(2):
+        colors = source.get(f'colors{channel}')
+        if colors is None:
+            continue
+        name = f'Stage Color {channel}'
+        layer = mesh.color_attributes.new(name=name, type='FLOAT_COLOR', domain='CORNER')
+        for loop in mesh.loops:
+            value = colors[loop.vertex_index]
+            layer.data[loop.index].color = tuple(value[c] for c in ('r', 'g', 'b', 'a'))
+        layers.append(name)
+    if layers:
+        mesh.color_attributes.active_color = mesh.color_attributes[layers[0]]
+    return layers
+
+
+def configure_color_preview(material, layer_name):
+    """Approximate GX raster color modulation; TEV channel routing is not emulated."""
+    if not material.node_tree or not any(n.type == 'EMISSION' for n in material.node_tree.nodes):
+        configure_preview(material, {'color': [1, 1, 1, 1]}, None, {})
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    emission = next(n for n in nodes if n.type == 'EMISSION')
+    color = nodes.new('ShaderNodeVertexColor')
+    color.name = 'Stage Vertex Color'
+    color.layer_name = layer_name
+    multiply = nodes.new('ShaderNodeMixRGB')
+    multiply.name = 'Stage Color Modulation'
+    multiply.blend_type = 'MULTIPLY'
+    multiply.inputs[0].default_value = 1
+    base = emission.inputs['Color']
+    if base.is_linked:
+        links.new(base.links[0].from_socket, multiply.inputs[1])
+    else:
+        multiply.inputs[1].default_value = base.default_value
+    links.new(color.outputs['Color'], multiply.inputs[2])
+    links.new(multiply.outputs[0], base)
+    color.location = (-100, -300)
+    multiply.location = (150, -100)

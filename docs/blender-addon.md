@@ -405,3 +405,24 @@ are retained. A ceiling needs horizontal extent; a wall needs vertical extent.
 Converting only part of a connected boundary can still produce incompatible
 adjacency, which must be resolved before export. Regression tests cover ceiling
 conversion and output reload, but the fix still needs an in-game retest.
+
+## Vertex-color previews
+
+Reload the add-on and re-import the DAT to load GX vertex colors. Available
+channels appear under Mesh Data > Color Attributes as **Stage Color 0** and
+**Stage Color 1**. Both retain RGBA values on face corners, preserving seams.
+Enable **Texture Preview** (or Material Preview shading) to see the first
+available channel multiply the base material/texture color. The second channel
+and alpha are stored, but game TEV channel routing and alpha effects are not
+emulated by this preview.
+
+Vertex painting currently changes only the Blender preview. Vertex-only DAT
+exports retain the original colors; topology replacements still do not export
+vertex colors. This also applies to vertex colors on read-only geometry.
+
+Material previews are independent of export-material eligibility. Static meshes
+using vertex-color materials (for example GrSt Group 003 / JOBJ 004 / DOBJ 013)
+and read-only meshes also receive their supported base textures. These previews
+do not make the source materials available for assignment to replacement
+geometry. Unsupported texture coordinates and additional texture layers retain
+the existing preview limitations.

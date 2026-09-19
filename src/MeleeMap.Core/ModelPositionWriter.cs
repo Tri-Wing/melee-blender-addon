@@ -96,6 +96,10 @@ public static class ModelPositionWriter
                 || (actual.Normals != null && expected.Normals != null && actual.Normals.SequenceEqual(expected.Normals)))
             && (actual.TexCoords0 == null ? expected.TexCoords0 == null
                 : expected.TexCoords0 != null && actual.TexCoords0.SequenceEqual(expected.TexCoords0))
+            && (actual.Colors0 == null ? expected.Colors0 == null
+                : expected.Colors0 != null && actual.Colors0.SequenceEqual(expected.Colors0))
+            && (actual.Colors1 == null ? expected.Colors1 == null
+                : expected.Colors1 != null && actual.Colors1.SequenceEqual(expected.Colors1))
             && actual.Envelopes == null && actual.BoundJobjSourceOffset == null,
             "MODEL_WRITE_MISMATCH", "Reloaded positions or original shading differ from the vertex edit.");
         var r = new ArchiveDataReader(archive); var before = new ArchiveDataReader(source);

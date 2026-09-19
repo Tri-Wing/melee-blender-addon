@@ -381,7 +381,7 @@ class MME_PT_stage(bpy.types.Panel):
             row.enabled = bool(selected) and not positions_only
             row.operator('mme.model_material', icon='MATERIAL')
             layout.operator('mme.texture_preview', icon='TEXTURE')
-            layout.label(text='Texture previews do not export image edits.')
+            layout.label(text='Texture and vertex-color edits are preview-only.')
             layout.label(text='One material per model; UVs use the active map.')
             if not s.get('mme_model_materials'):
                 layout.label(text='Re-import to load stage materials.')

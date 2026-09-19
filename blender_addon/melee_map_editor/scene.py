@@ -166,6 +166,14 @@ def import_session(context, directory):
                                  [indices[i:i+3] for i in range(0, len(indices), 3)])
                 mesh.materials.append(source_materials.get(payload['id'], material))
                 surface.import_uvs(mesh, payload)
+                color_layers = surface.import_colors(mesh, payload)
+                if color_layers:
+                    if payload['id'] not in source_materials:
+                        preview_material = material.copy()
+                        preview_material.name = f"Vertex Colors - {mesh.name}"
+                        source_materials[payload['id']] = preview_material
+                        mesh.materials[0] = preview_material
+                    surface.configure_color_preview(mesh.materials[0], color_layers[0])
                 if payload.get('normals') and not payload.get('envelopes'):
                     from .transforms import vector
                     mesh.normals_split_custom_set_from_vertices([AXES.to_3x3() @ vector(n) for n in payload['normals']])

@@ -297,11 +297,22 @@ The position writer preserves every non-position vertex attribute, source
 material pointer and animation record. These meshes are excluded from the
 reusable static material catalog. Existing sessions keep their declared targets.
 
-`modelPreviews` contains base-material previews for position-only targets, keyed
-by mesh ID. These entries use the same `preview` color/texture structure as
+`modelPreviews` contains base-material previews for imported meshes outside the
+export material catalog, keyed by mesh ID. This includes static vertex-color
+materials, animated materials and read-only geometry. These entries use the same `preview` color/texture structure as
 `modelMaterials`, but are not export material donors. Blender imports them with
 `mme_preview_model_id` rather than `mme_model_material_id`. No animation is
 evaluated: source base colors and the first supported UV0 texture are displayed.
 Unsupported coordinates fall back to the source diffuse color with a warning;
 additional texture layers are omitted with a warning. Preview images are hashed
 as session baseline files and packed into the Blender scene.
+
+### Vertex colors
+
+Mesh payloads include nullable `colors0` and `colors1`, each an array of
+`{r,g,b,a}` values indexed like positions. Channels are normalized to 0–1 after
+GX packed-color expansion (RGB565, RGB8, RGBX8, RGBA4, RGBA6, RGBA8); RGB formats
+have alpha 1. Direct, index8 and index16 attributes are supported. Blender stores
+these values in FLOAT_COLOR/CORNER attributes and previews the first available
+channel as a color multiplier. No color edit field is accepted by model edits.
+The position writer verifies both original color channels on reload.

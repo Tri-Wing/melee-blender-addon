@@ -4,9 +4,10 @@ namespace MeleeMap.Core.Gx;
 
 public readonly record struct Vector2Data(float X, float Y);
 public readonly record struct Vector3Data(float X, float Y, float Z);
+public readonly record struct ColorData(float R, float G, float B, float A);
 public sealed record EnvelopeWeight(int JobjSourceOffset, float Weight);
 public sealed record MeshData(Vector3Data[] Positions, Vector3Data[]? Normals, int[] TriangleIndices,
-    int[]? EnvelopeIndices = null, EnvelopeWeight[][]? Envelopes = null, int? BoundJobjSourceOffset = null, Vector2Data[]? TexCoords0 = null);
+    int[]? EnvelopeIndices = null, EnvelopeWeight[][]? Envelopes = null, int? BoundJobjSourceOffset = null, Vector2Data[]? TexCoords0 = null, ColorData[]? Colors0 = null, ColorData[]? Colors1 = null);
 
 /// <summary>Bounded, headless decoder for rigid and enveloped GX triangle geometry. Bindings remain explicit.</summary>
 public static class GxMeshDecoder
@@ -70,6 +71,8 @@ public static class GxMeshDecoder
         int cursor = display!.Value, end = cursor + length; r.Check(cursor, length);
         var positions = new List<Vector3Data>(); var normals = names.Contains(10) ? new List<Vector3Data>() : null;
         var texCoords = names.Contains(13) ? new List<Vector2Data>() : null;
+        var colors0 = names.Contains(11) ? new List<ColorData>() : null;
+        var colors1 = names.Contains(12) ? new List<ColorData>() : null;
         var triangles = new List<int>();
         var envelopeIndices = enveloped ? new List<int>() : null;
         var boundaries = archive.Pointers.Values.Concat(archive.Roots.Select(x => x.Offset)).Append(archive.DataSize).Distinct().Order().ToArray();
@@ -108,6 +111,8 @@ public static class GxMeshDecoder
                     }
                     if (attr.Name == 9) positions.Add(ReadVector(attr, offset));
                     if (attr.Name == 10) normals!.Add(ReadVector(attr, offset));
+                    if (attr.Name == 11) colors0!.Add(ReadColor(attr, offset));
+                    if (attr.Name == 12) colors1!.Add(ReadColor(attr, offset));
                     if (attr.Name == 13)
                     {
                         var uv = ReadVector(attr, offset); texCoords!.Add(new(uv.X, uv.Y));
@@ -117,10 +122,38 @@ public static class GxMeshDecoder
         }
         Require(triangles.Count > 0, "GX_EMPTY_MESH", "No triangles decoded from polygon.");
         return new(positions.ToArray(), normals?.ToArray(), triangles.ToArray(), envelopeIndices?.ToArray(),
-            enveloped ? envelopes.ToArray() : null, enveloped ? null : binding, texCoords?.ToArray());
+            enveloped ? envelopes.ToArray() : null, enveloped ? null : binding, texCoords?.ToArray(), colors0?.ToArray(), colors1?.ToArray());
 
         void Need(int bytes) => Require(cursor <= end - bytes, "GX_DISPLAY_LIST", "Truncated display-list primitive.");
         byte ReadByte() { Need(1); return r.Byte(cursor++); }
+        ColorData ReadColor(Attribute attr, int offset)
+        {
+            // Expand packed GX channels to eight bits by bit replication.
+            float Bits(int value, int width) => (width switch
+            {
+                4 => (value << 4) | value,
+                5 => (value << 3) | (value >> 2),
+                6 => (value << 2) | (value >> 4),
+                _ => value
+            }) / 255f;
+            int packed;
+            switch (attr.Format)
+            {
+                case 0:
+                    packed = r.UShort(offset);
+                    return new(Bits((packed >> 11) & 31, 5), Bits((packed >> 5) & 63, 6), Bits(packed & 31, 5), 1);
+                case 3:
+                    packed = r.UShort(offset);
+                    return new(Bits((packed >> 12) & 15, 4), Bits((packed >> 8) & 15, 4), Bits((packed >> 4) & 15, 4), Bits(packed & 15, 4));
+                case 4:
+                    packed = (r.Byte(offset) << 16) | (r.Byte(offset + 1) << 8) | r.Byte(offset + 2);
+                    return new(Bits((packed >> 18) & 63, 6), Bits((packed >> 12) & 63, 6), Bits((packed >> 6) & 63, 6), Bits(packed & 63, 6));
+                default:
+                    return new(r.Byte(offset) / 255f, r.Byte(offset + 1) / 255f, r.Byte(offset + 2) / 255f,
+                        attr.Format == 5 ? r.Byte(offset + 3) / 255f : 1);
+            }
+        }
+
         Vector3Data ReadVector(Attribute attr, int offset)
         {
             int count = attr.Name == 13 ? attr.Components + 1 : attr.Name == 9 && attr.Components == 0 ? 2 : 3;

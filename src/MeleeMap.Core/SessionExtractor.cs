@@ -90,7 +90,7 @@ public static class SessionExtractor
                         : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
                         : readOnlyReasons.GetValueOrDefault(node.Id),
                     vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
-                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices, texCoords0 = mesh.TexCoords0,
+                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices, texCoords0 = mesh.TexCoords0, colors0 = mesh.Colors0, colors1 = mesh.Colors1,
                     boundJobjId = JointId(mesh.BoundJobjSourceOffset), envelopeIndices = mesh.EnvelopeIndices,
                     envelopes = mesh.Envelopes?.Select(e => e.Select(w => new { jobjId = JointId(w.JobjSourceOffset), weight = w.Weight }))
                 });
@@ -124,12 +124,18 @@ public static class SessionExtractor
                 preview = TexturePreview.Extract(stage.Layout, material, temporary)
             }).ToArray();
             // Preview-only materials never enter the reusable export material catalog.
-            var animatedPreviews = editableModels.Where(e => e.PositionsOnly).Select(e =>
+            var catalogIds = previewMaterials.Select(m => m.Id).ToHashSet();
+            var nodesById = identity.Nodes.ToDictionary(n => n.Id);
+            var basePreviews = meshes.Where(m => !catalogIds.Contains(m.Node.Id)).Select(m =>
             {
-                int mobj = reader.Pointer(e.DobjOffset + 8)!.Value;
-                var material = new ModelMaterial(e.Id,
-                    $"Base Material G{e.GroupIndex:D3} J{e.JobjIndex:D3} D{e.DobjIndex:D3}",
-                    mobj, reader.Pointer(mobj + 8) != null);
+                var dobj = nodesById[m.Node.OwnerId!];
+                var joint = nodesById[dobj.OwnerId!];
+                return (m.Node, Dobj: dobj, Joint: joint, Mobj: reader.Pointer(dobj.SourceOffset + 8));
+            }).Where(m => m.Mobj.HasValue && reader.Pointer(m.Mobj.Value) == null).Select(m =>
+            {
+                var material = new ModelMaterial(m.Node.Id,
+                    $"Base Material G{m.Node.GroupIndex:D3} J{m.Joint.Index:D3} D{m.Dobj.Index:D3}",
+                    m.Mobj!.Value, reader.Pointer(m.Mobj.Value + 8) != null);
                 return new { material.Id, material.Name, material.UsesUv,
                     preview = TexturePreview.Extract(stage.Layout, material, temporary) };
             }).ToArray();
@@ -148,7 +154,7 @@ public static class SessionExtractor
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
                 modelMaterials = previewMaterials,
-                modelPreviews = animatedPreviews,
+                modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
                     e.DobjIndex, e.PobjIndex, e.PositionsOnly, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),
