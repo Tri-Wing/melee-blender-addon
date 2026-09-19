@@ -153,6 +153,7 @@ public static class SessionExtractor
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
+                editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity),
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,

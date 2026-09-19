@@ -209,6 +209,7 @@ def import_session(context, directory):
                 target.name = target.name.replace('Editable Model', 'Vertex Editable Model', 1)
             baselines[info['id']] = modeling.fingerprint(target)
         scene['mme_model_baselines'] = json.dumps(baselines)
+        scene['mme_color_baselines'] = json.dumps({info['id']: modeling.color_fingerprint(modeling.target_object(scene, info)) for info in editable_models})
         scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(modeling.target_object(scene, info), info.get('positionsOnly', False)) for info in editable_models})
         # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
@@ -259,13 +260,19 @@ def prepare(scene):
     if dirty and not stage['capabilities']['collisionEdit']:
         raise StageError('This stage has read-only collision (dynamic attachments or source warnings). Undo collision changes.')
     modeling.edits(scene, stage)
+    from . import material_properties
+    material_properties.edits(scene, stage)
     return directory, edits if dirty else None
 
 
 def apply(scene, cli, dotnet, output):
     directory, edits = prepare(scene)
     model_edits = modeling.edits(scene, load_session(directory))
+    from . import material_properties
+    material_edits = material_properties.edits(scene, load_session(directory))
     payloads = {}
+    if material_edits is not None:
+        payloads[directory / 'edits/materials.json'] = material_edits
     if edits is not None:
         payloads[directory / 'edits/collision.json'] = edits
     if model_edits is not None:

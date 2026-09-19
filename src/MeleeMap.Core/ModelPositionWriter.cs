@@ -4,13 +4,15 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-/// <summary>Replace only positions, retaining all original rendering attributes and material state.</summary>
+/// <summary>Replace positions and corner colors, retaining other rendering attributes and material state.</summary>
 public static class ModelPositionWriter
 {
     public static byte[] Write(ArchiveLayout source, EditableModel target, MeshData mesh)
     {
         var original = GxMeshDecoder.Decode(source, target.PobjOffset);
-        Require(mesh.Positions.Length == original.Positions.Length && mesh.TriangleIndices.SequenceEqual(original.TriangleIndices)
+        bool expanded = mesh.Positions.Length == original.TriangleIndices.Length
+            && mesh.TriangleIndices.SequenceEqual(Enumerable.Range(0, mesh.Positions.Length));
+        Require((expanded || (mesh.Positions.Length == original.Positions.Length && mesh.TriangleIndices.SequenceEqual(original.TriangleIndices)))
             && mesh.Positions.All(p => float.IsFinite(p.X) && float.IsFinite(p.Y) && float.IsFinite(p.Z)),
             "MODEL_POSITION_TOPOLOGY", "Appearance-preserving edits require the original vertex count and triangle indices.");
         var r = new ArchiveDataReader(source);
@@ -20,7 +22,13 @@ public static class ModelPositionWriter
         for (int at = attrs; r.Int(at) != 255; at += 24)
             attributes.Add(new(r.Int(at), r.Int(at + 4), r.Int(at + 8), r.Int(at + 12),
                 r.Byte(at + 16), r.UShort(at + 18), r.Pointer(at + 20)));
-        // Clone descriptors, leaving every non-position format and buffer intact.
+        bool ColorChanged(int name) => name == 11 && mesh.Colors0 != null &&
+            !(expanded ? original.TriangleIndices.Select(i => original.Colors0![i]) : original.Colors0!).SequenceEqual(mesh.Colors0)
+            || name == 12 && mesh.Colors1 != null &&
+            !(expanded ? original.TriangleIndices.Select(i => original.Colors1![i]) : original.Colors1!).SequenceEqual(mesh.Colors1);
+        var changedColors = new HashSet<int>(new[] { 11, 12 }.Where(ColorChanged));
+        bool ReplaceColor(int name) => changedColors.Contains(name);
+        // Clone descriptors and retain the original buffers for untouched attributes.
         byte[] descriptors = new byte[(attributes.Count + 1) * 24];
         source.Bytes.AsSpan(32 + attrs, attributes.Count * 24).CopyTo(descriptors);
         Put(descriptors, attributes.Count * 24, 255);
@@ -29,7 +37,17 @@ public static class ModelPositionWriter
         Put(descriptors, pos, 9); Put(descriptors, pos + 4, 1); // GX_DIRECT
         Put(descriptors, pos + 8, 1); Put(descriptors, pos + 12, 4); // XYZ, float32
         Short(descriptors, pos + 18, 12);
+        for (int i = 0; i < attributes.Count; i++)
+        {
+            if (!ReplaceColor(attributes[i].Name)) continue;
+            int at = i * 24; Array.Clear(descriptors, at, 24);
+            Put(descriptors, at, attributes[i].Name); Put(descriptors, at + 4, 1);
+            Put(descriptors, at + 8, 1); Put(descriptors, at + 12, 5); // RGBA8, direct
+            Short(descriptors, at + 18, 4);
+        }
         using var display = new MemoryStream();
+        var tokens = new List<int[]>();
+        var commands = new List<(byte Command, int Count)>();
         int cursor = dl, end = dl + r.UShort(target.PobjOffset + 14) * 32, vertex = 0;
         // Decode above has already bounded and validated all commands/attributes.
         while (cursor < end)
@@ -37,21 +55,51 @@ public static class ModelPositionWriter
             byte command = r.Byte(cursor++);
             if (command == 0) break;
             int count = r.UShort(cursor); cursor += 2;
-            display.WriteByte(command); byte[] countBytes = new byte[2]; Short(countBytes, 0, count); display.Write(countBytes);
+            commands.Add((command, count));
             for (int i = 0; i < count; i++)
             {
-                foreach (var attr in attributes)
+                var offsets = new int[attributes.Count];
+                for (int j = 0; j < attributes.Count; j++)
                 {
-                    int size = attr.Type == 1 ? GxMeshDecoder.ElementSize(attr) : attr.Type == 2 ? 1 : 2;
-                    if (attr.Name == 9)
-                    {
-                        var p = mesh.Positions[vertex]; byte[] value = new byte[12];
-                        Float(value, 0, p.X); Float(value, 4, p.Y); Float(value, 8, p.Z); display.Write(value);
-                    }
-                    else display.Write(source.Bytes.AsSpan(32 + cursor, size));
-                    cursor += size;
+                    var attr = attributes[j]; offsets[j] = cursor;
+                    cursor += attr.Type == 1 ? GxMeshDecoder.ElementSize(attr) : attr.Type == 2 ? 1 : 2;
                 }
-                vertex++;
+                tokens.Add(offsets);
+            }
+        }
+        void EmitVertex(int sourceVertex, int outputVertex)
+        {
+            for (int j = 0; j < attributes.Count; j++)
+            {
+                var attr = attributes[j];
+                int size = attr.Type == 1 ? GxMeshDecoder.ElementSize(attr) : attr.Type == 2 ? 1 : 2;
+                if (attr.Name == 9)
+                {
+                    var p = mesh.Positions[outputVertex]; byte[] value = new byte[12];
+                    Float(value, 0, p.X); Float(value, 4, p.Y); Float(value, 8, p.Z); display.Write(value);
+                }
+                else if (ReplaceColor(attr.Name))
+                {
+                    var color = (attr.Name == 11 ? mesh.Colors0! : mesh.Colors1!)[outputVertex];
+                    foreach (float value in new[] { color.R, color.G, color.B, color.A })
+                        display.WriteByte(checked((byte)MathF.Round(value * 255)));
+                }
+                else display.Write(source.Bytes.AsSpan(32 + tokens[sourceVertex][j], size));
+            }
+        }
+        if (expanded)
+        {
+            display.WriteByte(0x90); byte[] countBytes = new byte[2];
+            Short(countBytes, 0, mesh.Positions.Length); display.Write(countBytes);
+            for (int i = 0; i < mesh.Positions.Length; i++) EmitVertex(original.TriangleIndices[i], i);
+        }
+        else
+        {
+            foreach (var command in commands)
+            {
+                display.WriteByte(command.Command); byte[] countBytes = new byte[2];
+                Short(countBytes, 0, command.Count); display.Write(countBytes);
+                for (int i = 0; i < command.Count; i++, vertex++) EmitVertex(vertex, vertex);
             }
         }
         while (display.Length % 32 != 0) display.WriteByte(0);
@@ -70,7 +118,7 @@ public static class ModelPositionWriter
         int countRelocations = source.Read(8);
         var relocations = Enumerable.Range(0, countRelocations).Select(i => source.Read(32 + source.DataSize + i * 4)).ToList();
         for (int i = 0; i < attributes.Count; i++)
-            if (attributes[i].Name != 9 && attributes[i].Buffer.HasValue) relocations.Add(newAttrs + i * 24 + 20);
+            if (attributes[i].Name != 9 && !ReplaceColor(attributes[i].Name) && attributes[i].Buffer.HasValue) relocations.Add(newAttrs + i * 24 + 20);
         using var result = new MemoryStream(); result.Write(source.Bytes.AsSpan(0, 32)); result.Write(payload);
         foreach (int field in relocations) { byte[] value = new byte[4]; Put(value, 0, field); result.Write(value); }
         result.Write(source.Bytes.AsSpan(32 + source.DataSize + countRelocations * 4));
@@ -88,7 +136,7 @@ public static class ModelPositionWriter
         return output;
     }
 
-    public static void Verify(ArchiveLayout archive, ArchiveLayout source, EditableModel target, MeshData expected)
+    public static void Verify(ArchiveLayout archive, ArchiveLayout source, EditableModel target, MeshData expected, int? expectedMaterial = null)
     {
         var actual = GxMeshDecoder.Decode(archive, target.PobjOffset);
         Require(actual.Positions.SequenceEqual(expected.Positions) && actual.TriangleIndices.SequenceEqual(expected.TriangleIndices)
@@ -104,7 +152,7 @@ public static class ModelPositionWriter
             "MODEL_WRITE_MISMATCH", "Reloaded positions or original shading differ from the vertex edit.");
         var r = new ArchiveDataReader(archive); var before = new ArchiveDataReader(source);
         Require(r.UShort(target.PobjOffset + 12) == before.UShort(target.PobjOffset + 12)
-            && r.Pointer(target.DobjOffset + 8) == before.Pointer(target.DobjOffset + 8),
+            && r.Pointer(target.DobjOffset + 8) == (expectedMaterial ?? before.Pointer(target.DobjOffset + 8)),
             "MODEL_MATERIAL_MISMATCH", "Vertex editing changed original material or culling state.");
     }
 

@@ -61,5 +61,18 @@ public class VertexColorTests
         Assert.Equal(3, decoded.Colors1!.Length);
         Assert.All(decoded.Colors0, c => Assert.Equal(expected, c));
         Assert.Equal(decoded.Colors0, decoded.Colors1);
+        // Upgrade a painted channel to RGBA8 without changing the other channel,
+        // including the original alpha of RGB-only source formats.
+        var source = new ArchiveLayout(bytes);
+        var target = new EditableModel("colors", 0, 0, 0, 0, 0, 112);
+        var painted = new[] { new ColorData(10/255f, 20/255f, 30/255f, 40/255f), expected, expected };
+        var output = ModelPositionWriter.Write(source, target, decoded with { Colors1 = painted });
+        var restored = GxMeshDecoder.Decode(new ArchiveLayout(output), 0);
+        Assert.Equal(decoded.Colors0, restored.Colors0);
+        Assert.Equal(painted, restored.Colors1);
+        output = ModelPositionWriter.Write(source, target, decoded with { Colors0 = painted, Colors1 = painted });
+        restored = GxMeshDecoder.Decode(new ArchiveLayout(output), 0);
+        Assert.Equal(painted, restored.Colors0);
+        Assert.Equal(painted, restored.Colors1);
     }
 }

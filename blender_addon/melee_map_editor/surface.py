@@ -11,6 +11,8 @@ def material_id(material):
 
 
 def create_materials(stage, directory=None):
+    from . import material_properties
+    definitions = {entry['id']: entry for entry in stage.get('editableMaterialProperties', [])}
     result = {}
     entries = [(entry, False) for entry in stage.get('modelMaterials', [])]
     entries += [(entry, True) for entry in stage.get('modelPreviews', [])]
@@ -24,6 +26,8 @@ def create_materials(stage, directory=None):
         material['mme_model_material_source'] = stage['source']['sha256']
         material['mme_model_uses_uv'] = entry['usesUv']
         configure_preview(material, entry.get('preview'), directory, stage)
+        if entry['id'] in definitions:
+            material_properties.initialize(material, entry, definitions[entry['id']], directory, stage)
         result[entry['id']] = material
     return result
 
@@ -109,14 +113,95 @@ def configure_preview(material, preview, directory, stage):
     links = material.node_tree.links
     nodes.clear()
     output = nodes.new('ShaderNodeOutputMaterial')
-    emission = nodes.new('ShaderNodeEmission')
+    diffuse_lighting = preview.get('diffuseLighting', False)
+    specular_lighting = preview.get('specularLighting', False)
+    shader = nodes.new('ShaderNodeEmission')
+    shader.name = 'Stage Surface'
+    color_input = shader.inputs['Color']
     # Byte colors describe sRGB; shader color sockets are scene-linear.
     linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in color[:3]]
     # Vertex-color materials take their base color from the mesh, not diffuse RGB.
     if preview.get('useVertexColor'):
         linear = [1, 1, 1]
-    emission.inputs['Color'].default_value = (*linear, 1)
-    links.new(emission.outputs[0], output.inputs['Surface'])
+    color_input.default_value = (*linear, 1)
+    if diffuse_lighting or specular_lighting:
+        geometry = nodes.new('ShaderNodeNewGeometry')
+        geometry.name = 'Stage Lighting Normal'
+        camera_normal = nodes.new('ShaderNodeVectorTransform')
+        camera_normal.name = 'Stage Camera Normal'
+        camera_normal.vector_type = 'NORMAL'
+        camera_normal.convert_from = 'WORLD'
+        camera_normal.convert_to = 'CAMERA'
+        links.new(geometry.outputs['Normal'], camera_normal.inputs['Vector'])
+
+        def scalar(kind, operation, a=None, b=None):
+            node = nodes.new(kind)
+            node.operation = operation
+            if a is not None:
+                if isinstance(a, (int, float)):
+                    node.inputs[0].default_value = a
+                else:
+                    links.new(a, node.inputs[0])
+            if b is not None:
+                if isinstance(b, (int, float)):
+                    node.inputs[1].default_value = b
+                else:
+                    links.new(b, node.inputs[1])
+            return node
+
+        diffuse = nodes.new('ShaderNodeMixRGB')
+        diffuse.name = 'Stage Diffuse Lighting'
+        diffuse.blend_type = 'MULTIPLY'
+        diffuse.inputs[0].default_value = 1
+        diffuse.inputs[1].default_value = (*linear, 1)
+        color_input = diffuse.inputs[1]
+        if diffuse_lighting:
+            dot = nodes.new('ShaderNodeVectorMath')
+            dot.name = 'Stage Diffuse N dot L'
+            dot.operation = 'DOT_PRODUCT'
+            dot.inputs[1].default_value = (.35, -.45, .82)
+            links.new(camera_normal.outputs['Vector'], dot.inputs[0])
+            positive = scalar('ShaderNodeMath', 'MAXIMUM', dot.outputs['Value'], 0)
+            directional = scalar('ShaderNodeMath', 'MULTIPLY', positive.outputs[0], .4)
+            light = scalar('ShaderNodeMath', 'ADD', directional.outputs[0], .65)
+            links.new(light.outputs[0], diffuse.inputs[2])
+        else:
+            diffuse.inputs[2].default_value = (1, 1, 1, 1)
+        result = diffuse.outputs[0]
+
+        if specular_lighting:
+            half_dot = nodes.new('ShaderNodeVectorMath')
+            half_dot.name = 'Stage Specular N dot H'
+            half_dot.operation = 'DOT_PRODUCT'
+            half_dot.inputs[1].default_value = (.184, -.236, .954)
+            links.new(camera_normal.outputs['Vector'], half_dot.inputs[0])
+            positive = scalar('ShaderNodeMath', 'MAXIMUM', half_dot.outputs['Value'], 0)
+            # HSD evaluates pow(max(dot(N, H), 0), shininess). Unlike a BSDF,
+            # this does not reflect Blender's HDRI or world environment.
+            exponent = max(1, min(128, preview.get('shininess', 50)))
+            power = scalar('ShaderNodeMath', 'POWER', positive.outputs[0], exponent)
+            power.name = 'Stage Specular Power'
+            specular = preview.get('specularColor') or [.25, .25, .25, 1]
+            specular_linear = tuple(
+                c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4 for c in specular[:3]) + (1,)
+            specular_color = nodes.new('ShaderNodeMixRGB')
+            specular_color.name = 'Stage Specular Color'
+            specular_color.blend_type = 'MULTIPLY'
+            specular_color.inputs[0].default_value = 1
+            specular_color.inputs[1].default_value = specular_linear
+            links.new(power.outputs[0], specular_color.inputs[2])
+            add = nodes.new('ShaderNodeMixRGB')
+            add.name = 'Stage Specular Add'
+            add.blend_type = 'ADD'
+            add.inputs[0].default_value = 1
+            links.new(result, add.inputs[1])
+            links.new(specular_color.outputs[0], add.inputs[2])
+            result = add.outputs[0]
+        links.new(result, shader.inputs['Color'])
+        geometry.location = (-900, -500)
+        camera_normal.location = (-700, -500)
+        diffuse.location = (50, -150)
+    links.new(shader.outputs[0], output.inputs['Surface'])
     warning = preview.get('warning')
     texture = preview.get('texture')
     if warning:
@@ -176,22 +261,22 @@ def configure_preview(material, preview, directory, stage):
             encoded = color_transfer(material, sampler.outputs['Color'], to_linear=False)
             links.new(encoded, tint.inputs[2])
             result = color_transfer(material, tint.outputs[0], to_linear=True)
-            links.new(result, emission.inputs['Color'])
+            links.new(result, color_input)
         else:
             tint.inputs[1].default_value = (*linear, 1)
             links.new(sampler.outputs['Color'], tint.inputs[2])
-            links.new(tint.outputs[0], emission.inputs['Color'])
+            links.new(tint.outputs[0], color_input)
         tint.location = (100, 100)
     else:
-        links.new(sampler.outputs['Color'], emission.inputs['Color'])
+        links.new(sampler.outputs['Color'], color_input)
     nodes.active = sampler
     sampler.select = True
     # A legible layout if the user opens the Shader Editor.
     uv.location = (-900, 0)
     combine.location = (-300, 0)
     sampler.location = (-100, 0)
-    emission.location = (200, 0)
-    output.location = (400, 0)
+    shader.location = (400, 0)
+    output.location = (600, 0)
     configure_alpha_preview(material, preview.get('alpha'))
 
 
@@ -229,10 +314,11 @@ def import_colors(mesh, source):
 
 def configure_color_preview(material, layer_name):
     """Approximate GX raster color modulation; TEV channel routing is not emulated."""
-    if not material.node_tree or not any(n.type == 'EMISSION' for n in material.node_tree.nodes):
+    material['mme_vertex_color_layer'] = layer_name
+    if not material.node_tree or material.node_tree.nodes.get('Stage Surface') is None:
         configure_preview(material, {'color': [1, 1, 1, 1]}, None, {})
     nodes, links = material.node_tree.nodes, material.node_tree.links
-    emission = next(n for n in nodes if n.type == 'EMISSION')
+    shader = nodes.get('Stage Diffuse Lighting') or nodes['Stage Surface']
     color = nodes.new('ShaderNodeVertexColor')
     color.name = 'Stage Vertex Color'
     color.layer_name = layer_name
@@ -240,7 +326,7 @@ def configure_color_preview(material, layer_name):
     multiply.name = 'Stage Color Modulation'
     multiply.blend_type = 'MULTIPLY'
     multiply.inputs[0].default_value = 1
-    base = emission.inputs['Color']
+    base = shader.inputs[1] if shader.name == 'Stage Diffuse Lighting' else shader.inputs['Color']
     if base.is_linked:
         links.new(base.links[0].from_socket, multiply.inputs[1])
     else:
@@ -262,9 +348,10 @@ def configure_alpha_preview(material, settings):
     for node in list(nodes):
         if node.get('mme_alpha_node'):
             nodes.remove(node)
-    emission = next(n for n in nodes if n.type == 'EMISSION')
+    stage_surface = nodes['Stage Surface']
     output = next(n for n in nodes if n.type == 'OUTPUT_MATERIAL')
-    emission.inputs['Strength'].default_value = 1
+    if stage_surface.type == 'EMISSION':
+        stage_surface.inputs['Strength'].default_value = 1
 
     def node(kind):
         result = nodes.new(kind)
@@ -333,18 +420,18 @@ def configure_alpha_preview(material, settings):
         passed = math('SUBTRACT', 1, passed)
     transparent = node('ShaderNodeBsdfTransparent')
     mode, src, dst = settings['blendMode'], settings['sourceFactor'], settings['destinationFactor']
-    if mode == 1 and dst == 1 and src in (1, 4):
+    if mode == 1 and dst == 1 and src in (1, 4) and stage_surface.type == 'EMISSION':
         # Additive effects transmit the background completely; black adds nothing.
-        connect(math('MULTIPLY', passed, alpha if src == 4 else 1), emission.inputs['Strength'])
+        connect(math('MULTIPLY', passed, alpha if src == 4 else 1), stage_surface.inputs['Strength'])
         shader = node('ShaderNodeAddShader')
         links.new(transparent.outputs[0], shader.inputs[0])
-        links.new(emission.outputs[0], shader.inputs[1])
+        links.new(stage_surface.outputs[0], shader.inputs[1])
     else:
         opacity = passed if mode == 0 or (mode == 1 and src == 1 and dst == 0) else math('MULTIPLY', passed, alpha)
         shader = node('ShaderNodeMixShader')
         connect(opacity, shader.inputs[0])
         links.new(transparent.outputs[0], shader.inputs[1])
-        links.new(emission.outputs[0], shader.inputs[2])
+        links.new(stage_surface.outputs[0], shader.inputs[2])
     shader.name = 'Stage Alpha Surface'
     links.new(shader.outputs[0], output.inputs['Surface'])
     if hasattr(material, 'surface_render_method'):

@@ -50,8 +50,8 @@ with tempfile.TemporaryDirectory(prefix='mme-colors-') as tmp:
                 assert obj.active_material.node_tree.nodes.get('Stage Vertex Color')
     assert count > 0
     print(f'Imported {count} stage color channels')
-    # Painting is preview-only; no-edit export must still retain source bytes.
-    colored = next(o for o in s.objects if o.type == 'MESH' and o.data.color_attributes.get('Stage Color 0'))
+    # Painting read-only geometry remains preview-only.
+    colored = next(o for o in s.objects if o.type == 'MESH' and o.get('mme_id') not in modeling.target_ids(s) and o.data.color_attributes.get('Stage Color 0'))
     colored.data.color_attributes['Stage Color 0'].data[0].color = (.1, .2, .3, .4)
     scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')
     assert (tmp / 'noop.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()

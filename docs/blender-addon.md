@@ -402,7 +402,7 @@ Converting only part of a connected boundary can still produce incompatible
 adjacency, which must be resolved before export. Regression tests cover ceiling
 conversion and output reload, but the fix still needs an in-game retest.
 
-## Vertex-color previews
+## Vertex colors
 
 Reload the add-on and re-import the DAT to load GX vertex colors. Available
 channels appear under Mesh Data > Color Attributes as **Stage Color 0** and
@@ -411,9 +411,13 @@ The first available channel multiplies the base material/texture color. The seco
 is stored for inspection. Material, texture and vertex alpha are previewed using
 the source settings; custom game TEV channel routing remains approximate.
 
-Vertex painting currently changes only the Blender preview. Vertex-only DAT
-exports retain the original colors; topology replacements still do not export
-vertex colors. This also applies to vertex colors on read-only geometry.
+Vertex painting and alpha edits on static editable rigid meshes are exported
+to DAT, including independent colors at face corners. The **Melee Material**
+panel identifies materials that use vertex color and points to Blender's native
+Vertex Paint workflow; it does not apply an object-wide color. Native
+color-attribute editing and vertex painting export. Color edits currently require unchanged topology, UVs and material
+assignment; animated position-only meshes reject them. Painting read-only
+geometry remains preview-only. Source transparency settings are retained.
 
 Material previews are independent of export-material eligibility. Static meshes
 using vertex-color materials (for example GrSt Group 003 / JOBJ 004 / DOBJ 013)
@@ -436,9 +440,57 @@ Opaque materials stay opaque even if their image contains black pixels or unused
 alpha. Custom TEV routing, multiple texture layers and uncommon framebuffer
 blending remain approximate; unsupported source settings are recorded in the
 material’s `mme_preview_warning` property. Material/texture animation is still not evaluated.
-These previews do not change DAT export behavior or enable alpha/material editing
-in exports. Rendered regression tests cover alpha sources, operations, cutouts,
+Preview nodes do not export material edits. Use the supported Melee Material
+properties below for exportable changes. Rendered regression tests cover alpha sources, operations, cutouts,
 additive effects and opaque black on Blender 4.5 and 5.2.
 
 Stage imports set scene color management to Standard, with Look None, Exposure 0
 and Gamma 1, to preserve the saturated colors used by Melee.
+
+## Editing material properties
+
+After reloading the add-on and importing a fresh DAT session, select a supported
+static model and open **Material Properties > Melee Material**. The panel
+supports **Use Vertex Colors**, **Alpha Source**, **Diffuse Color**, **Material Alpha**,
+**Texture Blend**, and **Transparency**. Transparency can be Opaque, Alpha
+Blend, Additive, or Subtractive; changing it updates both the MOBJ render queue
+flag and the PE blend state. For source vertex-color materials, clearing **Use Vertex
+Colors** switches the exported MOBJ to material color and material alpha, then
+exposes the diffuse and alpha controls. The painted color attribute remains on
+the mesh and can be enabled again. Changes
+update the preview immediately and are included in normal validation/export.
+Unavailable controls are disabled according to the source material's settings.
+Texture Blend is enabled only when the material uses a color or alpha BLEND
+operation.
+
+**Alpha Source** is independent of RGB source and supports the four HSD modes:
+Compatibility, Material Alpha, Vertex Alpha, and Material × Vertex. Vertex
+alpha is painted in Blender's `Stage Color 0` attribute with Vertex Paint.
+
+The **Render Flags** box exposes the documented MOBJ flags that can be changed
+without inventing or removing referenced records: diffuse lighting, specular,
+toon shading, depth offset, depth-test-always, depth writing, shadow, all
+textures, effect, and user. Depth settings are mirrored into an existing PE
+descriptor when necessary. Texture-enable bits remain derived from the actual
+TOBJ chain, source selectors are controlled by **Use Vertex Colors**, and
+undocumented bits are preserved.
+
+Diffuse Lighting and Specular Highlight also change the Blender preview shader.
+Unlit Melee materials keep the emission preview used for exact base colors.
+Lit materials also use emission, fed by explicit normal/light calculations that
+follow HSD's diffuse and Blinn-Phong specular equations. Specular uses the DAT
+material's RGB and shininess and never reflects Blender's HDRI or world
+environment. The preview currently uses one fixed camera-relative light plus an
+ambient term, so light placement remains approximate until stage LOBJ lights
+and the complete GX channel pipeline are imported.
+
+Geometry, UV and collision edits can be exported in the same operation. Editing
+a Blender material affects supported models assigned to that material. The DAT
+writer copies edited material records before changing bindings, so other source
+meshes sharing the original records retain their appearance. Blender copies
+with the same source identity but conflicting property values are rejected.
+
+Animated materials, unsupported material layouts and read-only model targets
+remain protected for this slice. Native shader-node and image
+edits still affect previews only. Vertex-color editing is described above. Property export is covered by automated
+roundtrip tests; in-game verification is still needed.

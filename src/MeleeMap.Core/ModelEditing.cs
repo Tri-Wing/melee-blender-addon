@@ -6,7 +6,8 @@ namespace MeleeMap.Core;
 
 public sealed record ModelEdit([property: JsonRequired] string Id,
     [property: JsonRequired] Vector3Data[] Positions, [property: JsonRequired] int[] TriangleIndices,
-    string? SourceMaterialId = null, Vector2Data[]? TexCoords = null, bool UseGreyMaterial = false);
+    string? SourceMaterialId = null, Vector2Data[]? TexCoords = null, bool UseGreyMaterial = false,
+    ColorData[]? Colors0 = null, ColorData[]? Colors1 = null);
 public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
     [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes);
 public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
@@ -124,7 +125,8 @@ public static class ModelEditing
             "MODEL_EDIT_TARGET", "Each compiled replacement must match an eligible rigid mesh.");
         var edit = edits.Meshes[0];
         Require(!target.PositionsOnly || (original != null && HasSameTopology(edit, original)
-            && edit.SourceMaterialId == null && edit.TexCoords == null && !edit.UseGreyMaterial),
+            && edit.SourceMaterialId == null && edit.TexCoords == null && !edit.UseGreyMaterial
+            && edit.Colors0 == null && edit.Colors1 == null),
             "MODEL_POSITION_ONLY", "Models with animated materials support vertex movement only. Keep topology, UVs and material assignments unchanged.");
         Require(edit.Positions is { Length: > 0 and <= 65535 } && edit.TriangleIndices is { Length: > 0 }
             && edit.TriangleIndices.Length % 3 == 0 && edit.TriangleIndices.Length <= MaxTriangles * 3,
@@ -135,8 +137,30 @@ public static class ModelEditing
         Require(edit.TexCoords == null || (edit.SourceMaterialId != null && edit.TexCoords.Length == edit.TriangleIndices.Length
             && edit.TexCoords.All(uv => float.IsFinite(uv.X) && float.IsFinite(uv.Y))),
             "MODEL_UV", "UVs require a source material and one finite coordinate per triangle corner.");
+        bool hasColors = edit.Colors0 != null || edit.Colors1 != null;
+        Require(!hasColors || (original != null && PreservesAppearance(edit, original, target)),
+            "MODEL_COLOR_TOPOLOGY", "Vertex colors require the original topology and material assignment.");
+        ColorData[]? Colors(ColorData[]? values, ColorData[]? source)
+        {
+            if (values == null) return source == null ? null : original!.TriangleIndices.Select(i => source[i]).ToArray();
+            Require(source != null && values.Length == edit.TriangleIndices.Length
+                && values.All(c => new[] { c.R, c.G, c.B, c.A }.All(v => float.IsFinite(v) && v >= 0 && v <= 1)),
+                "MODEL_COLOR", "Colors require an existing channel and one finite RGBA value in [0,1] per triangle corner.");
+            float Q(float v) => MathF.Round(v * 255, MidpointRounding.AwayFromZero) / 255;
+            return values.Select(c => new ColorData(Q(c.R), Q(c.G), Q(c.B), Q(c.A))).ToArray();
+        }
         if (original != null && PreservesAppearance(edit, original, target))
-            return original with { Positions = edit.Positions };
+        {
+            if (!hasColors) return original with { Positions = edit.Positions };
+            // Expand corners so painting a seam never changes the neighboring face.
+            return original with {
+                Positions = original.TriangleIndices.Select(i => edit.Positions[i]).ToArray(),
+                Normals = original.Normals == null ? null : original.TriangleIndices.Select(i => original.Normals[i]).ToArray(),
+                TexCoords0 = original.TexCoords0 == null ? null : original.TriangleIndices.Select(i => original.TexCoords0[i]).ToArray(),
+                TriangleIndices = Enumerable.Range(0, original.TriangleIndices.Length).ToArray(),
+                Colors0 = Colors(edit.Colors0, original.Colors0), Colors1 = Colors(edit.Colors1, original.Colors1)
+            };
+        }
         var positions = new List<Vector3Data>(); var normals = new List<Vector3Data>();
         var texCoords = edit.TexCoords == null ? null : new List<Vector2Data>();
         bool keepNormals = edit.SourceMaterialId != null && original?.Normals != null && HasSameTopology(edit, original);

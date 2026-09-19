@@ -48,6 +48,7 @@ def target_object(scene, info=None):
 
 def fingerprint(obj):
     if obj.mode == 'EDIT':
+        obj.update_from_editmode()
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.index_update()
         vertices = [list(v.co) for v in bm.verts]
@@ -56,6 +57,13 @@ def fingerprint(obj):
         vertices = [list(v.co) for v in obj.data.vertices]
         faces = [list(f.vertices) for f in obj.data.polygons]
     return digest({'vertices': vertices, 'faces': faces})
+
+
+def color_fingerprint(obj):
+    if obj.mode == 'EDIT':
+        obj.update_from_editmode()
+    return digest({layer.name: {'domain': layer.domain, 'values': [list(value.color) for value in layer.data]}
+                   for layer in obj.data.color_attributes if layer.name in ('Stage Color 0', 'Stage Color 1')})
 
 
 def edits(scene, stage):
@@ -68,16 +76,21 @@ def edits(scene, stage):
         raise StageError('Editable model identities changed. Re-import the stage.')
     baseline = baselines(scene)
     appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
+    color_baseline = json.loads(scene.get('mme_color_baselines', '{}'))
     meshes = []
     for info in infos:
         obj = target_object(scene, info)
         changed = (fingerprint(obj) != baseline.get(info['id'])
                    or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
         obj['mme_dirty'] = changed
-        if changed:
+        if changed or color_fingerprint(obj) != color_baseline.get(info['id']):
             source = read(Path(bpy.path.abspath(scene.mme_session)) / info['file'])
-            meshes.append(mesh_edit(obj, info, source, stage,
-                                    surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None))))
+            edit = mesh_edit(obj, info, source, stage,
+                             surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
+            changed = changed or 'colors0' in edit or 'colors1' in edit
+            obj['mme_dirty'] = changed
+            if changed:
+                meshes.append(edit)
     return {'protocolVersion': 2, 'coordinateSpace': 'game-joint-local', 'meshes': meshes} if meshes else None
 
 
@@ -106,6 +119,26 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         result = {'id': info['id'], 'positions': positions,
                   'triangleIndices': original_indices if same_topology else
                       [i for triangle in mesh.loop_triangles for i in triangle.vertices]}
+        for channel in range(2):
+            key = f'colors{channel}'
+            original_colors = source.get(key) if source else None
+            if original_colors is None:
+                continue
+            layer = mesh.color_attributes.get(f'Stage Color {channel}')
+            if layer is None:
+                raise StageError('An imported stage color attribute was removed. Restore it before export.')
+            loops = ([i for face in mesh.polygons for i in face.loop_indices] if same_topology else
+                     [i for triangle in mesh.loop_triangles for i in triangle.loops])
+            colors = [list(layer.data[mesh.loops[i].vertex_index if layer.domain == 'POINT' else i].color) for i in loops]
+            changed = (not same_topology or any(abs(value - original_colors[index][component]) > 1e-6
+                       for color, index in zip(colors, original_indices)
+                       for value, component in zip(color, ('r', 'g', 'b', 'a'))))
+            if changed:
+                if info.get('positionsOnly'):
+                    raise StageError('This animated model supports vertex movement only. Undo vertex color changes before export.')
+                if not same_topology or appearance_changed:
+                    raise StageError('Vertex color export requires the original topology, UVs and material assignment.')
+                result[key] = [dict(zip(('r', 'g', 'b', 'a'), color)) for color in colors]
         if same_topology and not appearance_changed:
             return result
         if not material and appearance_changed:
@@ -132,6 +165,7 @@ def update_dirty(scene, depsgraph):
         return
     baseline = baselines(scene)
     appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
+    color_baseline = json.loads(scene.get('mme_color_baselines', '{}'))
     updates = {update.id.original for update in depsgraph.updates}
     for info in infos:
         obj = target_object(scene, info)
@@ -140,6 +174,8 @@ def update_dirty(scene, depsgraph):
         try:
             changed = (fingerprint(obj) != baseline.get(info['id'])
                    or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
+            if info['id'] in color_baseline:
+                changed = changed or color_fingerprint(obj) != color_baseline[info['id']]
         except ValueError:
             changed = True
         if bool(obj.get('mme_dirty')) != changed:

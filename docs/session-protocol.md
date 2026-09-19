@@ -303,6 +303,12 @@ materials, animated materials and read-only geometry. These entries use the same
 `modelMaterials`, but are not export material donors. Blender imports them with
 `mme_preview_model_id` rather than `mme_model_material_id`. No animation is
 evaluated: source base colors and the first supported UV0 texture are displayed.
+The preview also carries `diffuseLighting` and `specularLighting` from the MOBJ
+render flags, plus the material's `specularColor` and `shininess`. Blender uses
+an unlit emission shader when both flags are false. Lit previews evaluate
+normal/light diffuse and colored Blinn-Phong specular terms directly and feed
+the result to emission, avoiding Blender environment reflections. They use a
+fixed camera-relative preview light until stage LOBJ lights are imported.
 Unsupported coordinates fall back to the source diffuse color with a warning;
 additional texture layers are omitted with a warning. Preview images are hashed
 as session baseline files and packed into the Blender scene.
@@ -314,8 +320,22 @@ Mesh payloads include nullable `colors0` and `colors1`, each an array of
 GX packed-color expansion (RGB565, RGB8, RGBX8, RGBA4, RGBA6, RGBA8); RGB formats
 have alpha 1. Direct, index8 and index16 attributes are supported. Blender stores
 these values in FLOAT_COLOR/CORNER attributes and previews the first available
-channel as a color multiplier. No color edit field is accepted by model edits.
-The position writer verifies both original color channels on reload.
+channel as a color multiplier.
+
+Model edits accept optional `colors0` and `colors1` arrays with one finite RGBA
+value in [0,1] per triangle corner. These edits require an existing channel on a
+static editable rigid mesh, unchanged topology, UVs and material assignment.
+The writer expands primitive corners to preserve painted seams and encodes
+changed channels as direct RGBA8. Original normals, UVs, other GX attributes,
+culling and material bindings are retained. Both color channels are verified
+on reload. Omitted channels retain their source values; animated position-only
+meshes reject color edits.
+
+Editable material definitions also expose `useVertexColor` and
+`canToggleVertexColor`. A nullable `useVertexColor` material edit switches a
+supported source vertex-color MOBJ between vertex RGB/alpha and material
+diffuse/alpha sources. The copied MOBJ uses explicit matching color and alpha
+source modes; the original shared MOBJ remains unchanged.
 
 ### Alpha preview state
 
@@ -351,3 +371,48 @@ with the diffuse RGB; the result is converted to scene-linear once, after the
 blend. Mixing already-linearized colors produces an excessively bright result
 for dark materials (including GrNLa G003 J003 D003). This affects previews only
 and leaves shared image color-space settings and DAT export data unchanged.
+
+### Static material property edits
+
+The additive `editableMaterialProperties` manifest catalog identifies eligible
+static model materials by their source mesh ID. It includes original RGB bytes,
+material alpha, independent alpha source, optional texture blend, MOBJ render flags, the editable flag
+mask, standard transparency mode and per-property availability. Legacy
+sessions without this catalog retain their old permissions.
+
+`edits/materials.json` accepts only the current protocol and a nonempty material
+list, for example:
+
+```json
+{
+  "protocolVersion": 2,
+  "materials": [
+    {"id": "<source-mesh-id>", "diffuse": [30, 100, 210], "alpha": 0.375,
+     "textureBlend": 0.75, "alphaSource": 1,
+     "transparencyMode": 1, "renderFlags": 1610612756}
+  ]
+}
+```
+
+Each entry changes at least one optional field. Diffuse components are integer
+bytes; alpha/blend must be finite in [0,1]. The backend recomputes eligibility
+and field permissions from source.dat. `transparencyMode` is 0 opaque, 1 alpha
+blend, 2 additive, or 3 subtractive. `renderFlags` may change only the declared
+mask: diffuse/specular/toon, depth offset, effect, shadow, depth always, all
+textures, no depth write, and user. Texture/source-selector and undocumented
+bits remain protected. `alphaSource` selects Compatibility (0), Material (1),
+Vertex (2), or Material × Vertex (3) independently of RGB source. The backend rejects duplicates/unknown fields and
+animated targets, and validates the entire batch before output publication.
+Materials no longer used after geometry replacement are rejected rather than
+silently dropping edits.
+
+The writer appends copied MOBJ/material records, copies the first TOBJ only
+when its blending value changes, and copies or creates a 12-byte PE descriptor
+when transparency needs one. Standard transparency updates MOBJ XLU and PE
+blend mode/factors together. Depth-always and no-depth-write changes are also
+mirrored into an existing PE descriptor. It retains relocation entries and all other
+source fields, patches only the selected DOBJ material bindings in existing
+data, and resolves source-material assignments to the copied records. Source
+materials shared with other objects/animations remain intact. Final reload
+verifies bindings and every byte of each copied record. Apply results include
+`materialChanged` independently of `modelChanged` and `collisionChanged`.

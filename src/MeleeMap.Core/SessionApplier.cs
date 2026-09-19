@@ -6,7 +6,7 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices, int CollisionLines, bool ModelChanged, int? ModelTriangles);
+public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices, int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false);
 
 public static class SessionApplier
 {
@@ -72,8 +72,9 @@ public static class SessionApplier
         var ids = new CollisionSourceIds(SourceIds("vertices", collision.Vertices.Length), SourceIds("lines", collision.Lines.Length), SourceIds("joints", collision.Joints.Length));
         string editPath = Path.Combine(directory, "edits/collision.json");
         string modelPath = Path.Combine(directory, "edits/models.json");
+        string materialPath = Path.Combine(directory, "edits/materials.json");
         foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
-            Require(edit == editPath || edit == modelPath, "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
+            Require(edit == editPath || edit == modelPath || edit == materialPath, "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
         if (changed)
@@ -115,6 +116,20 @@ public static class SessionApplier
                 bytes = preserveAppearance ? ModelPositionWriter.Write(new ArchiveLayout(bytes), target, mesh)
                     : ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh, material?.MobjOffset, culling);
         }
+        MaterialPropertyWrite? materialWrite = null;
+        if (File.Exists(materialPath))
+        {
+            var declared = m.TryGetProperty("editableMaterialProperties", out var list)
+                ? list.EnumerateArray().Select(e => e.GetProperty("id").GetString()!).ToArray() : [];
+            var edits = JsonSerializer.Deserialize<MaterialPropertyEdits>(File.ReadAllText(materialPath), Json);
+            Require(edits != null, "MATERIAL_EDIT_FORMAT", "Empty material edit document.");
+            var assignments = ModelEditing.SelectAll(source.Layout, modelBaseline)
+                .ToDictionary(t => t.Id, t => (string?)t.Id);
+            foreach (var compiled in compiledModels)
+                if (!compiled.PreserveAppearance) assignments[compiled.Target.Id] = compiled.Material?.Id;
+            materialWrite = MaterialProperties.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline, edits!, declared, assignments);
+            bytes = materialWrite.Bytes;
+        }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -129,13 +144,16 @@ public static class SessionApplier
                     && (pair.First.Left, pair.First.Bottom, pair.First.Right, pair.First.Top, pair.First.VertexStart, pair.First.VertexCount)
                         == (pair.Second.Left, pair.Second.Bottom, pair.Second.Right, pair.Second.Top, pair.Second.VertexStart, pair.Second.VertexCount)), "COLLISION_WRITE_MISMATCH", "Reloaded collision differs from compiled edits.");
             foreach (var (target, mesh, preserveAppearance, material, culling) in compiledModels)
-                if (preserveAppearance) ModelPositionWriter.Verify(reloaded.Layout, source.Layout, target, mesh);
-                else ModelArchiveWriter.Verify(reloaded.Layout, target, mesh, material?.MobjOffset, culling);
-            if (!changed && !modelChanged) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
+                if (preserveAppearance) ModelPositionWriter.Verify(reloaded.Layout, source.Layout, target, mesh,
+                    materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int positionMaterial) ? positionMaterial : null);
+                else ModelArchiveWriter.Verify(reloaded.Layout, target, mesh,
+                    materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int replacementMaterial) ? replacementMaterial : material?.MobjOffset, culling);
+            if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, modelBaseline, materialWrite);
+            if (!changed && !modelChanged && materialWrite == null) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
-        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null);
+        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null, materialWrite != null);
 
         string Contained(string relative)
         {

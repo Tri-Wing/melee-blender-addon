@@ -9,9 +9,9 @@ import json
 from pathlib import Path
 import bmesh
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene, topology, materials, inspector, modeling, surface
+from . import collision, scene, topology, materials, inspector, modeling, surface, material_properties
 from .protocol import StageError, read, run
 
 
@@ -364,7 +364,7 @@ class MME_PT_stage(bpy.types.Panel):
             row = layout.row()
             row.enabled = bool(selected) and not positions_only
             row.operator('mme.model_material', icon='MATERIAL')
-            layout.label(text='Texture and vertex-color edits are preview-only.')
+            layout.label(text='Texture image edits are preview-only.')
             layout.label(text='One material per model; UVs use the active map.')
             if not s.get('mme_model_materials'):
                 layout.label(text='Re-import to load stage materials.')
@@ -612,8 +612,66 @@ def update_dirty(scene_arg, depsgraph):
         pass
 
 
+class MME_PT_material(bpy.types.Panel):
+    bl_label = 'Melee Material'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'material'
+
+    @classmethod
+    def poll(cls, context):
+        material = context.material
+        return material is not None and material.get('mme_model_material_source') is not None
+
+    def draw(self, context):
+        material = context.material
+        info = material_properties.definition(material)
+        layout = self.layout
+        if not info:
+            layout.label(text='Material properties are read-only in this session.', icon='LOCKED')
+            return
+        if info['canToggleVertexColor']:
+            layout.prop(material, 'mme_use_vertex_color')
+        layout.prop(material, 'mme_alpha_source')
+        alpha_source = material_properties.ALPHA_SOURCES[material.mme_alpha_source]
+        vertex_alpha = material.mme_use_vertex_color if alpha_source == 0 else alpha_source in (2, 3)
+        if material.mme_use_vertex_color or vertex_alpha:
+            if material.mme_use_vertex_color and vertex_alpha:
+                layout.label(text='This material uses vertex colors and vertex alpha.')
+            elif material.mme_use_vertex_color:
+                layout.label(text='This material uses vertex colors.')
+            else:
+                layout.label(text='This material uses vertex alpha.')
+            layout.label(text='Edit Stage Color 0 with Blender Vertex Paint.')
+        layout.prop(material, 'mme_transparency')
+        if info['canEditDiffuse'] or not material.mme_use_vertex_color:
+            layout.prop(material, 'mme_diffuse')
+        uses_material_alpha = alpha_source in (1, 3) or (alpha_source == 0 and not material.mme_use_vertex_color)
+        if info['canEditAlpha'] or uses_material_alpha:
+            layout.prop(material, 'mme_alpha')
+        if info['canEditBlend']:
+            layout.prop(material, 'mme_texture_blend')
+        if info.get('editableRenderFlagsMask'):
+            box = layout.box()
+            box.label(text='Render Flags')
+            box.prop(material, 'mme_diffuse_lighting')
+            box.prop(material, 'mme_specular_lighting')
+            box.prop(material, 'mme_toon_shading')
+            box.prop(material, 'mme_depth_offset')
+            box.prop(material, 'mme_depth_always')
+            box.prop(material, 'mme_no_depth_write')
+            box.prop(material, 'mme_shadow')
+            box.prop(material, 'mme_all_textures')
+            box.prop(material, 'mme_effect')
+            box.prop(material, 'mme_user_render_flag')
+        if info['canEditDiffuse'] or info['canEditAlpha'] or info['canEditBlend'] or info['canToggleVertexColor']:
+            layout.label(text='Exports to models using this Blender material.')
+        if material.get('mme_material_error'):
+            layout.label(text=material['mme_material_error'], icon='ERROR')
+
+
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 
@@ -622,6 +680,32 @@ def register():
     global _draw_handle
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Material.mme_diffuse = FloatVectorProperty(name='Diffuse Color', subtype='COLOR', size=3, min=0, max=1,
+        default=(1, 1, 1), update=material_properties.update, options=set())
+    bpy.types.Material.mme_alpha = FloatProperty(name='Material Alpha', min=0, max=1, default=1,
+        update=material_properties.update, options=set())
+    bpy.types.Material.mme_texture_blend = FloatProperty(name='Texture Blend', min=0, max=1, default=1,
+        update=material_properties.update, options=set())
+    bpy.types.Material.mme_use_vertex_color = BoolProperty(name='Use Vertex Colors', default=False,
+        update=material_properties.update, options=set())
+    bpy.types.Material.mme_transparency = EnumProperty(name='Transparency', items=(
+        ('OPAQUE', 'Opaque', ''), ('ALPHA', 'Alpha Blend', ''),
+        ('ADDITIVE', 'Additive', ''), ('SUBTRACT', 'Subtractive', ''),
+        ('CUSTOM', 'Custom (Preserve)', 'Preserve an uncommon source blend configuration')),
+        update=material_properties.update, options=set())
+    bpy.types.Material.mme_alpha_source = EnumProperty(name='Alpha Source', items=(
+        ('COMPATIBILITY', 'Compatibility', 'Follow the material color source'),
+        ('MATERIAL', 'Material Alpha', ''), ('VERTEX', 'Vertex Alpha', ''),
+        ('MULTIPLY', 'Material × Vertex', 'Multiply material alpha by vertex alpha')),
+        update=material_properties.update, options=set())
+    flag_properties = (
+        ('mme_diffuse_lighting', 'Diffuse Lighting'), ('mme_specular_lighting', 'Specular Highlight'),
+        ('mme_toon_shading', 'Toon Shading'), ('mme_depth_offset', 'Depth Offset'),
+        ('mme_effect', 'Effect'), ('mme_shadow', 'Shadow'), ('mme_depth_always', 'Depth Test Always'),
+        ('mme_all_textures', 'Enable All Textures'), ('mme_no_depth_write', 'Disable Depth Write'),
+        ('mme_user_render_flag', 'User Flag'))
+    for name, label in flag_properties:
+        setattr(bpy.types.Material, name, BoolProperty(name=label, update=material_properties.update, options=set()))
     bpy.types.Scene.mme_session = StringProperty(subtype='DIR_PATH')
     bpy.types.Scene.mme_session_id = StringProperty()
     bpy.types.Scene.mme_status = StringProperty(default='No stage imported')
@@ -644,6 +728,9 @@ def unregister():
         _draw_handle = None
     if update_dirty in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(update_dirty)
+    for prop in ('mme_diffuse', 'mme_alpha', 'mme_texture_blend', 'mme_use_vertex_color', 'mme_transparency', 'mme_alpha_source',
+                 *(name for name, _ in material_properties.RENDER_FLAGS)):
+        delattr(bpy.types.Material, prop)
     for prop in SCENE_PROPS:
         delattr(bpy.types.Scene, prop)
     for cls in reversed(CLASSES):

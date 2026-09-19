@@ -22,11 +22,26 @@ with tempfile.TemporaryDirectory(prefix='mme-tint-') as tmp:
     assert [round(c*255) for c in entry['preview']['color'][:3]] == [12,25,76]
     assert entry['preview']['texture']['colorOperation'] == 4
     assert not entry['preview']['useVertexColor']
+    assert entry['preview']['specularLighting'] and entry['preview']['diffuseLighting']
+    assert [round(c*255) for c in entry['preview']['specularColor'][:3]] == [0,128,255]
+    assert entry['preview']['shininess'] == 100
     scene.import_session(bpy.context, tmp / 'session')
     s = bpy.context.scene
     material = modeling.target_object(s, info).active_material
     nodes = material.node_tree.nodes
     tint = nodes['Stage Diffuse Tint']
+    assert nodes['Stage Surface'].type == 'EMISSION'
+    assert nodes['Stage Diffuse Lighting'].blend_type == 'MULTIPLY'
+    assert nodes['Stage Diffuse N dot L'].operation == 'DOT_PRODUCT'
+    assert nodes['Stage Specular N dot H'].operation == 'DOT_PRODUCT'
+    power = nodes['Stage Specular Power']
+    assert power.operation == 'POWER'
+    assert power.inputs[1].default_value == 100
+    specular = nodes['Stage Specular Color']
+    assert all(abs(a-linear(b/255)) < 1e-7 for a,b in
+               zip(specular.inputs[1].default_value, (0,128,255)))
+    assert nodes['Stage Specular Add'].blend_type == 'ADD'
+    assert not any(node.type in {'BSDF_DIFFUSE', 'BSDF_GLOSSY', 'BSDF_PRINCIPLED'} for node in nodes)
     assert tint.blend_type == 'MULTIPLY'
     assert tint.inputs[2].links[0].from_node == nodes['Stage Texture']
     assert all(abs(a-linear(b/255)) < 1e-7 for a,b in zip(tint.inputs[1].default_value, (12,25,76)))

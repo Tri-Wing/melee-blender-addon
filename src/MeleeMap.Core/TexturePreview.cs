@@ -5,7 +5,9 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning, AlphaPreview? Alpha = null, bool UseVertexColor = false);
+public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning, AlphaPreview? Alpha = null,
+    bool UseVertexColor = false, bool DiffuseLighting = false, bool SpecularLighting = false,
+    float[]? SpecularColor = null, float Shininess = 50);
 public sealed record PreviewTexture(string File, int Width, int Height, int WrapS, int WrapT,
     int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation, int ColorOperation = 5, float ColorBlend = 1);
 
@@ -18,9 +20,16 @@ public static class TexturePreview
         int? color = r.Pointer(material.MobjOffset + 12);
         float[] diffuse = color.HasValue ? Enumerable.Range(0, 3).Select(i => r.Byte(color.Value + 4 + i) / 255f).Append(1f).ToArray()
             : [0.45f, 0.45f, 0.45f, 1];
+        float[] specular = color.HasValue ? Enumerable.Range(0, 3).Select(i => r.Byte(color.Value + 8 + i) / 255f).Append(1f).ToArray()
+            : [0, 0, 0, 1];
+        float shininess = color.HasValue ? r.Float(color.Value + 16) : 50;
+        if (!float.IsFinite(shininess) || shininess < 0) shininess = 50;
         var alpha = AlphaPreview.Read(archive, material.MobjOffset);
+        int renderFlags = r.Int(material.MobjOffset + 4);
         MaterialPreview Preview(PreviewTexture? texture, string? warning = null) => new(diffuse, texture,
-            string.IsNullOrEmpty(warning) ? alpha.Warning : string.IsNullOrEmpty(alpha.Warning) ? warning : warning + " " + alpha.Warning, alpha, (r.Int(material.MobjOffset + 4) & 2) != 0);
+            string.IsNullOrEmpty(warning) ? alpha.Warning : string.IsNullOrEmpty(alpha.Warning) ? warning : warning + " " + alpha.Warning,
+            alpha, (renderFlags & 2) != 0, (renderFlags & 4) != 0, (renderFlags & 8) != 0,
+            specular, shininess);
         if (!material.UsesUv) return Preview(null);
         try
         {
