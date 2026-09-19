@@ -1,5 +1,6 @@
 """One-target model edits, replacement geometry, combined export and scene guards."""
 import os
+import json
 import math
 from pathlib import Path
 import sys
@@ -31,7 +32,12 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     tmp = Path(tmp)
     directory = tmp / 'session'
     run(CLI, 'dotnet', 'extract', CORPUS / 'GrNLa.dat', '--session', directory)
+    legacy_manifest = read(directory / 'stage.json')
+    legacy_manifest.pop('editableMeshes')
+    (directory / 'stage.json').write_text(json.dumps(legacy_manifest))
     scene.import_session(bpy.context, directory)
+    del bpy.context.scene['mme_editable_meshes']
+    del bpy.context.scene['mme_model_baselines']
     s = bpy.context.scene
     stage = read(directory / 'stage.json')
     assert stage['capabilities']['modelEdit']

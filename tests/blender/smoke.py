@@ -170,8 +170,8 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     temporary_mesh = obj.data
     obj.data = original_mesh
     bpy.data.meshes.remove(temporary_mesh)
-    editable = manifest.get('editableMesh')
-    model = next(o for o in models if not editable or o.get('mme_id') != editable['id'])
+    editable = {m['id'] for m in manifest.get('editableMeshes', [])}
+    model = next(o for o in models if o.get('mme_id') not in editable)
     model.location.x += 1
     rejects(lambda: scene.prepare(s), 'protected')
     model.location.x -= 1

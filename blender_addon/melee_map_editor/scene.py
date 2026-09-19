@@ -28,6 +28,7 @@ def properties(item):
 
 
 def inventory(scene, editable_id=None):
+    editable_ids = {editable_id} if isinstance(editable_id, str) else set(editable_id or ())
     sid = scene.mme_session_id
     collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid]
@@ -49,7 +50,7 @@ def inventory(scene, editable_id=None):
         if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
                 or (o.type == 'MESH' and o.data.shape_keys)):
             raise StageError(f'{o.name}: modifiers, constraints, shape keys and animation are not supported.')
-        if o.type == 'MESH' and o.get('mme_id') == editable_id:
+        if o.type == 'MESH' and o.get('mme_id') in editable_ids:
             # Native Join brings material slots along with geometry. The model
             # writer emits one grey material, so these slots are not protected.
             pass
@@ -74,6 +75,8 @@ def protected_inventory_matches(scene, editable_id):
     # Older .blend files included the target's material slots in their guard.
     # All imported previews share one material. Try the surviving preview slot
     # lists against the OLD hash; never rebaseline hierarchy or other geometry.
+    if not isinstance(editable_id, str):
+        return False
     target = next((row for row in current['objects']
                    if row['props']['mme_id'] == editable_id), None)
     if target is not None:
@@ -170,6 +173,9 @@ def import_session(context, directory):
                 for key in obj.keys():
                     replacement[key] = obj[key]
                 replacement.parent = obj.parent
+                if payload.get('readOnlyReason'):
+                    replacement['mme_read_only_reason'] = payload['readOnlyReason']
+                    replacement.name = f"Read-only Model - Group {group['index']:03d} POBJ {payload['pobjIndex']:03d}"
                 objects[payload['id']] = replacement
                 created_objects.remove(obj)
                 bpy.data.objects.remove(obj, do_unlink=True)
@@ -181,11 +187,18 @@ def import_session(context, directory):
         context.view_layer.update()
         editable = stage.get('editableMesh')
         scene['mme_editable_mesh'] = json.dumps(editable)
+        editable_models = modeling.stage_targets(stage)
+        scene['mme_editable_meshes'] = json.dumps(editable_models)
+        baselines = {}
+        for info in editable_models:
+            target = modeling.target_object(scene, info)
+            target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
+            baselines[info['id']] = modeling.fingerprint(target)
+        scene['mme_model_baselines'] = json.dumps(baselines)
+        # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
-            target = modeling.target_object(scene)
-            target.name = f"Editable Model - Group {editable['groupIndex']:03d} JOBJ {editable['jobjIndex']:03d} DOBJ {editable['dobjIndex']:03d}"
-            scene['mme_model_baseline'] = modeling.fingerprint(target)
-        scene['mme_guard'] = digest(inventory(scene, editable['id'] if editable else None))
+            scene['mme_model_baseline'] = baselines[editable['id']]
+        scene['mme_guard'] = digest(inventory(scene, modeling.target_ids(scene)))
         scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
         scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
@@ -212,7 +225,8 @@ def prepare(scene):
     directory = session(scene)
     stage = load_session(directory)
     editable = modeling.target_info(scene)
-    if not protected_inventory_matches(scene, editable['id'] if editable else None):
+    ids = modeling.target_ids(scene) if 'mme_editable_meshes' in scene else (editable['id'] if editable else None)
+    if not protected_inventory_matches(scene, ids):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
     obj = collision_object(scene)

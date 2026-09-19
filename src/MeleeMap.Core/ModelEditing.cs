@@ -11,13 +11,32 @@ public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
 public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
     int PobjIndex, int PobjOffset, int DobjOffset);
 
-/// <summary>One structurally eligible, rigid, opaque POBJ per archive for the first model-edit milestone.</summary>
+/// <summary>Structurally eligible rigid POBJs with independently replaceable materials.</summary>
 public static class ModelEditing
 {
     public const int MaxTriangles = 14000;
 
     public static EditableModel? Select(ArchiveLayout archive, ModelIdentitySnapshot identity)
     {
+        // Retain the original POC target as the legacy session alias.
+        var r = new ArchiveDataReader(archive);
+        return SelectAll(archive, identity).FirstOrDefault(t =>
+        {
+            int material = r.Pointer(t.DobjOffset + 8)!.Value;
+            var joint = identity.Nodes.First(n => n.GroupIndex == t.GroupIndex && n.Kind == "jobj" && n.Index == t.JobjIndex);
+            return r.Int(material + 4) == 1 && r.Pointer(material + 8) == null
+                && r.Pointer(material + 20) == null && (r.Int(joint.SourceOffset + 4) & 16) == 0;
+        });
+    }
+
+    public static EditableModel[] SelectAll(ArchiveLayout archive, ModelIdentitySnapshot identity)
+        => SelectAll(archive, identity, out _);
+
+    public static EditableModel[] SelectAll(ArchiveLayout archive, ModelIdentitySnapshot identity,
+        out Dictionary<string, string> readOnlyReasons)
+    {
+        readOnlyReasons = new();
+        var result = new List<EditableModel>();
         var r = new ArchiveDataReader(archive); var nodes = identity.Nodes;
         var byId = nodes.GroupBy(n => n.Id).ToDictionary(g => g.Key, g => g.First());
         foreach (var p in nodes.Where(n => n.Kind == "pobj"))
@@ -27,32 +46,39 @@ public static class ModelEditing
             if (group.Kind != "group" || j.Kind != "jobj" || p.Index != 0
                 || nodes.Count(n => n.OwnerId == d.Id && n.Kind == "pobj") != 1
                 || nodes.Count(n => n.SourceOffset == p.SourceOffset && n.Kind == "pobj") != 1
-                || nodes.Count(n => n.SourceOffset == d.SourceOffset && n.Kind == "dobj") != 1) continue;
+                || nodes.Count(n => n.SourceOffset == d.SourceOffset && n.Kind == "dobj") != 1)
+            { readOnlyReasons[p.Id] = "Shared descriptors or multiple meshes in one DOBJ."; continue; }
             try
             {
-                // Custom classes, bindings, shape animation and translucent materials
+                // Custom classes, bindings, shape animation and material animation
                 // need dedicated writers. Joint animation is retained without edits.
                 int? material = r.Pointer(d.SourceOffset + 8);
+                if (r.Pointer(p.SourceOffset + 20) != null || (r.UShort(p.SourceOffset + 12) & ~0xC001) != 0)
+                { readOnlyReasons[p.Id] = "Skinned, shared-joint, or shape-bound geometry."; continue; }
+                if (r.Pointer(group.SourceOffset + 12) != null)
+                { readOnlyReasons[p.Id] = "This group has shape animation."; continue; }
                 if (material == null || r.Pointer(p.SourceOffset) != null || r.Pointer(d.SourceOffset) != null
-                    || r.Pointer(material.Value) != null || r.Int(material.Value + 4) != 1
-                    || r.Pointer(material.Value + 8) != null || r.Pointer(material.Value + 20) != null
-                    || r.Pointer(p.SourceOffset + 20) != null || (r.UShort(p.SourceOffset + 12) & ~0xC001) != 0
-                    || r.Pointer(group.SourceOffset + 12) != null
-                    || (r.Int(j.SourceOffset + 4) & (16 | 0x20000 | 0x1000 | 0xE00)) != 0) continue;
+                    || r.Pointer(material.Value) != null
+                    || (r.Int(j.SourceOffset + 4) & (0x20000 | 0x1000 | 0xE00)) != 0)
+                { readOnlyReasons[p.Id] = "Custom classes, instancing, or billboard transforms."; continue; }
                 if (archive.Pointers.Count(x => x.Value == p.SourceOffset) != 1
                     || !archive.Pointers.TryGetValue(d.SourceOffset + 12, out int target) || target != p.SourceOffset
-                    || archive.Pointers.Count(x => x.Value == d.SourceOffset) != 1) continue;
+                    || archive.Pointers.Count(x => x.Value == d.SourceOffset) != 1)
+                { readOnlyReasons[p.Id] = "Shared model descriptors."; continue; }
                 bool HasInteriorReference(int start, int size) => archive.Pointers.Values.Any(x => x > start && x < start + size)
                     || archive.Roots.Concat(archive.References).Any(x => x.Offset >= start && x.Offset < start + size);
-                if (HasInteriorReference(p.SourceOffset, 24) || HasInteriorReference(d.SourceOffset, 16)) continue;
-                if (HasMaterialAnimation(group, j, d.Index)) continue;
+                if (HasInteriorReference(p.SourceOffset, 24) || HasInteriorReference(d.SourceOffset, 16))
+                { readOnlyReasons[p.Id] = "External or interior model descriptor references."; continue; }
+                if (HasMaterialAnimation(group, j, d.Index))
+                { readOnlyReasons[p.Id] = "This model has material or texture animation."; continue; }
                 var mesh = GxMeshDecoder.Decode(archive, p.SourceOffset);
-                if (mesh.Envelopes != null || mesh.BoundJobjSourceOffset != null) continue;
-                return new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset);
+                if (mesh.Envelopes != null || mesh.BoundJobjSourceOffset != null)
+                { readOnlyReasons[p.Id] = "Skinned or shared-joint geometry."; continue; }
+                result.Add(new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset));
             }
-            catch (StageException) { /* An uncertain preview target stays read-only. */ }
+            catch (StageException e) { readOnlyReasons[p.Id] = e.Message; }
         }
-        return null;
+        return result.ToArray();
 
         bool HasMaterialAnimation(ModelIdentityNode group, ModelIdentityNode joint, int dobjIndex)
         {
@@ -85,7 +111,7 @@ public static class ModelEditing
         Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.CoordinateSpace == "game-joint-local",
             "MODEL_EDIT_VERSION", "Model edits must use the current protocol and game-joint-local coordinates.");
         Require(edits.Meshes is { Length: 1 } && edits.Meshes[0] != null && edits.Meshes[0].Id == target.Id,
-            "MODEL_EDIT_TARGET", "Only the session's designated rigid mesh can be edited in this version.");
+            "MODEL_EDIT_TARGET", "Each compiled replacement must match an eligible rigid mesh.");
         var edit = edits.Meshes[0];
         Require(edit.Positions is { Length: > 0 and <= 65535 } && edit.TriangleIndices is { Length: > 0 }
             && edit.TriangleIndices.Length % 3 == 0 && edit.TriangleIndices.Length <= MaxTriangles * 3,

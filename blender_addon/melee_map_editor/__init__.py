@@ -141,11 +141,17 @@ class MME_OT_edit_collision(bpy.types.Operator):
 
 class MME_OT_edit_model(bpy.types.Operator):
     bl_idname = 'mme.edit_model'
-    bl_label = 'Edit Supported Model'
+    bl_label = 'Edit Selected Model'
 
     def execute(self, context):
         def action():
-            obj = modeling.target_object(context.scene)
+            active = context.active_object
+            infos = modeling.targets(context.scene)
+            selected = next((info for info in infos if active and active.get('mme_id') == info['id']
+                             and active.get('mme_session_id') == context.scene.mme_session_id), None)
+            if active and active.get('mme_role') == 'pobj' and selected is None:
+                raise StageError(active.get('mme_read_only_reason', 'This model is read-only in this session.'))
+            obj = modeling.target_object(context.scene, selected or (infos[0] if infos else None))
             if context.mode != 'OBJECT':
                 bpy.ops.object.mode_set(mode='OBJECT')
             for collection in bpy.data.collections:
@@ -157,7 +163,7 @@ class MME_OT_edit_model(bpy.types.Operator):
             context.view_layer.objects.active = obj
             context.tool_settings.mesh_select_mode = (True, False, False)
             bpy.ops.object.mode_set(mode='EDIT')
-            context.scene.mme_status = 'Editing the supported model. Changed geometry exports with a flat grey material; collision is edited separately.'
+            context.scene.mme_status = f'Editing {obj.name}. Changed geometry exports grey; collision is edited separately.'
         return execute_safely(self, context, action)
 
 
@@ -280,19 +286,26 @@ class MME_PT_stage(bpy.types.Panel):
             layout.label(text='Collision: edited' if obj.get('mme_dirty') else 'Collision: unchanged')
         except StageError:
             layout.label(text='Collision object missing', icon='ERROR')
-        editable = modeling.target_info(s)
+        editable = modeling.targets(s)
         if editable:
-            layout.operator('mme.edit_model', icon='EDITMODE_HLT')
-            layout.label(text=f"Model target: Group {editable['groupIndex']:03d} / JOBJ {editable['jobjIndex']:03d}")
-            try:
-                dirty = modeling.target_object(s).get('mme_dirty', False)
-                layout.label(text='Model: edited — exports flat grey' if dirty else 'Model: unchanged — original preserved')
-            except StageError:
-                layout.label(text='Editable model missing', icon='ERROR')
-            layout.label(text='Other models and object transforms are read-only.')
+            ids = {info['id'] for info in editable}
+            layout.label(text=f'{len(editable)} editable rigid models')
+            active = context.active_object
+            selected = active and active.get('mme_session_id') == s.mme_session_id and active.get('mme_id') in ids
+            row = layout.row()
+            row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
+            row.operator('mme.edit_model', icon='EDITMODE_HLT')
+            if selected:
+                layout.label(text='Selected: edited — exports grey' if active.get('mme_dirty') else 'Selected: editable — unchanged')
+            elif active and active.get('mme_role') == 'pobj':
+                layout.label(text='Selected model: read-only', icon='LOCKED')
+                layout.label(text=active.get('mme_read_only_reason', 'Read-only in this session.'))
+            layout.label(text='Edited models export grey without textures.')
+            layout.label(text='Object transforms and hierarchy are read-only.')
         else:
-            layout.label(text='No supported model target in this stage.' if 'mme_editable_mesh' in s
-                              else 'Re-import to enable model editing.')
+            layout.label(text='No supported rigid models in this scene.')
+        if 'mme_editable_meshes' not in s:
+            layout.label(text='Re-import to enable multiple model targets.')
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')

@@ -21,7 +21,8 @@ public static class SessionExtractor
         var catalog = new ModelIdentityCatalog();
         var identity = ModelIdentity.Capture(stage.Layout, catalog);
         var collision = CollisionData.Read(stage.Layout);
-        var editable = ModelEditing.Select(stage.Layout, identity);
+        var editableModels = ModelEditing.SelectAll(stage.Layout, identity, out var readOnlyReasons);
+        var editable = ModelEditing.Select(stage.Layout, identity) ?? editableModels.FirstOrDefault();
         var reader = new ArchiveDataReader(stage.Layout);
         var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
         var deferredMeshes = new List<object>();
@@ -84,6 +85,10 @@ public static class SessionExtractor
                     protocolVersion = ProtocolVersion, id = node.Id, ownerId = node.OwnerId, groupIndex = node.GroupIndex,
                     pobjIndex = node.Index, sourceOffset = node.SourceOffset, coordinateSpace = "game", representation = "untextured-grey",
                     pobjFlags = reader.UShort(node.SourceOffset + 12),
+                    editable = editableModels.Any(t => t.Id == node.Id),
+                    readOnlyReason = mesh.Envelopes != null ? "Skinned geometry is not supported yet."
+                        : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
+                        : readOnlyReasons.GetValueOrDefault(node.Id),
                     vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
                     positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices,
                     boundJobjId = JointId(mesh.BoundJobjSourceOffset), envelopeIndices = mesh.EnvelopeIndices,
@@ -124,8 +129,11 @@ public static class SessionExtractor
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
-                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editable != null, dynamicCollisionEdit = false, apply = true },
+                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
+                editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
+                    e.DobjIndex, e.PobjIndex, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
+                    representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),
                 editableMesh = editable == null ? null : new { editable.Id, editable.GroupIndex, editable.JobjIndex,
                     editable.DobjIndex, editable.PobjIndex, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles },

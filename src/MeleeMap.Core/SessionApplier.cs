@@ -84,17 +84,28 @@ public static class SessionApplier
             bytes = CollisionArchiveWriter.Write(source.Layout, collision);
         }
         bool modelChanged = File.Exists(modelPath);
-        EditableModel? modelTarget = null; MeshData? model = null;
+        var compiledModels = new List<(EditableModel Target, MeshData Mesh)>();
         if (modelChanged)
         {
-            modelTarget = ModelEditing.Select(source.Layout, modelBaseline);
-            Require(modelTarget != null && m.TryGetProperty("editableMesh", out var declared)
-                && declared.ValueKind == JsonValueKind.Object && declared.GetProperty("id").GetString() == modelTarget.Id,
-                "MODEL_EDIT_TARGET", "Session has no supported editable model target. Re-import with the updated backend.");
+            var eligible = ModelEditing.SelectAll(source.Layout, modelBaseline).ToDictionary(t => t.Id);
+            // Legacy sessions retain their single-target permissions.
+            var declaredIds = m.TryGetProperty("editableMeshes", out var declaredMany)
+                ? declaredMany.EnumerateArray().Select(t => t.GetProperty("id").GetString()!).ToArray()
+                : m.TryGetProperty("editableMesh", out var declared) && declared.ValueKind == JsonValueKind.Object
+                    ? new[] { declared.GetProperty("id").GetString()! } : Array.Empty<string>();
             var edits = JsonSerializer.Deserialize<ModelEdits>(File.ReadAllText(modelPath), Json);
-            Require(edits != null, "MODEL_EDIT_FORMAT", "Empty model edit document.");
-            model = ModelEditing.Compile(edits!, modelTarget!);
-            bytes = ModelArchiveWriter.Write(new ArchiveLayout(bytes), modelTarget!, model);
+            Require(edits?.Meshes is { Length: > 0 }, "MODEL_EDIT_FORMAT", "Empty model edit document.");
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var edit in edits!.Meshes)
+            {
+                Require(edit != null && edit.Id != null && seen.Add(edit.Id) && declaredIds.Contains(edit.Id)
+                    && eligible.ContainsKey(edit.Id), "MODEL_EDIT_TARGET", "Model edit target is unsupported, duplicated, or absent from this session.");
+                var target = eligible[edit!.Id];
+                compiledModels.Add((target, ModelEditing.Compile(edits with { Meshes = [edit] }, target)));
+            }
+            // Compile the complete batch before writing any replacement.
+            foreach (var (target, mesh) in compiledModels)
+                bytes = ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh);
         }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -109,12 +120,12 @@ public static class SessionApplier
                     pair.First.Ranges.SequenceEqual(pair.Second.Ranges)
                     && (pair.First.Left, pair.First.Bottom, pair.First.Right, pair.First.Top, pair.First.VertexStart, pair.First.VertexCount)
                         == (pair.Second.Left, pair.Second.Bottom, pair.Second.Right, pair.Second.Top, pair.Second.VertexStart, pair.Second.VertexCount)), "COLLISION_WRITE_MISMATCH", "Reloaded collision differs from compiled edits.");
-            if (modelChanged) ModelArchiveWriter.Verify(reloaded.Layout, modelTarget!, model!);
+            foreach (var (target, mesh) in compiledModels) ModelArchiveWriter.Verify(reloaded.Layout, target, mesh);
             if (!changed && !modelChanged) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
-        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, model?.TriangleIndices.Length / 3);
+        return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length, modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null);
 
         string Contained(string relative)
         {

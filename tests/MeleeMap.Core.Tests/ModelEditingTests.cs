@@ -109,11 +109,49 @@ public class ModelEditingTests
     }
 
     [PrimaryFixtureFact]
+    public void MultipleRigidTargetsExportTogetherAndRejectDuplicateOrUnsupportedTargets()
+    {
+        using var session = new Fixture();
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        Assert.True(targets.Length > 1);
+        using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory, "stage.json")));
+        Assert.Equal(targets.Select(t => t.Id), manifest.RootElement.GetProperty("editableMeshes")
+            .EnumerateArray().Select(t => t.GetProperty("id").GetString()));
+        var edits = new ModelEdits(2, "game-joint-local", targets.Select(t => Triangle(t.Id).Meshes[0]).ToArray());
+        session.Write(edits);
+        var result = SessionApplier.Apply(session.Directory, session.Output);
+        Assert.Equal(targets.Length, result.ModelTriangles);
+        var output = new StageArchive(session.Output);
+        foreach (var target in targets)
+            ModelArchiveWriter.Verify(output.Layout, target, ModelEditing.Compile(Triangle(target.Id), target));
+        foreach (var node in session.Identity.Nodes.Where(n => n.Kind == "pobj" && !targets.Any(t => t.Id == n.Id)))
+        {
+            var before = GxMeshDecoder.Decode(session.Source.Layout, node.SourceOffset);
+            var after = GxMeshDecoder.Decode(output.Layout, node.SourceOffset);
+            Assert.Equal(before.Positions, after.Positions);
+            Assert.Equal(before.Normals, after.Normals);
+            Assert.Equal(before.TriangleIndices, after.TriangleIndices);
+        }
+        var saved = File.ReadAllBytes(session.Output);
+        session.Write(edits with { Meshes = [edits.Meshes[0], edits.Meshes[0]] });
+        Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
+        Assert.Equal(saved, File.ReadAllBytes(session.Output));
+        string unsupported = session.Identity.Nodes.First(n => n.Kind == "pobj" && !targets.Any(t => t.Id == n.Id)).Id;
+        session.Write(edits with { Meshes = [edits.Meshes[0], Triangle(unsupported).Meshes[0]] });
+        Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
+        Assert.Equal(saved, File.ReadAllBytes(session.Output));
+        var invalid = Triangle(targets[1].Id).Meshes[0]; invalid.TriangleIndices[2] = 99;
+        session.Write(edits with { Meshes = [edits.Meshes[0], invalid] });
+        Assert.Equal("MODEL_INDEX", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
+        Assert.Equal(saved, File.ReadAllBytes(session.Output));
+    }
+
+    [PrimaryFixtureFact]
     public void OldSessionsRemainCollisionOnlyAndTargetsAreRecomputed()
     {
         using var session = new Fixture(); session.Write(Triangle(session.Target.Id));
         string path = Path.Combine(session.Directory, "stage.json"); var manifest = JsonNode.Parse(File.ReadAllText(path))!;
-        manifest.AsObject().Remove("editableMesh"); File.WriteAllText(path, manifest.ToJsonString());
+        manifest.AsObject().Remove("editableMeshes"); manifest.AsObject().Remove("editableMesh"); File.WriteAllText(path, manifest.ToJsonString());
         Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         File.Delete(Path.Combine(session.Directory, "edits/models.json"));
         SessionApplier.Apply(session.Directory, session.Output);
