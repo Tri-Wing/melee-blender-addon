@@ -112,6 +112,9 @@ def configure_preview(material, preview, directory, stage):
     emission = nodes.new('ShaderNodeEmission')
     # Byte colors describe sRGB; shader color sockets are scene-linear.
     linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in color[:3]]
+    # Vertex-color materials take their base color from the mesh, not diffuse RGB.
+    if preview.get('useVertexColor'):
+        linear = [1, 1, 1]
     emission.inputs['Color'].default_value = (*linear, 1)
     links.new(emission.outputs[0], output.inputs['Surface'])
     warning = preview.get('warning')
@@ -160,7 +163,27 @@ def configure_preview(material, preview, directory, stage):
             value = wrapped.outputs[0]
         links.new(value, combine.inputs[axis])
     links.new(combine.outputs[0], sampler.inputs['Vector'])
-    links.new(sampler.outputs['Color'], emission.inputs['Color'])
+    operation = texture.get('colorOperation', 5)
+    if operation in (3, 4):
+        tint = nodes.new('ShaderNodeMixRGB')
+        tint.name = 'Stage Diffuse Tint'
+        tint.blend_type = 'MULTIPLY' if operation == 4 else 'MIX'
+        tint.inputs[0].default_value = 1 if operation == 4 else texture.get('colorBlend', 1)
+        if operation == 3:
+            # GX interpolates stored color values, not scene-linear light.
+            # Decode the mixed result only after the TEV blend calculation.
+            tint.inputs[1].default_value = (1, 1, 1, 1) if preview.get('useVertexColor') else color
+            encoded = color_transfer(material, sampler.outputs['Color'], to_linear=False)
+            links.new(encoded, tint.inputs[2])
+            result = color_transfer(material, tint.outputs[0], to_linear=True)
+            links.new(result, emission.inputs['Color'])
+        else:
+            tint.inputs[1].default_value = (*linear, 1)
+            links.new(sampler.outputs['Color'], tint.inputs[2])
+            links.new(tint.outputs[0], emission.inputs['Color'])
+        tint.location = (100, 100)
+    else:
+        links.new(sampler.outputs['Color'], emission.inputs['Color'])
     nodes.active = sampler
     sampler.select = True
     # A legible layout if the user opens the Shader Editor.
@@ -328,3 +351,50 @@ def configure_alpha_preview(material, settings):
         material.surface_render_method = 'DITHERED'
     elif hasattr(material, 'blend_method'):
         material.blend_method = 'HASHED'
+
+
+def color_transfer(material, socket, *, to_linear):
+    """Convert RGB for GX byte-space arithmetic without changing shared image settings."""
+    name = 'Melee GX to Linear' if to_linear else 'Melee Linear to GX'
+    group = next((g for g in bpy.data.node_groups
+                  if g.get('mme_color_transfer') == name and g.bl_idname == 'ShaderNodeTree'), None)
+    if group is None:
+        group = bpy.data.node_groups.new(name, 'ShaderNodeTree')
+        group['mme_color_transfer'] = name
+        group.interface.new_socket(name='Color', in_out='INPUT', socket_type='NodeSocketColor')
+        group.interface.new_socket(name='Color', in_out='OUTPUT', socket_type='NodeSocketColor')
+        nodes, links = group.nodes, group.links
+        inputs = nodes.new('NodeGroupInput')
+        outputs = nodes.new('NodeGroupOutput')
+        separate = nodes.new('ShaderNodeSeparateColor'); separate.mode = 'RGB'
+        combine = nodes.new('ShaderNodeCombineColor'); combine.mode = 'RGB'
+        links.new(inputs.outputs['Color'], separate.inputs['Color'])
+
+        def math(op, a, b):
+            node = nodes.new('ShaderNodeMath'); node.operation = op
+            for value, target in zip((a, b), node.inputs):
+                if isinstance(value, (int, float)):
+                    target.default_value = value
+                else:
+                    links.new(value, target)
+            return node.outputs[0]
+
+        for index in range(3):
+            value = math('MAXIMUM', separate.outputs[index], 0)
+            if to_linear:
+                low = math('DIVIDE', value, 12.92)
+                high = math('POWER', math('DIVIDE', math('ADD', value, .055), 1.055), 2.4)
+                threshold = .04045
+            else:
+                low = math('MULTIPLY', value, 12.92)
+                high = math('SUBTRACT', math('MULTIPLY', math('POWER', value, 1 / 2.4), 1.055), .055)
+                threshold = .0031308
+            result = math('ADD', low, math('MULTIPLY', math('SUBTRACT', high, low),
+                                          math('GREATER_THAN', value, threshold)))
+            links.new(result, combine.inputs[index])
+        links.new(combine.outputs['Color'], outputs.inputs['Color'])
+    node = material.node_tree.nodes.new('ShaderNodeGroup')
+    node.node_tree = group
+    node.name = name
+    material.node_tree.links.new(socket, node.inputs['Color'])
+    return node.outputs['Color']

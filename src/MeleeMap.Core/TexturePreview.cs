@@ -5,9 +5,9 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
-public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning, AlphaPreview? Alpha = null);
+public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, string? Warning, AlphaPreview? Alpha = null, bool UseVertexColor = false);
 public sealed record PreviewTexture(string File, int Width, int Height, int WrapS, int WrapT,
-    int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation);
+    int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation, int ColorOperation = 5, float ColorBlend = 1);
 
 /// <summary>Read-only, bounded texture decoding for Blender previews; never used as DAT export input.</summary>
 public static class TexturePreview
@@ -20,7 +20,7 @@ public static class TexturePreview
             : [0.45f, 0.45f, 0.45f, 1];
         var alpha = AlphaPreview.Read(archive, material.MobjOffset);
         MaterialPreview Preview(PreviewTexture? texture, string? warning = null) => new(diffuse, texture,
-            string.IsNullOrEmpty(warning) ? alpha.Warning : string.IsNullOrEmpty(alpha.Warning) ? warning : warning + " " + alpha.Warning, alpha);
+            string.IsNullOrEmpty(warning) ? alpha.Warning : string.IsNullOrEmpty(alpha.Warning) ? warning : warning + " " + alpha.Warning, alpha, (r.Int(material.MobjOffset + 4) & 2) != 0);
         if (!material.UsesUv) return Preview(null);
         try
         {
@@ -82,7 +82,7 @@ public static class TexturePreview
             string file = $"models/textures/{image:x8}-{r.Pointer(t + 0x50).GetValueOrDefault():x8}.tga";
             string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
-            return Preview(new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation),
+            return Preview(new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation, (r.Int(t + 0x40) >> 16) & 15, alpha.TextureBlend),
                 r.Pointer(t + 4) != null ? "Only the first base texture is previewed; additional texture layers are omitted." : null);
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)

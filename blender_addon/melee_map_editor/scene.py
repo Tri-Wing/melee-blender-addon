@@ -219,6 +219,11 @@ def import_session(context, directory):
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
             'groups': len(groups), 'lines': len(source['lines']), 'editable': stage['capabilities']['collisionEdit'],
             'deferred': len(stage.get('deferredMeshes', []))})
+        # Melee's display colors should not pass through AgX's cinematic tone mapping.
+        scene.view_settings.view_transform = 'Standard'
+        scene.view_settings.look = 'None'
+        scene.view_settings.exposure = 0
+        scene.view_settings.gamma = 1
         scene.mme_status = f"Imported {stage['source']['filename']}: {len(groups)} groups, {len(source['lines'])} collision lines"
         return obj
     except Exception:

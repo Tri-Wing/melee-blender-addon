@@ -37,7 +37,9 @@ with tempfile.TemporaryDirectory(prefix='mme-grst-preview-') as tmp:
     nodes = material.node_tree.nodes
     assert nodes['Stage Texture'].image.packed_file
     assert nodes['Stage Vertex Color'].layer_name == 'Stage Color 0'
-    assert nodes['Stage Color Modulation'].inputs[1].links[0].from_node == nodes['Stage Texture']
+    assert nodes['Stage Color Modulation'].inputs[1].links[0].from_node == nodes['Stage Diffuse Tint']
+    assert tuple(nodes['Stage Diffuse Tint'].inputs[1].default_value) == (1, 1, 1, 1)
+    assert nodes['Stage Diffuse Tint'].inputs[2].links[0].from_node == nodes['Stage Texture']
     scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')
     assert (tmp / 'noop.dat').read_bytes() == (CORPUS / 'GrSt.dat').read_bytes()
     obj.data.vertices[0].co.z += 1

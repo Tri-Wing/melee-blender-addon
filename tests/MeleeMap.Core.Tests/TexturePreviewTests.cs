@@ -15,6 +15,9 @@ public class TexturePreviewTests
         using var fixture = new Fixture(format);
         var preview = TexturePreview.Extract(fixture.Archive, new("test", "test", 0, true), fixture.Directory);
         Assert.Null(preview.Warning); Assert.NotNull(preview.Texture);
+        Assert.Equal(4, preview.Texture!.ColorOperation);
+        Assert.Equal(.25f, preview.Texture.ColorBlend);
+        Assert.True(preview.UseVertexColor);
         var image = preview.Texture!; Assert.Equal(2, image.Width); Assert.Equal(2, image.Height);
         var bytes = File.ReadAllBytes(Path.Combine(fixture.Directory, image.File));
         Assert.Equal(18 + 2 * 2 * 4, bytes.Length); Assert.Equal(0x28, bytes[17]);
@@ -55,6 +58,7 @@ public class TexturePreviewTests
             void Put(int at, int value) => BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(32 + at), value);
             void Short(int at, int value) => BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(32 + at), (ushort)value);
             Put(-32, bytes.Length); Put(-28, dataSize); Put(-24, pointers.Length);
+            Put(4, 2); Put(96, 4 << 16); Put(100, BitConverter.SingleToInt32Bits(.25f));
             Put(8, 32); Put(44, 4); Put(108, 128); Put(128, 192); Short(132, 2); Short(134, 2); Put(136, format);
             foreach (int at in new[] { 32 + 0x1C, 32 + 0x20, 32 + 0x24 }) Put(at, BitConverter.SingleToInt32Bits(1));
             bytes[32 + 32 + 0x3C] = 1; bytes[32 + 32 + 0x3D] = 1;

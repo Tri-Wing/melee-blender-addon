@@ -439,3 +439,6 @@ material’s `mme_preview_warning` property. Material/texture animation is still
 These previews do not change DAT export behavior or enable alpha/material editing
 in exports. Rendered regression tests cover alpha sources, operations, cutouts,
 additive effects and opaque black on Blender 4.5 and 5.2.
+
+Stage imports set scene color management to Standard, with Look None, Exposure 0
+and Gamma 1, to preserve the saturated colors used by Melee.

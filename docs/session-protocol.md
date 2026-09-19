@@ -332,3 +332,22 @@ previous preview behavior. No export edit fields are added.
 Source references: HSDLib `Common/HSD_MOBJ.cs`, `Common/HSD_TOBJ.cs`,
 `GX/Enums.cs`, `Tools/Textures/GXImageConverter.cs`, and renderer alpha operations;
 Melee `baselib/tobj.c` alpha expressions and `baselib/state.c` PE defaults.
+
+### Diffuse modulation in previews
+
+`preview.texture.colorOperation` carries the source TOBJ color operation. For
+MODULATE (4), Blender multiplies the texture by the source diffuse color, or by
+white when `preview.useVertexColor` selects mesh color instead. REPLACE (5)
+retains the texture color. BLEND (3) mixes the base color and texture using
+`preview.texture.colorBlend` (the source TOBJ blending value). GrNLa Group 003 /
+JOBJ 003 / DOBJ 003 uses 75% diffuse RGB (38, 25, 25) and 25% texture. Older sessions without these fields keep their
+previous preview behavior. Full specular/game lighting remains approximate.
+Regression coverage includes GrNLa Group 003 / JOBJ 004 / DOBJ 000, whose diffuse
+RGB is (12, 25, 76), and GrSt's vertex-color material.
+
+For BLEND previews, interpolation occurs in GX's stored color-value domain.
+Blender's sRGB texture samples are converted back to those values before mixing
+with the diffuse RGB; the result is converted to scene-linear once, after the
+blend. Mixing already-linearized colors produces an excessively bright result
+for dark materials (including GrNLa G003 J003 D003). This affects previews only
+and leaves shared image color-space settings and DAT export data unchanged.
