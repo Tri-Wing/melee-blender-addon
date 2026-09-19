@@ -1,0 +1,50 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{8E23DD04-4CA4-4C95-81BA-2F868049EECF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MeleeMap.Core", "src\MeleeMap.Core\MeleeMap.Core.csproj", "{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MeleeMap.Cli", "src\MeleeMap.Cli\MeleeMap.Cli.csproj", "{D6E87B5B-F670-4212-9DCA-07024A99CBAA}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{B56F434E-AD80-4DBD-A24B-0F9240F2BABE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MeleeMap.Core.Tests", "tests\MeleeMap.Core.Tests\MeleeMap.Core.Tests.csproj", "{A185ACED-392C-4D68-9513-54A39E1273E0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MeleeMap.Cli.Tests", "tests\MeleeMap.Cli.Tests\MeleeMap.Cli.Tests.csproj", "{44515D0A-7177-440C-B8C3-F2862F9655CB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D6E87B5B-F670-4212-9DCA-07024A99CBAA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D6E87B5B-F670-4212-9DCA-07024A99CBAA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D6E87B5B-F670-4212-9DCA-07024A99CBAA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D6E87B5B-F670-4212-9DCA-07024A99CBAA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A185ACED-392C-4D68-9513-54A39E1273E0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A185ACED-392C-4D68-9513-54A39E1273E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A185ACED-392C-4D68-9513-54A39E1273E0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A185ACED-392C-4D68-9513-54A39E1273E0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{44515D0A-7177-440C-B8C3-F2862F9655CB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{44515D0A-7177-440C-B8C3-F2862F9655CB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{44515D0A-7177-440C-B8C3-F2862F9655CB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{44515D0A-7177-440C-B8C3-F2862F9655CB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{AF3D7F8C-2DE8-4A91-885A-4771E7CC40A1} = {8E23DD04-4CA4-4C95-81BA-2F868049EECF}
+		{D6E87B5B-F670-4212-9DCA-07024A99CBAA} = {8E23DD04-4CA4-4C95-81BA-2F868049EECF}
+		{A185ACED-392C-4D68-9513-54A39E1273E0} = {B56F434E-AD80-4DBD-A24B-0F9240F2BABE}
+		{44515D0A-7177-440C-B8C3-F2862F9655CB} = {B56F434E-AD80-4DBD-A24B-0F9240F2BABE}
+	EndGlobalSection
+EndGlobal
