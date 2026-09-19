@@ -36,7 +36,8 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
     assert infos == stage['editableMeshes']
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
-    chosen = infos[:2]
+    full_infos = [i for i in infos if not i.get('positionsOnly')]
+    chosen = full_infos[:2]
     for index, info in enumerate(chosen):
         obj = modeling.target_object(s, info)
         bpy.ops.object.select_all(action='DESELECT')
@@ -53,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.join()
     # A third model keeps its topology and must retain its original appearance.
-    vertex_info = infos[2]
+    vertex_info = full_infos[2]
     vertex_target = modeling.target_object(s, vertex_info)
     vertex_target.data.vertices[0].co.z += 3
     changed_ids = {i['id'] for i in chosen} | {vertex_info['id']}

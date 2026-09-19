@@ -416,3 +416,17 @@ Checks cover packed images, shader links, UV transforms, Material Preview/UV
 Editor selection, .blend persistence, unchanged no-op DAT bytes, and a CPU
 render inspected for actual texture output. Material/UV export is user-confirmed
 working in game; preview appearance remains an approximation.
+
+## Animated-material rigid vertex editing
+
+Material/texture animation now selects a position-only editing mode instead of
+excluding an otherwise eligible rigid mesh. GrNLa exposes 90 targets: 45 full
+geometry targets and 45 position-only targets; two skinned meshes and one
+billboard remain protected. The position writer retains source primitive
+structure and all non-position attributes. Original archive data stays byte
+identical outside the approved POBJ attribute/display-list pointer and size
+fields, including material and animation data. Backend coverage mixes all
+position-only targets with full geometry replacements and rejects attempts to
+relax permissions through the manifest. Blender coverage includes Edit Mode,
+UV/material/topology rejection, no-edit export and save/reopen. In-game animation
+preservation still requires user verification.

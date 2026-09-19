@@ -22,6 +22,9 @@ public static class TexturePreview
         try
         {
             int t = r.Pointer(material.MobjOffset + 8)!.Value;
+            Require(r.Pointer(t) == null && r.Int(t + 12) == 4
+                && (r.Int(t + 0x40) & 0x0100000F) == 0,
+                "TEXTURE_PREVIEW", "Base texture requires unsupported texture coordinates or a custom class.");
             int image = r.Pointer(t + 0x4C) ?? throw new StageException("TEXTURE_PREVIEW", "Texture has no image descriptor.");
             int width = r.UShort(image + 4), height = r.UShort(image + 6), format = r.Int(image + 8);
             var (blockWidth, blockHeight, blockBytes) = format switch
@@ -76,7 +79,8 @@ public static class TexturePreview
             string file = $"models/textures/{image:x8}-{r.Pointer(t + 0x50).GetValueOrDefault():x8}.tga";
             string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
-            return new(diffuse, new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation), null);
+            return new(diffuse, new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation),
+                r.Pointer(t + 4) != null ? "Only the first base texture is previewed; additional texture layers are omitted." : null);
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)
         { return new(diffuse, null, $"Texture preview unavailable: {e.Message}"); }

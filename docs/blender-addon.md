@@ -145,18 +145,27 @@ supply terrain-dependent contact responses to `ft_80084A80`.
 
 ## Edit the supported model
 
-New imports advertise every structurally supported rigid mesh: **45 of 93 meshes
-in the original GrNLa.dat**. Select an object named **Editable Model** in the
+New imports advertise **90 of 93 meshes in the original GrNLa.dat**: 45 support
+full geometry editing and 45 support vertex movement with animated materials. Select an object named **Editable Model** in the
 Outliner or viewport, then use **Edit Selected Model**. Read-only meshes have a
 **Read-only Model** prefix, and selecting one shows the reason in the sidebar.
-The original stage's remaining meshes have material/texture animation (45),
-skinning (2), or billboard transforms (1).
+Meshes named **Vertex Editable Model** have animated materials: move vertices
+using Blender's native tools, but keep topology, UVs and material assignments
+unchanged. Their original normals, materials, textures and animation data are
+preserved on export. Blender previews their base material colors and supported
+base textures without playing material or texture animation. Additional texture
+layers and game shader effects are not reproduced. The sidebar displays
+this restriction and disables material assignment. Re-import after reloading
+the add-on to enable these newly supported meshes.
+
+The three remaining read-only meshes use skinning (2) or billboard transforms (1).
 
 Each editable object keeps its own identity and geometry. Edit multiple objects
 and export them together; native multi-object Edit Mode also works. Only changed
 meshes receive geometry updates; topology replacements also receive grey materials. Never join two imported stage
 objects together: doing so removes a protected identity. Join newly created
-shapes into the desired editable object instead.
+shapes into a fully editable object instead; joining shapes to a vertex-only
+model is rejected.
 
 1. Reload the add-on or launch with `scripts/launch_blender.sh`. The development
    backend must be rebuilt after C# updates (`dotnet build MeleeMap.sln`).
@@ -165,7 +174,7 @@ shapes into the desired editable object instead.
    first, then import that edited DAT. Keep the old `.blend` and session as needed.
 3. Select an **Editable Model**, then click **Edit Selected Model** to enter
    Edit Mode. The sidebar displays the selected model's edit status.
-4. Move vertices or use native Blender mesh tools to add/delete faces and replace
+4. Move vertices. For fully editable models, use native Blender mesh tools to add/delete faces and replace
    geometry **inside this object**. Unlike collision, render geometry can be
    edited freely in all three dimensions. Quads/ngons are triangulated on export.
    Do not delete the object, change its parenting or object transforms, or add

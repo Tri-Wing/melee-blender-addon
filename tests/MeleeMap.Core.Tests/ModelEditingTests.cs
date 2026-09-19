@@ -124,11 +124,11 @@ public class ModelEditingTests
     public void MultipleRigidTargetsExportTogetherAndRejectDuplicateOrUnsupportedTargets()
     {
         using var session = new Fixture();
-        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity).Where(t => !t.PositionsOnly).ToArray();
         Assert.True(targets.Length > 1);
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory, "stage.json")));
         Assert.Equal(targets.Select(t => t.Id), manifest.RootElement.GetProperty("editableMeshes")
-            .EnumerateArray().Select(t => t.GetProperty("id").GetString()));
+            .EnumerateArray().Where(t => !t.GetProperty("positionsOnly").GetBoolean()).Select(t => t.GetProperty("id").GetString()));
         var edits = new ModelEdits(2, "game-joint-local", targets.Select(t => Triangle(t.Id).Meshes[0]).ToArray());
         session.Write(edits);
         var result = SessionApplier.Apply(session.Directory, session.Output);
@@ -148,7 +148,7 @@ public class ModelEditingTests
         session.Write(edits with { Meshes = [edits.Meshes[0], edits.Meshes[0]] });
         Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.Equal(saved, File.ReadAllBytes(session.Output));
-        string unsupported = session.Identity.Nodes.First(n => n.Kind == "pobj" && !targets.Any(t => t.Id == n.Id)).Id;
+        string unsupported = session.Identity.Nodes.First(n => n.Kind == "pobj" && !ModelEditing.SelectAll(session.Source.Layout, session.Identity).Any(t => t.Id == n.Id)).Id;
         session.Write(edits with { Meshes = [edits.Meshes[0], Triangle(unsupported).Meshes[0]] });
         Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.Equal(saved, File.ReadAllBytes(session.Output));
@@ -162,7 +162,8 @@ public class ModelEditingTests
     public void VertexMovesPreserveAppearanceAcrossTargetsAndComposeWithTopologyReplacement()
     {
         using var session = new Fixture();
-        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity).OrderByDescending(t => t.PositionsOnly).ToArray();
+        Assert.Equal(45, targets.Count(t => t.PositionsOnly));
         var originals = targets.Select(t => GxMeshDecoder.Decode(session.Source.Layout, t.PobjOffset)).ToArray();
         var meshes = targets.Select((t, i) => new ModelEdit(t.Id,
             originals[i].Positions.Select(p => p with { Y = p.Y + 1.25f }).ToArray(), originals[i].TriangleIndices)).ToArray();
@@ -252,6 +253,33 @@ public class ModelEditingTests
         File.Delete(Path.Combine(session.Directory, "edits/models.json"));
         SessionApplier.Apply(session.Directory, session.Output);
         Assert.Equal(session.Source.Layout.Bytes, File.ReadAllBytes(session.Output));
+    }
+
+    [PrimaryFixtureFact]
+    public void AnimatedMaterialsRejectReplacementEvenWithForgedManifestPermission()
+    {
+        using var session = new Fixture();
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var target = targets.First(t => t.PositionsOnly);
+        Assert.DoesNotContain(ModelMaterials.Select(session.Source.Layout, targets), m => m.Id == target.Id);
+        var original = GxMeshDecoder.Decode(session.Source.Layout, target.PobjOffset);
+        var move = new ModelEdit(target.Id, original.Positions.Select(p => p with { X = p.X + 2 }).ToArray(), original.TriangleIndices);
+        session.Write(new(2, "game-joint-local", [move]));
+        SessionApplier.Apply(session.Directory, session.Output);
+        var saved = File.ReadAllBytes(session.Output);
+        string path = Path.Combine(session.Directory, "stage.json");
+        var manifest = JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var entry in manifest["editableMeshes"]!.AsArray()) entry!["positionsOnly"] = false;
+        File.WriteAllText(path, manifest.ToJsonString());
+        var reversed = original.TriangleIndices.Reverse().ToArray();
+        foreach (var invalid in new[] { Triangle(target.Id).Meshes[0], move with { TriangleIndices = reversed },
+            move with { UseGreyMaterial = true }, move with { SourceMaterialId = session.Target.Id },
+            move with { TexCoords = [new(0, 0)] } })
+        {
+            session.Write(new(2, "game-joint-local", [invalid]));
+            Assert.Equal("MODEL_POSITION_ONLY", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
+            Assert.Equal(saved, File.ReadAllBytes(session.Output));
+        }
     }
 
     private sealed class Fixture : IDisposable

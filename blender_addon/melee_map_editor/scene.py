@@ -197,9 +197,11 @@ def import_session(context, directory):
         for info in editable_models:
             target = modeling.target_object(scene, info)
             target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
+            if info.get('positionsOnly'):
+                target.name = target.name.replace('Editable Model', 'Vertex Editable Model', 1)
             baselines[info['id']] = modeling.fingerprint(target)
         scene['mme_model_baselines'] = json.dumps(baselines)
-        scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(modeling.target_object(scene, info)) for info in editable_models})
+        scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(modeling.target_object(scene, info), info.get('positionsOnly', False)) for info in editable_models})
         # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
             scene['mme_model_baseline'] = baselines[editable['id']]

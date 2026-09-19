@@ -10,7 +10,7 @@ public static class ModelMaterials
     public static ModelMaterial[] Select(ArchiveLayout archive, IEnumerable<EditableModel> targets)
     {
         var r = new ArchiveDataReader(archive); var result = new List<ModelMaterial>();
-        foreach (var target in targets)
+        foreach (var target in targets.Where(t => !t.PositionsOnly))
         {
             int mobj = r.Pointer(target.DobjOffset + 8)!.Value;
             int flags = r.Int(mobj + 4);

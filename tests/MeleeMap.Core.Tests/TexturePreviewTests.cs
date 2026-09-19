@@ -44,7 +44,7 @@ public class TexturePreviewTests
             void Put(int at, int value) => BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(32 + at), value);
             void Short(int at, int value) => BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(32 + at), (ushort)value);
             Put(-32, bytes.Length); Put(-28, dataSize); Put(-24, pointers.Length);
-            Put(8, 32); Put(108, 128); Put(128, 192); Short(132, 2); Short(134, 2); Put(136, format);
+            Put(8, 32); Put(44, 4); Put(108, 128); Put(128, 192); Short(132, 2); Short(134, 2); Put(136, format);
             foreach (int at in new[] { 32 + 0x1C, 32 + 0x20, 32 + 0x24 }) Put(at, BitConverter.SingleToInt32Bits(1));
             bytes[32 + 32 + 0x3C] = 1; bytes[32 + 32 + 0x3D] = 1;
             if (format == 6)

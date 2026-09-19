@@ -164,7 +164,10 @@ class MME_OT_edit_model(bpy.types.Operator):
             context.view_layer.objects.active = obj
             context.tool_settings.mesh_select_mode = (True, False, False)
             bpy.ops.object.mode_set(mode='EDIT')
-            context.scene.mme_status = f'Editing {obj.name}. Vertex moves preserve appearance; new faces use the assigned material.'
+            info = next(i for i in modeling.targets(context.scene) if i['id'] == obj.get('mme_id'))
+            context.scene.mme_status = (f'Editing {obj.name}. Move vertices only; animated materials are preserved.'
+                                        if info.get('positionsOnly') else
+                                        f'Editing {obj.name}. Vertex moves preserve appearance; new faces use the assigned material.')
         return execute_safely(self, context, action)
 
 
@@ -203,6 +206,9 @@ class MME_OT_model_material(bpy.types.Operator):
             obj = context.active_object
             if not obj or obj.get('mme_session_id') != context.scene.mme_session_id or obj.get('mme_id') not in modeling.target_ids(context.scene):
                 raise StageError('Select an editable model first.')
+            info = next(i for i in modeling.targets(context.scene) if i['id'] == obj.get('mme_id'))
+            if info.get('positionsOnly'):
+                raise StageError('This model has animated materials. Only vertex movement is supported.')
             if self.material_id == 'GREY':
                 material = bpy.data.materials.new('Melee Export Grey')
                 material.diffuse_color = (0.45, 0.45, 0.45, 1)
@@ -367,8 +373,12 @@ class MME_PT_stage(bpy.types.Panel):
                 layout.label(text=active.get('mme_read_only_reason', 'Read-only in this session.'))
             layout.label(text='Vertex moves preserve original appearance.')
             layout.label(text='New faces use the assigned stage material.')
+            positions_only = selected and next(i for i in editable if i['id'] == active.get('mme_id')).get('positionsOnly', False)
+            if positions_only:
+                layout.label(text='Animated material: vertex movement only.', icon='INFO')
+                layout.label(text='Keep topology, UVs and materials unchanged.')
             row = layout.row()
-            row.enabled = bool(selected)
+            row.enabled = bool(selected) and not positions_only
             row.operator('mme.model_material', icon='MATERIAL')
             layout.operator('mme.texture_preview', icon='TEXTURE')
             layout.label(text='Texture previews do not export image edits.')

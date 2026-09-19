@@ -284,3 +284,24 @@ Blender loads each image as sRGB, packs it, and creates an unlit preview shader.
 Source SRT follows `tobj.c:MakeTextureMtx` (S @ R @ T), conjugated by the adapter's
 V flip, with independent wrap handling. These nodes are visual aids and are not
 used by apply.
+
+### Animated-material rigid meshes
+
+Each `editableMeshes` entry now includes an additive `positionsOnly` boolean
+(default false for older sessions). When true, edits must retain the original
+vertex count and ordered triangle indices and omit `sourceMaterialId`,
+`texCoords`, and `useGreyMaterial` (or leave the latter false). The backend
+recomputes this restriction from the immutable source, independently of the
+manifest. Violations fail with `MODEL_POSITION_ONLY` before output is written.
+The position writer preserves every non-position vertex attribute, source
+material pointer and animation record. These meshes are excluded from the
+reusable static material catalog. Existing sessions keep their declared targets.
+
+`modelPreviews` contains base-material previews for position-only targets, keyed
+by mesh ID. These entries use the same `preview` color/texture structure as
+`modelMaterials`, but are not export material donors. Blender imports them with
+`mme_preview_model_id` rather than `mme_model_material_id`. No animation is
+evaluated: source base colors and the first supported UV0 texture are displayed.
+Unsupported coordinates fall back to the source diffuse color with a warning;
+additional texture layers are omitted with a warning. Preview images are hashed
+as session baseline files and packed into the Blender scene.

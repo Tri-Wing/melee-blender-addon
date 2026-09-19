@@ -11,10 +11,15 @@ def material_id(material):
 
 def create_materials(stage, directory=None):
     result = {}
-    for entry in stage.get('modelMaterials', []):
+    entries = [(entry, False) for entry in stage.get('modelMaterials', [])]
+    entries += [(entry, True) for entry in stage.get('modelPreviews', [])]
+    for entry, preview_only in entries:
         material = bpy.data.materials.new(entry['name'])
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
-        material['mme_model_material_id'] = entry['id']
+        if preview_only:
+            material['mme_preview_model_id'] = entry['id']
+        else:
+            material['mme_model_material_id'] = entry['id']
         material['mme_model_material_source'] = stage['source']['sha256']
         material['mme_model_uses_uv'] = entry['usesUv']
         configure_preview(material, entry.get('preview'), directory, stage)
@@ -31,8 +36,9 @@ def import_uvs(mesh, source):
             uv.data[loop.index].uv = (value['x'], 1 - value['y'])
 
 
-def fingerprint(obj):
-    slots = [material_id(m) for m in obj.data.materials]
+def fingerprint(obj, protect_all=False):
+    slots = [(material_id(m) or m.name if m else None) if protect_all else material_id(m)
+             for m in obj.data.materials]
     if obj.mode == 'EDIT':
         bm = bmesh.from_edit_mesh(obj.data)
         uv = bm.loops.layers.uv.active
@@ -43,6 +49,8 @@ def fingerprint(obj):
         assignments = [slots[f.material_index] if f.material_index < len(slots) else None for f in mesh.polygons]
         coordinates = [[list(mesh.uv_layers.active.data[i].uv) for i in f.loop_indices]
                        for f in mesh.polygons] if mesh.uv_layers.active else None
+    if protect_all:
+        return digest({'slots': slots, 'materials': assignments, 'uvs': coordinates})
     # Untagged Blender materials retain the legacy grey export behavior.
     return digest({'materials': assignments, 'uvs': coordinates}) if any(assignments) else digest(None)
 

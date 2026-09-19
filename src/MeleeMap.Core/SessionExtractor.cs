@@ -123,6 +123,16 @@ public static class SessionExtractor
                 material.Id, material.Name, material.MobjOffset, material.UsesUv,
                 preview = TexturePreview.Extract(stage.Layout, material, temporary)
             }).ToArray();
+            // Preview-only materials never enter the reusable export material catalog.
+            var animatedPreviews = editableModels.Where(e => e.PositionsOnly).Select(e =>
+            {
+                int mobj = reader.Pointer(e.DobjOffset + 8)!.Value;
+                var material = new ModelMaterial(e.Id,
+                    $"Base Material G{e.GroupIndex:D3} J{e.JobjIndex:D3} D{e.DobjIndex:D3}",
+                    mobj, reader.Pointer(mobj + 8) != null);
+                return new { material.Id, material.Name, material.UsesUv,
+                    preview = TexturePreview.Extract(stage.Layout, material, temporary) };
+            }).ToArray();
             var baselineFiles = Directory.GetFiles(temporary, "*", SearchOption.AllDirectories)
                 .Where(path => Path.GetFileName(path) != "source.dat")
                 .Select(path => new { file = Path.GetRelativePath(temporary, path).Replace('\\', '/'), sha256 = SessionApplier.Hash(File.ReadAllBytes(path)) }).ToArray();
@@ -138,11 +148,12 @@ public static class SessionExtractor
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
                 modelMaterials = previewMaterials,
+                modelPreviews = animatedPreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
-                    e.DobjIndex, e.PobjIndex, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
+                    e.DobjIndex, e.PobjIndex, e.PositionsOnly, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),
                 editableMesh = editable == null ? null : new { editable.Id, editable.GroupIndex, editable.JobjIndex,
-                    editable.DobjIndex, editable.PobjIndex, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
+                    editable.DobjIndex, editable.PobjIndex, editable.PositionsOnly, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles },
                 selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings, baselineFiles
             });

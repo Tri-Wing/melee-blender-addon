@@ -72,12 +72,12 @@ def edits(scene, stage):
     for info in infos:
         obj = target_object(scene, info)
         changed = (fingerprint(obj) != baseline.get(info['id'])
-                   or surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None)))
+                   or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
         obj['mme_dirty'] = changed
         if changed:
             source = read(Path(bpy.path.abspath(scene.mme_session)) / info['file'])
             meshes.append(mesh_edit(obj, info, source, stage,
-                                    surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None))))
+                                    surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None))))
     return {'protocolVersion': 2, 'coordinateSpace': 'game-joint-local', 'meshes': meshes} if meshes else None
 
 
@@ -100,6 +100,8 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                          and len(mesh.polygons) * 3 == len(original_indices)
                          and all(list(face.vertices) == original_indices[i * 3:i * 3 + 3]
                                  for i, face in enumerate(mesh.polygons)))
+        if info.get('positionsOnly') and (not same_topology or appearance_changed):
+            raise StageError('This model has animated materials: move vertices only. Undo topology, UV or material assignment changes before export.')
         material = surface.assigned_material(mesh, stage or {})
         result = {'id': info['id'], 'positions': positions,
                   'triangleIndices': original_indices if same_topology else
@@ -137,7 +139,7 @@ def update_dirty(scene, depsgraph):
             continue
         try:
             changed = (fingerprint(obj) != baseline.get(info['id'])
-                   or surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None)))
+                   or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
         except ValueError:
             changed = True
         if bool(obj.get('mme_dirty')) != changed:

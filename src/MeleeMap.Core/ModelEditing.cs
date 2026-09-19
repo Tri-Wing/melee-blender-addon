@@ -10,7 +10,7 @@ public sealed record ModelEdit([property: JsonRequired] string Id,
 public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
     [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes);
 public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
-    int PobjIndex, int PobjOffset, int DobjOffset);
+    int PobjIndex, int PobjOffset, int DobjOffset, bool PositionsOnly = false);
 
 /// <summary>Structurally eligible rigid POBJs with independently replaceable materials.</summary>
 public static class ModelEditing
@@ -25,7 +25,7 @@ public static class ModelEditing
         {
             int material = r.Pointer(t.DobjOffset + 8)!.Value;
             var joint = identity.Nodes.First(n => n.GroupIndex == t.GroupIndex && n.Kind == "jobj" && n.Index == t.JobjIndex);
-            return r.Int(material + 4) == 1 && r.Pointer(material + 8) == null
+            return !t.PositionsOnly && r.Int(material + 4) == 1 && r.Pointer(material + 8) == null
                 && r.Pointer(material + 20) == null && (r.Int(joint.SourceOffset + 4) & 16) == 0;
         });
     }
@@ -51,8 +51,8 @@ public static class ModelEditing
             { readOnlyReasons[p.Id] = "Shared descriptors or multiple meshes in one DOBJ."; continue; }
             try
             {
-                // Custom classes, bindings, shape animation and material animation
-                // need dedicated writers. Joint animation is retained without edits.
+                // Custom classes, bindings and shape animation need dedicated writers.
+                // Material animation is safe only with position-only writes.
                 int? material = r.Pointer(d.SourceOffset + 8);
                 if (r.Pointer(p.SourceOffset + 20) != null || (r.UShort(p.SourceOffset + 12) & ~0xC001) != 0)
                 { readOnlyReasons[p.Id] = "Skinned, shared-joint, or shape-bound geometry."; continue; }
@@ -70,12 +70,11 @@ public static class ModelEditing
                     || archive.Roots.Concat(archive.References).Any(x => x.Offset >= start && x.Offset < start + size);
                 if (HasInteriorReference(p.SourceOffset, 24) || HasInteriorReference(d.SourceOffset, 16))
                 { readOnlyReasons[p.Id] = "External or interior model descriptor references."; continue; }
-                if (HasMaterialAnimation(group, j, d.Index))
-                { readOnlyReasons[p.Id] = "This model has material or texture animation."; continue; }
+                bool positionsOnly = HasMaterialAnimation(group, j, d.Index);
                 var mesh = GxMeshDecoder.Decode(archive, p.SourceOffset);
                 if (mesh.Envelopes != null || mesh.BoundJobjSourceOffset != null)
                 { readOnlyReasons[p.Id] = "Skinned or shared-joint geometry."; continue; }
-                result.Add(new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset));
+                result.Add(new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset, positionsOnly));
             }
             catch (StageException e) { readOnlyReasons[p.Id] = e.Message; }
         }
@@ -124,6 +123,9 @@ public static class ModelEditing
         Require(edits.Meshes is { Length: 1 } && edits.Meshes[0] != null && edits.Meshes[0].Id == target.Id,
             "MODEL_EDIT_TARGET", "Each compiled replacement must match an eligible rigid mesh.");
         var edit = edits.Meshes[0];
+        Require(!target.PositionsOnly || (original != null && HasSameTopology(edit, original)
+            && edit.SourceMaterialId == null && edit.TexCoords == null && !edit.UseGreyMaterial),
+            "MODEL_POSITION_ONLY", "Models with animated materials support vertex movement only. Keep topology, UVs and material assignments unchanged.");
         Require(edit.Positions is { Length: > 0 and <= 65535 } && edit.TriangleIndices is { Length: > 0 }
             && edit.TriangleIndices.Length % 3 == 0 && edit.TriangleIndices.Length <= MaxTriangles * 3,
             "MODEL_EDIT_COUNT", $"Model edits require vertices and triangles (at most 65535 vertices and {MaxTriangles} triangles).");
