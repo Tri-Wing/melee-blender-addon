@@ -52,13 +52,18 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.join()
+    # A third model keeps its topology and must retain its original appearance.
+    vertex_info = infos[2]
+    vertex_target = modeling.target_object(s, vertex_info)
+    vertex_target.data.vertices[0].co.z += 3
+    changed_ids = {i['id'] for i in chosen} | {vertex_info['id']}
     # Multi-object Edit Mode must serialize every changed mesh independently.
     bpy.ops.object.select_all(action='DESELECT')
     for info in chosen:
         modeling.target_object(s, info).select_set(True)
     bpy.ops.object.mode_set(mode='EDIT')
     edits = modeling.edits(s, stage)
-    assert {m['id'] for m in edits['meshes']} == {i['id'] for i in chosen}
+    assert {m['id'] for m in edits['meshes']} == changed_ids
     collision = scene.collision_object(s)
     collision.data.vertices[0].co.z += 1
     result = scene.apply(s, CLI, 'dotnet', tmp / 'multi.dat')
@@ -75,7 +80,12 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
         for name in old_g['meshes']:
             old = read((directory / group['file']).parent / name)
             new = new_meshes[old['sourceOffset']]
-            if old['id'] not in {i['id'] for i in chosen}:
+            if old['id'] == vertex_info['id']:
+                assert new['positions'] != old['positions']
+                assert len(new['positions']) == len(old['positions'])
+                for key in ('normals', 'triangleIndices', 'pobjFlags'):
+                    assert old[key] == new[key]
+            elif old['id'] not in changed_ids:
                 for key in ('positions', 'normals', 'triangleIndices', 'pobjFlags'):
                     assert old[key] == new[key]
             else:

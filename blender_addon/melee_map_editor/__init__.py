@@ -5,12 +5,13 @@ bl_info = {
 }
 
 import uuid
+import json
 from pathlib import Path
 import bmesh
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene, topology, materials, inspector, modeling
+from . import collision, scene, topology, materials, inspector, modeling, surface
 from .protocol import StageError, read, run
 
 
@@ -163,7 +164,54 @@ class MME_OT_edit_model(bpy.types.Operator):
             context.view_layer.objects.active = obj
             context.tool_settings.mesh_select_mode = (True, False, False)
             bpy.ops.object.mode_set(mode='EDIT')
-            context.scene.mme_status = f'Editing {obj.name}. Changed geometry exports grey; collision is edited separately.'
+            context.scene.mme_status = f'Editing {obj.name}. Vertex moves preserve appearance; new faces use the assigned material.'
+        return execute_safely(self, context, action)
+
+
+_material_items_cache = {}
+
+
+def model_material_items(self, context):
+    entries = json.loads(context.scene.get('mme_model_materials', '[]')) if context else []
+    key = tuple((m['id'], m['name'], m['usesUv']) for m in entries)
+    if key not in _material_items_cache:
+        _material_items_cache[key] = [('GREY', 'Grey Export', 'Use the plain grey replacement material')] + [
+            (m['id'], m['name'] + (' (UV)' if m['usesUv'] else ''), 'Assign to the entire model') for m in entries]
+    return _material_items_cache[key]
+
+
+class MME_OT_model_material(bpy.types.Operator):
+    bl_idname = 'mme.model_material'
+    bl_label = 'Assign Model Material'
+    bl_options = {'REGISTER', 'UNDO'}
+    material_id: EnumProperty(name='Stage material', items=model_material_items)
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        if obj and obj.type == 'MESH' and obj.data.materials:
+            current = surface.material_id(obj.data.materials[0])
+            if current and any(item[0] == current for item in model_material_items(self, context)):
+                self.material_id = current
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        self.layout.prop(self, 'material_id')
+        self.layout.label(text='Applies to all faces of the selected model.')
+
+    def execute(self, context):
+        def action():
+            obj = context.active_object
+            if not obj or obj.get('mme_session_id') != context.scene.mme_session_id or obj.get('mme_id') not in modeling.target_ids(context.scene):
+                raise StageError('Select an editable model first.')
+            if self.material_id == 'GREY':
+                material = bpy.data.materials.new('Melee Export Grey')
+                material.diffuse_color = (0.45, 0.45, 0.45, 1)
+            else:
+                material = next((m for m in bpy.data.materials if surface.material_id(m) == self.material_id), None)
+                if material is None:
+                    raise StageError('Stage material missing. Re-import to restore the material catalog.')
+            surface.assign(obj, material)
+            context.scene.mme_status = 'Material assigned to all faces. Use Blender UV tools for textured materials.'
         return execute_safely(self, context, action)
 
 
@@ -296,11 +344,18 @@ class MME_PT_stage(bpy.types.Panel):
             row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
             row.operator('mme.edit_model', icon='EDITMODE_HLT')
             if selected:
-                layout.label(text='Selected: edited — exports grey' if active.get('mme_dirty') else 'Selected: editable — unchanged')
+                layout.label(text='Selected: edited' if active.get('mme_dirty') else 'Selected: editable — unchanged')
             elif active and active.get('mme_role') == 'pobj':
                 layout.label(text='Selected model: read-only', icon='LOCKED')
                 layout.label(text=active.get('mme_read_only_reason', 'Read-only in this session.'))
-            layout.label(text='Edited models export grey without textures.')
+            layout.label(text='Vertex moves preserve original appearance.')
+            layout.label(text='New faces use the assigned stage material.')
+            row = layout.row()
+            row.enabled = bool(selected)
+            row.operator('mme.model_material', icon='MATERIAL')
+            layout.label(text='One material per model; UVs use the active map.')
+            if not s.get('mme_model_materials'):
+                layout.label(text='Re-import to load stage materials.')
             layout.label(text='Object transforms and hierarchy are read-only.')
         else:
             layout.label(text='No supported rigid models in this scene.')
@@ -546,7 +601,7 @@ def update_dirty(scene_arg, depsgraph):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 

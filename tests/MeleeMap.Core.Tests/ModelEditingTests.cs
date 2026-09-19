@@ -47,6 +47,18 @@ public class ModelEditingTests
         Assert.Equal(code, Assert.Throws<StageException>(() => ModelEditing.Compile(input, target)).Code);
     }
 
+    [Fact]
+    public void TopologyComparisonUsesIndicesNotOnlyCounts()
+    {
+        var target = new EditableModel("test", 0, 0, 0, 0, 0, 0);
+        var edit = Triangle(target.Id);
+        var original = new MeshData(edit.Meshes[0].Positions,
+            [new(1, 0, 0), new(1, 0, 0), new(1, 0, 0)], [0, 1, 2]);
+        Assert.Equal(original.Normals, ModelEditing.Compile(edit, target, original).Normals);
+        edit.Meshes[0] = edit.Meshes[0] with { TriangleIndices = [0, 2, 1] };
+        Assert.All(ModelEditing.Compile(edit, target, original).Normals!, normal => Assert.Equal(new Vector3Data(0, 0, -1), normal));
+    }
+
     [PrimaryFixtureFact]
     public void ModelApplyPreservesUnrelatedBytesIdentitiesAndCollision()
     {
@@ -144,6 +156,90 @@ public class ModelEditingTests
         session.Write(edits with { Meshes = [edits.Meshes[0], invalid] });
         Assert.Equal("MODEL_INDEX", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.Equal(saved, File.ReadAllBytes(session.Output));
+    }
+
+    [PrimaryFixtureFact]
+    public void VertexMovesPreserveAppearanceAcrossTargetsAndComposeWithTopologyReplacement()
+    {
+        using var session = new Fixture();
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var originals = targets.Select(t => GxMeshDecoder.Decode(session.Source.Layout, t.PobjOffset)).ToArray();
+        var meshes = targets.Select((t, i) => new ModelEdit(t.Id,
+            originals[i].Positions.Select(p => p with { Y = p.Y + 1.25f }).ToArray(), originals[i].TriangleIndices)).ToArray();
+        // Mix the two paths in the same transaction.
+        meshes[^1] = Triangle(targets[^1].Id).Meshes[0];
+        session.Write(new(2, "game-joint-local", meshes));
+        SessionApplier.Apply(session.Directory, session.Output);
+        var output = new StageArchive(session.Output);
+        for (int i = 0; i < targets.Length - 1; i++)
+            ModelPositionWriter.Verify(output.Layout, session.Source.Layout, targets[i], originals[i] with { Positions = meshes[i].Positions });
+        ModelArchiveWriter.Verify(output.Layout, targets[^1], ModelEditing.Compile(Triangle(targets[^1].Id), targets[^1]));
+        // The original material/texture/UV/normal buffers all remain byte-identical.
+        for (int i = 0; i < session.Source.Layout.DataSize; i++)
+        {
+            bool changed = targets.Any(t => i >= t.PobjOffset + 8 && i < t.PobjOffset + 12
+                || i >= t.PobjOffset + 14 && i < t.PobjOffset + 20)
+                || i >= targets[^1].PobjOffset + 12 && i < targets[^1].PobjOffset + 14
+                || i >= targets[^1].DobjOffset + 8 && i < targets[^1].DobjOffset + 12;
+            if (!changed) Assert.Equal(session.Source.Layout.Bytes[32 + i], output.Layout.Bytes[32 + i]);
+        }
+    }
+
+    [PrimaryFixtureFact]
+    public void StageMaterialAssignmentWritesCornerUvsAndPreservesSourceMaterialData()
+    {
+        using var session = new Fixture();
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var material = ModelMaterials.Select(session.Source.Layout, targets).First(m => m.UsesUv);
+        Vector3Data[] points = [new(0, 0, 0), new(2, 0, 0), new(2, 2, 0), new(0, 2, 0)];
+        int[] indices = [0, 1, 2, 0, 0, 1, 0, 2, 3];
+        Vector2Data[] uvs = [new(0, 0), new(1, 0), new(1, 1), new(9, 9), new(9, 9), new(9, 9), new(0.25f, 0), new(1, 1), new(0, 1)];
+        var edit = new ModelEdits(2, "game-joint-local", [new(session.Target.Id, points, indices, material.Id, uvs)]);
+        session.Write(edit);
+        SessionApplier.Apply(session.Directory, session.Output);
+        var output = new StageArchive(session.Output);
+        var decoded = GxMeshDecoder.Decode(output.Layout, session.Target.PobjOffset);
+        Assert.Equal(new[] { uvs[0], uvs[1], uvs[2], uvs[6], uvs[7], uvs[8] }, decoded.TexCoords0);
+        Assert.Equal(material.MobjOffset, new ArchiveDataReader(output.Layout).Pointer(session.Target.DobjOffset + 8));
+        for (int i = 0; i < session.Source.Layout.DataSize; i++)
+        {
+            bool changed = i >= session.Target.PobjOffset + 8 && i < session.Target.PobjOffset + 20
+                || i >= session.Target.DobjOffset + 8 && i < session.Target.DobjOffset + 12;
+            if (!changed) Assert.Equal(session.Source.Layout.Bytes[32 + i], output.Layout.Bytes[32 + i]);
+        }
+        var saved = File.ReadAllBytes(session.Output);
+        var nonfinite = edit with { Meshes = [edit.Meshes[0] with {
+            TexCoords = Enumerable.Repeat(new Vector2Data(float.NaN, 0), indices.Length).ToArray() }] };
+        Assert.Equal("MODEL_UV", Assert.Throws<StageException>(() => ModelEditing.Compile(nonfinite, session.Target)).Code);
+        foreach (var invalid in new[] {
+            edit.Meshes[0] with { TexCoords = null },
+            edit.Meshes[0] with { TexCoords = [new(0, 0)] },
+            edit.Meshes[0] with { SourceMaterialId = "unsupported" },
+            edit.Meshes[0] with { UseGreyMaterial = true } })
+        {
+            session.Write(edit with { Meshes = [invalid] });
+            Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output));
+            Assert.Equal(saved, File.ReadAllBytes(session.Output));
+        }
+    }
+
+    [PrimaryFixtureFact]
+    public void UvOnlyEditsRetainSourceNormalsAndCulling()
+    {
+        using var session = new Fixture();
+        var targets = ModelEditing.SelectAll(session.Source.Layout, session.Identity);
+        var material = ModelMaterials.Select(session.Source.Layout, targets).First(m => m.UsesUv);
+        var target = targets.Single(t => t.Id == material.Id);
+        var original = GxMeshDecoder.Decode(session.Source.Layout, target.PobjOffset);
+        var uv = original.TriangleIndices.Select(i => original.TexCoords0![i] with { X = original.TexCoords0[i].X + 0.125f }).ToArray();
+        var edit = new ModelEdits(2, "game-joint-local", [new(target.Id, original.Positions, original.TriangleIndices, material.Id, uv)]);
+        session.Write(edit); SessionApplier.Apply(session.Directory, session.Output);
+        var output = new StageArchive(session.Output);
+        int culling = new ArchiveDataReader(session.Source.Layout).UShort(target.PobjOffset + 12) & 0xC000;
+        var expected = ModelEditing.Compile(edit, target, original);
+        ModelArchiveWriter.Verify(output.Layout, target, expected, material.MobjOffset, culling);
+        Assert.Equal(original.Positions[original.TriangleIndices[0]], expected.Positions[0]);
+        Assert.Equal(original.Normals![original.TriangleIndices[0]], expected.Normals![0]);
     }
 
     [PrimaryFixtureFact]

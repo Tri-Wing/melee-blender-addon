@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import uuid
 import bpy
-from . import collision, modeling
+from . import collision, modeling, surface
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, joint_matrices, mesh_pose
 
@@ -106,6 +106,7 @@ def import_session(context, directory):
     sid = uuid.uuid4().hex
     created_objects, created_collections, created_meshes = [], [], []
     material = None
+    source_materials = {}
 
     def tag(item, role, key, group=-1):
         item['mme_role'], item['mme_session_id'], item['mme_id'] = role, sid, key
@@ -126,6 +127,8 @@ def import_session(context, directory):
         collection('Reference', root, 'reference', 'reference')
         material = bpy.data.materials.new('Melee Preview Grey')
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
+        source_materials = surface.create_materials(stage)
+        scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
         objects = {}
         for entry, group in zip(stage['modelGroups'], groups):
             c = collection(f"Group {group['index']:03d}", models, group['id'], index=group['index'])
@@ -161,7 +164,8 @@ def import_session(context, directory):
                 indices = payload['triangleIndices']
                 mesh.from_pydata([AXES @ p for p in positions], [],
                                  [indices[i:i+3] for i in range(0, len(indices), 3)])
-                mesh.materials.append(material)
+                mesh.materials.append(source_materials.get(payload['id'], material))
+                surface.import_uvs(mesh, payload)
                 if payload.get('normals') and not payload.get('envelopes'):
                     from .transforms import vector
                     mesh.normals_split_custom_set_from_vertices([AXES.to_3x3() @ vector(n) for n in payload['normals']])
@@ -195,6 +199,7 @@ def import_session(context, directory):
             target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
             baselines[info['id']] = modeling.fingerprint(target)
         scene['mme_model_baselines'] = json.dumps(baselines)
+        scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(modeling.target_object(scene, info)) for info in editable_models})
         # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
             scene['mme_model_baseline'] = baselines[editable['id']]
@@ -216,6 +221,9 @@ def import_session(context, directory):
         for mesh in created_meshes:
             if mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
+        for source_material in source_materials.values():
+            if source_material.users == 0:
+                bpy.data.materials.remove(source_material)
         if material and material.users == 0:
             bpy.data.materials.remove(material)
         raise

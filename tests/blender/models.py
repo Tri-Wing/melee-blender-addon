@@ -34,6 +34,7 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     run(CLI, 'dotnet', 'extract', CORPUS / 'GrNLa.dat', '--session', directory)
     legacy_manifest = read(directory / 'stage.json')
     legacy_manifest.pop('editableMeshes')
+    legacy_manifest.pop('modelMaterials', None)
     (directory / 'stage.json').write_text(json.dumps(legacy_manifest))
     scene.import_session(bpy.context, directory)
     del bpy.context.scene['mme_editable_meshes']
@@ -59,6 +60,10 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     run(CLI, 'dotnet', 'extract', tmp / 'moved.dat', '--session', tmp / 'moved')
     moved_stage = read(tmp / 'moved/stage.json')
     moved = read(tmp / 'moved' / moved_stage['editableMesh']['file'])
+    original_mesh = read(directory / stage['editableMesh']['file'])
+    assert moved['normals'] == original_mesh['normals']
+    assert moved['pobjFlags'] == original_mesh['pobjFlags']
+    assert moved['triangleIndices'] == original_mesh['triangleIndices']
     expected = edit['meshes'][0]['positions'][0]
     assert any(all(math.isclose(p[k], expected[k], rel_tol=1e-6, abs_tol=1e-5) for k in ('x', 'y', 'z'))
                for p in moved['positions']), expected

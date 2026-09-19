@@ -5,7 +5,8 @@ using static MeleeMap.Core.ArchiveLayout;
 namespace MeleeMap.Core;
 
 public sealed record ModelEdit([property: JsonRequired] string Id,
-    [property: JsonRequired] Vector3Data[] Positions, [property: JsonRequired] int[] TriangleIndices);
+    [property: JsonRequired] Vector3Data[] Positions, [property: JsonRequired] int[] TriangleIndices,
+    string? SourceMaterialId = null, Vector2Data[]? TexCoords = null, bool UseGreyMaterial = false);
 public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
     [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes);
 public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
@@ -106,7 +107,17 @@ public static class ModelEditing
         }
     }
 
-    public static MeshData Compile(ModelEdits edits, EditableModel target)
+    public static bool HasSameTopology(ModelEdit edit, MeshData original) =>
+        edit.Positions?.Length == original.Positions.Length && edit.TriangleIndices != null
+        && edit.TriangleIndices.SequenceEqual(original.TriangleIndices);
+
+    public static bool PreservesAppearance(ModelEdit edit, MeshData original, EditableModel target) =>
+        !edit.UseGreyMaterial && HasSameTopology(edit, original) && (edit.SourceMaterialId == null ||
+            (edit.SourceMaterialId == target.Id && (original.TexCoords0 == null ? edit.TexCoords == null
+                : edit.TexCoords != null && edit.TexCoords.Length == original.TriangleIndices.Length
+                && edit.TexCoords.SequenceEqual(original.TriangleIndices.Select(i => original.TexCoords0[i])))));
+
+    public static MeshData Compile(ModelEdits edits, EditableModel target, MeshData? original = null)
     {
         Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.CoordinateSpace == "game-joint-local",
             "MODEL_EDIT_VERSION", "Model edits must use the current protocol and game-joint-local coordinates.");
@@ -118,7 +129,15 @@ public static class ModelEditing
             "MODEL_EDIT_COUNT", $"Model edits require vertices and triangles (at most 65535 vertices and {MaxTriangles} triangles).");
         Require(edit.Positions.All(v => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z)), "MODEL_NONFINITE", "Model positions must be finite.");
         Require(edit.TriangleIndices.All(i => i >= 0 && i < edit.Positions.Length), "MODEL_INDEX", "Model triangle index is out of bounds.");
+        Require(!edit.UseGreyMaterial || edit.SourceMaterialId == null, "MODEL_MATERIAL", "Choose either grey or a stage material.");
+        Require(edit.TexCoords == null || (edit.SourceMaterialId != null && edit.TexCoords.Length == edit.TriangleIndices.Length
+            && edit.TexCoords.All(uv => float.IsFinite(uv.X) && float.IsFinite(uv.Y))),
+            "MODEL_UV", "UVs require a source material and one finite coordinate per triangle corner.");
+        if (original != null && PreservesAppearance(edit, original, target))
+            return original with { Positions = edit.Positions };
         var positions = new List<Vector3Data>(); var normals = new List<Vector3Data>();
+        var texCoords = edit.TexCoords == null ? null : new List<Vector2Data>();
+        bool keepNormals = edit.SourceMaterialId != null && original?.Normals != null && HasSameTopology(edit, original);
         for (int i = 0; i < edit.TriangleIndices.Length; i += 3)
         {
             var a = edit.Positions[edit.TriangleIndices[i]]; var b = edit.Positions[edit.TriangleIndices[i + 1]]; var c = edit.Positions[edit.TriangleIndices[i + 2]];
@@ -128,9 +147,13 @@ public static class ModelEditing
             double length = Math.Sqrt(nx * nx + ny * ny + nz * nz);
             if (length == 0) continue; // GX strips commonly contain deliberate degenerate triangles.
             var normal = new Vector3Data((float)(nx / length), (float)(ny / length), (float)(nz / length));
-            positions.AddRange([a, b, c]); normals.AddRange([normal, normal, normal]);
+            positions.AddRange([a, b, c]);
+            if (keepNormals)
+                normals.AddRange(edit.TriangleIndices.Skip(i).Take(3).Select(index => original!.Normals![index]));
+            else normals.AddRange([normal, normal, normal]);
+            if (texCoords != null) texCoords.AddRange(edit.TexCoords!.Skip(i).Take(3));
         }
         Require(positions.Count > 0, "MODEL_EMPTY", "The replacement model has no nondegenerate triangles.");
-        return new(positions.ToArray(), normals.ToArray(), Enumerable.Range(0, positions.Count).ToArray());
+        return new(positions.ToArray(), normals.ToArray(), Enumerable.Range(0, positions.Count).ToArray(), TexCoords0: texCoords?.ToArray());
     }
 }

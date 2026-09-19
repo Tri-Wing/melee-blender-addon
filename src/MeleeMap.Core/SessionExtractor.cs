@@ -90,7 +90,7 @@ public static class SessionExtractor
                         : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
                         : readOnlyReasons.GetValueOrDefault(node.Id),
                     vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
-                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices,
+                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices, texCoords0 = mesh.TexCoords0,
                     boundJobjId = JointId(mesh.BoundJobjSourceOffset), envelopeIndices = mesh.EnvelopeIndices,
                     envelopes = mesh.Envelopes?.Select(e => e.Select(w => new { jobjId = JointId(w.JobjSourceOffset), weight = w.Weight }))
                 });
@@ -131,6 +131,7 @@ public static class SessionExtractor
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
+                modelMaterials = ModelMaterials.Select(stage.Layout, editableModels),
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
                     e.DobjIndex, e.PobjIndex, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),

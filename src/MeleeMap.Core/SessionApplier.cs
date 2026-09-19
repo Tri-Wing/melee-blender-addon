@@ -84,7 +84,7 @@ public static class SessionApplier
             bytes = CollisionArchiveWriter.Write(source.Layout, collision);
         }
         bool modelChanged = File.Exists(modelPath);
-        var compiledModels = new List<(EditableModel Target, MeshData Mesh)>();
+        var compiledModels = new List<(EditableModel Target, MeshData Mesh, bool PreserveAppearance, ModelMaterial? Material, int Culling)>();
         if (modelChanged)
         {
             var eligible = ModelEditing.SelectAll(source.Layout, modelBaseline).ToDictionary(t => t.Id);
@@ -101,11 +101,19 @@ public static class SessionApplier
                 Require(edit != null && edit.Id != null && seen.Add(edit.Id) && declaredIds.Contains(edit.Id)
                     && eligible.ContainsKey(edit.Id), "MODEL_EDIT_TARGET", "Model edit target is unsupported, duplicated, or absent from this session.");
                 var target = eligible[edit!.Id];
-                compiledModels.Add((target, ModelEditing.Compile(edits with { Meshes = [edit] }, target)));
+                var material = edit.SourceMaterialId == null ? null : ModelMaterials.Resolve(source.Layout, eligible.Values, edit.SourceMaterialId);
+                Require(material == null || !material.UsesUv || edit.TexCoords != null,
+                    "MODEL_UV", "The assigned textured material requires UV coordinates for every triangle corner.");
+                var original = GxMeshDecoder.Decode(source.Layout, target.PobjOffset);
+                compiledModels.Add((target, ModelEditing.Compile(edits with { Meshes = [edit] }, target, original),
+                    ModelEditing.PreservesAppearance(edit, original, target), material,
+                    material != null && ModelEditing.HasSameTopology(edit, original)
+                        ? new ArchiveDataReader(source.Layout).UShort(target.PobjOffset + 12) & 0xC000 : 0x4000));
             }
             // Compile the complete batch before writing any replacement.
-            foreach (var (target, mesh) in compiledModels)
-                bytes = ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh);
+            foreach (var (target, mesh, preserveAppearance, material, culling) in compiledModels)
+                bytes = preserveAppearance ? ModelPositionWriter.Write(new ArchiveLayout(bytes), target, mesh)
+                    : ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh, material?.MobjOffset, culling);
         }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -120,7 +128,9 @@ public static class SessionApplier
                     pair.First.Ranges.SequenceEqual(pair.Second.Ranges)
                     && (pair.First.Left, pair.First.Bottom, pair.First.Right, pair.First.Top, pair.First.VertexStart, pair.First.VertexCount)
                         == (pair.Second.Left, pair.Second.Bottom, pair.Second.Right, pair.Second.Top, pair.Second.VertexStart, pair.Second.VertexCount)), "COLLISION_WRITE_MISMATCH", "Reloaded collision differs from compiled edits.");
-            foreach (var (target, mesh) in compiledModels) ModelArchiveWriter.Verify(reloaded.Layout, target, mesh);
+            foreach (var (target, mesh, preserveAppearance, material, culling) in compiledModels)
+                if (preserveAppearance) ModelPositionWriter.Verify(reloaded.Layout, source.Layout, target, mesh);
+                else ModelArchiveWriter.Verify(reloaded.Layout, target, mesh, material?.MobjOffset, culling);
             if (!changed && !modelChanged) Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }

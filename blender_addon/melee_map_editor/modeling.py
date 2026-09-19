@@ -1,8 +1,10 @@
-"""Editable rigid meshes; export uses a single grey material for all faces."""
+"""Rigid edits preserve source appearance when vertex count and faces are unchanged."""
 import json
+from pathlib import Path
 import bpy
 import bmesh
-from .protocol import StageError, digest
+from .protocol import StageError, digest, read
+from . import surface
 
 
 def target_info(scene):
@@ -65,17 +67,21 @@ def edits(scene, stage):
     if infos and infos != declared:
         raise StageError('Editable model identities changed. Re-import the stage.')
     baseline = baselines(scene)
+    appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
     meshes = []
     for info in infos:
         obj = target_object(scene, info)
-        changed = fingerprint(obj) != baseline.get(info['id'])
+        changed = (fingerprint(obj) != baseline.get(info['id'])
+                   or surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None)))
         obj['mme_dirty'] = changed
         if changed:
-            meshes.append(mesh_edit(obj, info))
+            source = read(Path(bpy.path.abspath(scene.mme_session)) / info['file'])
+            meshes.append(mesh_edit(obj, info, source, stage,
+                                    surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None))))
     return {'protocolVersion': 2, 'coordinateSpace': 'game-joint-local', 'meshes': meshes} if meshes else None
 
 
-def mesh_edit(obj, info):
+def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
     if obj.mode == 'EDIT':
         obj.update_from_editmode()
     # A copy exposes synchronized edit-mode data without changing the user's mesh.
@@ -85,8 +91,35 @@ def mesh_edit(obj, info):
         if not mesh.loop_triangles or len(mesh.loop_triangles) > info['maxTriangles'] or len(mesh.vertices) > 65535:
             raise StageError(f"Editable model needs triangles (maximum {info['maxTriangles']} triangles and 65535 vertices).")
         positions = [{'x': v.co.x, 'y': v.co.z, 'z': -v.co.y} for v in mesh.vertices]
-        return {'id': info['id'], 'positions': positions,
-                'triangleIndices': [i for triangle in mesh.loop_triangles for i in triangle.vertices]}
+        # Use the original primitive expansion, including GX strip degenerates,
+        # when the indexed Blender faces still match the imported topology.
+        # Re-triangulating can rotate degenerate triangle corners and would
+        # incorrectly turn a vertex move into a grey topology replacement.
+        original_indices = source['triangleIndices'] if source else []
+        same_topology = (source is not None and len(positions) == len(source['positions'])
+                         and len(mesh.polygons) * 3 == len(original_indices)
+                         and all(list(face.vertices) == original_indices[i * 3:i * 3 + 3]
+                                 for i, face in enumerate(mesh.polygons)))
+        material = surface.assigned_material(mesh, stage or {})
+        result = {'id': info['id'], 'positions': positions,
+                  'triangleIndices': original_indices if same_topology else
+                      [i for triangle in mesh.loop_triangles for i in triangle.vertices]}
+        if same_topology and not appearance_changed:
+            return result
+        if not material and appearance_changed:
+            result['useGreyMaterial'] = True
+        if material:
+            result['sourceMaterialId'] = material['id']
+            if material['usesUv']:
+                uv = mesh.uv_layers.active
+                if uv is None:
+                    raise StageError('This stage material needs a UV map. Unwrap the model in Blender before exporting.')
+                # Same-topology faces retain original corner ordering, including
+                # strip degenerates. Otherwise use Blender's triangulated loops.
+                loops = ([i for face in mesh.polygons for i in face.loop_indices] if same_topology else
+                         [i for triangle in mesh.loop_triangles for i in triangle.loops])
+                result['texCoords'] = [{'x': uv.data[i].uv.x, 'y': 1 - uv.data[i].uv.y} for i in loops]
+        return result
     finally:
         bpy.data.meshes.remove(mesh)
 
@@ -96,13 +129,15 @@ def update_dirty(scene, depsgraph):
     if not infos:
         return
     baseline = baselines(scene)
+    appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
     updates = {update.id.original for update in depsgraph.updates}
     for info in infos:
         obj = target_object(scene, info)
         if obj not in updates and obj.data not in updates:
             continue
         try:
-            changed = fingerprint(obj) != baseline.get(info['id'])
+            changed = (fingerprint(obj) != baseline.get(info['id'])
+                   or surface.fingerprint(obj) != appearance_baseline.get(info['id'], digest(None)))
         except ValueError:
             changed = True
         if bool(obj.get('mme_dirty')) != changed:
