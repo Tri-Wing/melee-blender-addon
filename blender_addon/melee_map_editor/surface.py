@@ -34,9 +34,11 @@ def create_materials(stage, directory=None, light_objects=None):
 
 
 def import_uvs(mesh, source):
-    coordinates = source.get('texCoords0')
-    if coordinates:
-        uv = mesh.uv_layers.new(name='UVMap')
+    for channel in range(2):
+        coordinates = source.get(f'texCoords{channel}')
+        if not coordinates:
+            continue
+        uv = mesh.uv_layers.new(name='UVMap' if channel == 0 else f'UVMap.{channel:03d}')
         for loop in mesh.loops:
             value = coordinates[loop.vertex_index]
             uv.data[loop.index].uv = (value['x'], 1 - value['y'])
@@ -397,52 +399,64 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
     links.new(shader.outputs[0], output.inputs['Surface'])
     warning = preview.get('warning')
     texture = preview.get('texture')
+    textures = preview.get('textures') or ([texture] if texture else [])
     if warning:
         material['mme_preview_warning'] = warning
-    if not texture or directory is None:
+    if not textures or directory is None:
         configure_alpha_preview(material, preview.get('alpha'))
         return
     directory = Path(directory).resolve()
-    path = (directory / texture['file']).resolve()
-    if (not path.is_relative_to(directory)
-            or texture['file'] not in {entry['file'] for entry in stage['baselineFiles']}):
-        raise StageError('Texture preview file is outside the protected session baseline.')
-    image = bpy.data.images.load(str(path), check_existing=True)
-    image.colorspace_settings.name = 'sRGB'
-    image.alpha_mode = 'STRAIGHT'
-    image.pack()
-    sampler = nodes.new('ShaderNodeTexImage')
-    sampler.name = 'Stage Texture'
-    sampler.image = image
-    sampler.interpolation = 'Linear'
-    sampler.extension = 'EXTEND'
-    uv = nodes.new('ShaderNodeTexCoord')
-    matrix = preview_matrix(texture)
-    combine = nodes.new('ShaderNodeCombineXYZ')
-    for axis, wrap in enumerate((texture['wrapS'], texture['wrapT'])):
-        dot = nodes.new('ShaderNodeVectorMath')
-        dot.operation = 'DOT_PRODUCT'
-        dot.inputs[1].default_value = tuple(matrix[axis][i] for i in range(3))
-        links.new(uv.outputs['UV'], dot.inputs[0])
-        add = nodes.new('ShaderNodeMath')
-        add.operation = 'ADD'
-        add.inputs[1].default_value = matrix[axis][3]
-        links.new(dot.outputs['Value'], add.inputs[0])
-        value = add.outputs[0]
-        if wrap == 0:
-            clamp = nodes.new('ShaderNodeClamp')
-            links.new(value, clamp.inputs['Value'])
-            value = clamp.outputs[0]
-        else:
-            wrapped = nodes.new('ShaderNodeMath')
-            wrapped.operation = 'FRACT' if wrap == 1 else 'PINGPONG'
-            wrapped.inputs[1].default_value = 1
-            links.new(value, wrapped.inputs[0])
-            value = wrapped.outputs[0]
-        links.new(value, combine.inputs[axis])
-    links.new(combine.outputs[0], sampler.inputs['Vector'])
+    baseline = {entry['file'] for entry in stage['baselineFiles']}
+    samplers = []
+    for index, layer in enumerate(textures):
+        path = (directory / layer['file']).resolve()
+        if not path.is_relative_to(directory) or layer['file'] not in baseline:
+            raise StageError('Texture preview file is outside the protected session baseline.')
+        image = bpy.data.images.load(str(path), check_existing=True)
+        image.colorspace_settings.name = 'sRGB'
+        image.alpha_mode = 'STRAIGHT'
+        image.pack()
+        sampler = nodes.new('ShaderNodeTexImage')
+        sampler.name = 'Stage Texture' if index == 0 else f'Stage Texture {index + 1}'
+        sampler.image = image
+        sampler.interpolation = 'Linear'
+        sampler.extension = 'EXTEND'
+        uv = nodes.new('ShaderNodeUVMap')
+        uv.name = 'Stage UV' if index == 0 else f'Stage UV {index + 1}'
+        coordinate = layer.get('texCoord', 0)
+        uv.uv_map = 'UVMap' if coordinate == 0 else f'UVMap.{coordinate:03d}'
+        matrix = preview_matrix(layer)
+        combine = nodes.new('ShaderNodeCombineXYZ')
+        combine.name = 'Stage Texture Coordinates' if index == 0 else f'Stage Texture Coordinates {index + 1}'
+        for axis, wrap in enumerate((layer['wrapS'], layer['wrapT'])):
+            dot = nodes.new('ShaderNodeVectorMath')
+            dot.operation = 'DOT_PRODUCT'
+            dot.inputs[1].default_value = tuple(matrix[axis][i] for i in range(3))
+            links.new(uv.outputs['UV'], dot.inputs[0])
+            add = nodes.new('ShaderNodeMath')
+            add.operation = 'ADD'
+            add.inputs[1].default_value = matrix[axis][3]
+            links.new(dot.outputs['Value'], add.inputs[0])
+            value = add.outputs[0]
+            if wrap == 0:
+                clamp = nodes.new('ShaderNodeClamp')
+                links.new(value, clamp.inputs['Value'])
+                value = clamp.outputs[0]
+            else:
+                wrapped = nodes.new('ShaderNodeMath')
+                wrapped.operation = 'FRACT' if wrap == 1 else 'PINGPONG'
+                wrapped.inputs[1].default_value = 1
+                links.new(value, wrapped.inputs[0])
+                value = wrapped.outputs[0]
+            links.new(value, combine.inputs[axis])
+        links.new(combine.outputs[0], sampler.inputs['Vector'])
+        uv.location = (-900, -index * 260)
+        combine.location = (-550, -index * 260)
+        sampler.location = (-300, -index * 260)
+        samplers.append(sampler)
+
     operation = texture.get('colorOperation', 5)
-    if operation in (3, 4):
+    if len(textures) == 1 and operation in (3, 4):
         tint = nodes.new('ShaderNodeMixRGB')
         tint.name = 'Stage Diffuse Tint'
         tint.blend_type = 'MULTIPLY' if operation == 4 else 'MIX'
@@ -451,23 +465,56 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             # GX interpolates stored color values, not scene-linear light.
             # Decode the mixed result only after the TEV blend calculation.
             tint.inputs[1].default_value = (1, 1, 1, 1) if preview.get('useVertexColor') else color
-            encoded = color_transfer(material, sampler.outputs['Color'], to_linear=False)
+            encoded = color_transfer(material, samplers[0].outputs['Color'], to_linear=False)
             links.new(encoded, tint.inputs[2])
             result = color_transfer(material, tint.outputs[0], to_linear=True)
             links.new(result, color_input)
         else:
             tint.inputs[1].default_value = (*linear, 1)
-            links.new(sampler.outputs['Color'], tint.inputs[2])
+            links.new(samplers[0].outputs['Color'], tint.inputs[2])
             links.new(tint.outputs[0], color_input)
         tint.location = (100, 100)
+    elif len(textures) > 1:
+        # HSD applies TObjs in list order. Perform the TEV arithmetic in encoded
+        # byte color space, then decode the final result for Blender.
+        encoded_result = None
+        base = (1, 1, 1, 1) if preview.get('useVertexColor') else color
+        for index, (layer, sampler) in enumerate(zip(textures, samplers)):
+            encoded_texture = color_transfer(material, sampler.outputs['Color'], to_linear=False)
+            operation = layer.get('colorOperation', 5)
+            combine_color = nodes.new('ShaderNodeMixRGB')
+            combine_color.name = 'Stage Diffuse Tint' if index == 0 else f'Stage Texture Blend {index + 1}'
+            combine_color.inputs[1].default_value = base
+            if encoded_result is not None:
+                links.new(encoded_result, combine_color.inputs[1])
+            links.new(encoded_texture, combine_color.inputs[2])
+            if operation == 3:
+                combine_color.blend_type = 'MIX'
+                combine_color.inputs[0].default_value = layer.get('colorBlend', 1)
+            elif operation == 4:
+                combine_color.blend_type = 'MULTIPLY'
+                combine_color.inputs[0].default_value = 1
+            elif operation == 6:
+                combine_color.blend_type = 'MIX'
+                combine_color.inputs[0].default_value = 0
+            elif operation == 7:
+                combine_color.blend_type = 'ADD'
+                combine_color.inputs[0].default_value = 1
+            elif operation == 8:
+                combine_color.blend_type = 'SUBTRACT'
+                combine_color.inputs[0].default_value = 1
+            else:
+                combine_color.blend_type = 'MIX'
+                combine_color.inputs[0].default_value = 1
+            combine_color.location = (0, -index * 220)
+            encoded_result = combine_color.outputs[0]
+        result = color_transfer(material, encoded_result, to_linear=True)
+        links.new(result, color_input)
     else:
-        links.new(sampler.outputs['Color'], color_input)
-    nodes.active = sampler
-    sampler.select = True
+        links.new(samplers[0].outputs['Color'], color_input)
+    nodes.active = samplers[0]
+    samplers[0].select = True
     # A legible layout if the user opens the Shader Editor.
-    uv.location = (-900, 0)
-    combine.location = (-300, 0)
-    sampler.location = (-100, 0)
     shader.location = (400, 0)
     output.location = (600, 0)
     configure_alpha_preview(material, preview.get('alpha'))

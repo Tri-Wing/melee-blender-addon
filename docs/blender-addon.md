@@ -278,6 +278,10 @@ Images are packed into the `.blend` and remain available after saving/reopening.
 The preview applies the source UV repeat, scale, rotation, translation, clamp,
 and mirror settings without changing the editable UV map. The UV Editor shows
 the original image; the viewport shows it with the source material transforms.
+Standard multi-texture materials using the first two GX UV channels apply each
+TObj in source order. Both UV channels and each layer's independent transform,
+color operation, and blend value are retained. This includes the two moving
+water layers on GrYt Group 001 / JOBJ 008 / DOBJ 031.
 
 The texture preview also uses supported MOBJ lighting flags and imported LOBJ
 descriptor values. Full TEV channel routing, mip filtering, animated materials
@@ -423,8 +427,8 @@ Material previews are independent of export-material eligibility. Static meshes
 using vertex-color materials (for example GrSt Group 003 / JOBJ 004 / DOBJ 013)
 and read-only meshes also receive their supported base textures. These previews
 do not make the source materials available for assignment to replacement
-geometry. Unsupported texture coordinates and additional texture layers retain
-the existing preview limitations.
+geometry. Unsupported texture-coordinate generators and custom TEV programs
+retain the existing preview limitations.
 
 ## Alpha previews
 
@@ -437,7 +441,7 @@ Transparency uses the source material and pixel-processing settings:
 - Additive blending, where black contributes no light and leaves the background visible.
 
 Opaque materials stay opaque even if their image contains black pixels or unused
-alpha. Custom TEV routing, multiple texture layers and uncommon framebuffer
+alpha. Custom TEV routing, uncommon multi-layer alpha routing, and framebuffer
 blending remain approximate; unsupported source settings are recorded in the
 material’s `mme_preview_warning` property. Material/texture animation is still not evaluated.
 Preview nodes do not export material edits. Use the supported Melee Material

@@ -7,7 +7,9 @@ public readonly record struct Vector3Data(float X, float Y, float Z);
 public readonly record struct ColorData(float R, float G, float B, float A);
 public sealed record EnvelopeWeight(int JobjSourceOffset, float Weight);
 public sealed record MeshData(Vector3Data[] Positions, Vector3Data[]? Normals, int[] TriangleIndices,
-    int[]? EnvelopeIndices = null, EnvelopeWeight[][]? Envelopes = null, int? BoundJobjSourceOffset = null, Vector2Data[]? TexCoords0 = null, ColorData[]? Colors0 = null, ColorData[]? Colors1 = null);
+    int[]? EnvelopeIndices = null, EnvelopeWeight[][]? Envelopes = null, int? BoundJobjSourceOffset = null,
+    Vector2Data[]? TexCoords0 = null, Vector2Data[]? TexCoords1 = null,
+    ColorData[]? Colors0 = null, ColorData[]? Colors1 = null);
 
 /// <summary>Bounded, headless decoder for rigid and enveloped GX triangle geometry. Bindings remain explicit.</summary>
 public static class GxMeshDecoder
@@ -70,7 +72,8 @@ public static class GxMeshDecoder
         int length = r.UShort(polygon + 14) * 32;
         int cursor = display!.Value, end = cursor + length; r.Check(cursor, length);
         var positions = new List<Vector3Data>(); var normals = names.Contains(10) ? new List<Vector3Data>() : null;
-        var texCoords = names.Contains(13) ? new List<Vector2Data>() : null;
+        var texCoords0 = names.Contains(13) ? new List<Vector2Data>() : null;
+        var texCoords1 = names.Contains(14) ? new List<Vector2Data>() : null;
         var colors0 = names.Contains(11) ? new List<ColorData>() : null;
         var colors1 = names.Contains(12) ? new List<ColorData>() : null;
         var triangles = new List<int>();
@@ -113,16 +116,18 @@ public static class GxMeshDecoder
                     if (attr.Name == 10) normals!.Add(ReadVector(attr, offset));
                     if (attr.Name == 11) colors0!.Add(ReadColor(attr, offset));
                     if (attr.Name == 12) colors1!.Add(ReadColor(attr, offset));
-                    if (attr.Name == 13)
+                    if (attr.Name is 13 or 14)
                     {
-                        var uv = ReadVector(attr, offset); texCoords!.Add(new(uv.X, uv.Y));
+                        var uv = ReadVector(attr, offset);
+                        (attr.Name == 13 ? texCoords0! : texCoords1!).Add(new(uv.X, uv.Y));
                     }
                 }
             triangles.AddRange(Triangulate(command, first, count));
         }
         Require(triangles.Count > 0, "GX_EMPTY_MESH", "No triangles decoded from polygon.");
         return new(positions.ToArray(), normals?.ToArray(), triangles.ToArray(), envelopeIndices?.ToArray(),
-            enveloped ? envelopes.ToArray() : null, enveloped ? null : binding, texCoords?.ToArray(), colors0?.ToArray(), colors1?.ToArray());
+            enveloped ? envelopes.ToArray() : null, enveloped ? null : binding,
+            texCoords0?.ToArray(), texCoords1?.ToArray(), colors0?.ToArray(), colors1?.ToArray());
 
         void Need(int bytes) => Require(cursor <= end - bytes, "GX_DISPLAY_LIST", "Truncated display-list primitive.");
         byte ReadByte() { Need(1); return r.Byte(cursor++); }
@@ -156,7 +161,7 @@ public static class GxMeshDecoder
 
         Vector3Data ReadVector(Attribute attr, int offset)
         {
-            int count = attr.Name == 13 ? attr.Components + 1 : attr.Name == 9 && attr.Components == 0 ? 2 : 3;
+            int count = attr.Name is >= 13 and <= 20 ? attr.Components + 1 : attr.Name == 9 && attr.Components == 0 ? 2 : 3;
             int size = attr.Format < 2 ? 1 : attr.Format < 4 ? 2 : 4;
             float Component(int n)
             {

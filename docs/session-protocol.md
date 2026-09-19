@@ -272,8 +272,10 @@ backend coverage; in-game acceptance remains pending.
 
 ### Read-only texture preview assets
 
-New `modelMaterials` entries include `preview: { color, texture, warning }`.
-A texture contains its `file`, dimensions, wrap modes, repeats, and source SRT.
+New `modelMaterials` entries include `preview: { color, texture, textures, warning }`.
+`texture` remains the first-layer compatibility alias. `textures` stores the
+ordered TObj layers; each contains its `file`, dimensions, wrap modes, repeats,
+source SRT, color operation/blend, and UV-channel index.
 Decoded top-left BGRA TGA files live under `models/textures/` and participate in
 `baselineFiles` hashes alongside model/collision JSON. Existing sessions without
 preview fields remain valid. Preview assets never supply DAT texture data.
@@ -304,15 +306,16 @@ export material catalog, keyed by mesh ID. This includes static vertex-color
 materials, animated materials and read-only geometry. These entries use the same `preview` color/texture structure as
 `modelMaterials`, but are not export material donors. Blender imports them with
 `mme_preview_model_id` rather than `mme_model_material_id`. No animation is
-evaluated: source base colors and the first supported UV0 texture are displayed.
+evaluated: source base colors and supported TObj layers using UV0/UV1 are displayed
+in list order. Both GX UV channels are decoded as separate Blender UV maps.
 The preview also carries `diffuseLighting` and `specularLighting` from the MOBJ
 render flags, plus the material's ambient/diffuse/specular colors and `shininess`. Blender uses
 an unlit emission shader when both flags are false. Lit previews evaluate
 normal/light diffuse and colored Blinn-Phong specular terms directly and feed
 the result to emission, avoiding Blender environment reflections. Fresh sessions
 use the selected static LOBJ set; older sessions retain the fixed-light fallback.
-Unsupported coordinates fall back to the source diffuse color with a warning;
-additional texture layers are omitted with a warning. Preview images are hashed
+Unsupported coordinate generators fall back to the source diffuse color with a warning.
+Preview images are hashed
 as session baseline files and packed into the Blender scene.
 
 ### LOBJ lighting

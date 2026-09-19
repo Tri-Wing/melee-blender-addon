@@ -6,6 +6,28 @@ namespace MeleeMap.Core.Tests;
 
 public class TexturePreviewTests
 {
+    [CorpusFact]
+    public void ExtractsYoshisStoryWaterTextureLayersAndBothUvChannels()
+    {
+        string source = Path.Combine(CorpusTests.CorpusDirectory, "GrYt.dat");
+        if (!File.Exists(source)) return;
+        using var directory = new TemporaryDirectory();
+        var archive = new StageArchive(source);
+        var preview = TexturePreview.Extract(archive.Layout,
+            new("water", "water", 0xB71C, true), directory.Path);
+        Assert.Null(preview.Warning);
+        Assert.Equal(2, preview.Textures!.Length);
+        Assert.Equal(new[] { 0, 1 }, preview.Textures.Select(texture => texture.TexCoord));
+        Assert.All(preview.Textures, texture => Assert.Equal(3, texture.ColorOperation));
+        Assert.Equal(.548023f, preview.Textures[0].ColorBlend);
+        Assert.Equal(.581921f, preview.Textures[1].ColorBlend);
+        Assert.Equal(-.3333f, preview.Textures[1].Translation[0]);
+        var mesh = MeleeMap.Core.Gx.GxMeshDecoder.Decode(archive.Layout, 0x16500);
+        Assert.NotNull(mesh.TexCoords0); Assert.NotNull(mesh.TexCoords1);
+        Assert.Equal(mesh.TexCoords0!.Length, mesh.TexCoords1!.Length);
+        Assert.NotEqual(mesh.TexCoords0[0], mesh.TexCoords1[0]);
+    }
+
     [Theory]
     [InlineData(6)] // RGBA8 split AR/GB planes, 4x4 tiles.
     [InlineData(8)] // CI4 with RGB565 palette, 8x8 tiles.
@@ -85,5 +107,13 @@ public class TexturePreviewTests
             Archive = new(bytes);
         }
         public void Dispose() => System.IO.Directory.Delete(Directory, true);
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "mme-water-preview-" + Guid.NewGuid().ToString("N"));
+        public TemporaryDirectory() => Directory.CreateDirectory(Path);
+        public void Dispose() => Directory.Delete(Path, true);
     }
 }

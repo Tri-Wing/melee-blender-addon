@@ -48,9 +48,11 @@ def initialize(material, entry, definition, directory, stage):
     material['mme_material_definition'] = json.dumps(definition)
     material['mme_material_preview'] = json.dumps(entry['preview'])
     material['mme_material_directory'] = str(directory)
-    texture = entry['preview'].get('texture')
+    textures = entry['preview'].get('textures') or ([entry['preview']['texture']]
+                if entry['preview'].get('texture') else [])
+    texture_files = {texture['file'] for texture in textures}
     material['mme_material_preview_files'] = json.dumps([f for f in stage['baselineFiles']
-        if texture and f['file'] == texture['file']])
+        if f['file'] in texture_files])
     material['mme_material_lighting'] = json.dumps(stage.get('lighting', {}))
     material['mme_material_updating'] = True
     try:
@@ -148,6 +150,8 @@ def update(material, context):
                 preview['alpha']['destinationFactor'] = 5 if transparency == 1 else 1 if transparency >= 2 else 5
         if preview.get('texture'):
             preview['texture']['colorBlend'] = material.mme_texture_blend
+            if preview.get('textures'):
+                preview['textures'][0]['colorBlend'] = material.mme_texture_blend
         color_node = material.node_tree.nodes.get('Stage Vertex Color') if material.node_tree else None
         color_layer = color_node.layer_name if color_node else material.get('mme_vertex_color_layer', 'Stage Color 0')
         from . import lighting

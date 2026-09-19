@@ -91,7 +91,9 @@ public static class SessionExtractor
                         : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
                         : readOnlyReasons.GetValueOrDefault(node.Id),
                     vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
-                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices, texCoords0 = mesh.TexCoords0, colors0 = mesh.Colors0, colors1 = mesh.Colors1,
+                    positions = mesh.Positions, normals = mesh.Normals, triangleIndices = mesh.TriangleIndices,
+                    texCoords0 = mesh.TexCoords0, texCoords1 = mesh.TexCoords1,
+                    colors0 = mesh.Colors0, colors1 = mesh.Colors1,
                     boundJobjId = JointId(mesh.BoundJobjSourceOffset), envelopeIndices = mesh.EnvelopeIndices,
                     envelopes = mesh.Envelopes?.Select(e => e.Select(w => new { jobjId = JointId(w.JobjSourceOffset), weight = w.Weight }))
                 });
