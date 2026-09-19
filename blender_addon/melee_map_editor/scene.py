@@ -127,7 +127,7 @@ def import_session(context, directory):
         collection('Reference', root, 'reference', 'reference')
         material = bpy.data.materials.new('Melee Preview Grey')
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
-        source_materials = surface.create_materials(stage)
+        source_materials = surface.create_materials(stage, directory)
         scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
         objects = {}
         for entry, group in zip(stage['modelGroups'], groups):

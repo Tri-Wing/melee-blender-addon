@@ -118,7 +118,13 @@ public static class SessionExtractor
                     readOnly = true, source = a
                 })
             });
-            var baselineFiles = Directory.GetFiles(temporary, "*.json", SearchOption.AllDirectories)
+            var previewMaterials = ModelMaterials.Select(stage.Layout, editableModels).Select(material => new
+            {
+                material.Id, material.Name, material.MobjOffset, material.UsesUv,
+                preview = TexturePreview.Extract(stage.Layout, material, temporary)
+            }).ToArray();
+            var baselineFiles = Directory.GetFiles(temporary, "*", SearchOption.AllDirectories)
+                .Where(path => Path.GetFileName(path) != "source.dat")
                 .Select(path => new { file = Path.GetRelativePath(temporary, path).Replace('\\', '/'), sha256 = SessionApplier.Hash(File.ReadAllBytes(path)) }).ToArray();
             Write("stage.json", new
             {
@@ -131,7 +137,7 @@ public static class SessionExtractor
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0, modelEdit = editableModels.Length > 0, dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
-                modelMaterials = ModelMaterials.Select(stage.Layout, editableModels),
+                modelMaterials = previewMaterials,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
                     e.DobjIndex, e.PobjIndex, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),

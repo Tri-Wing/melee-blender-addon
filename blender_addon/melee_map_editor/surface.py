@@ -1,5 +1,5 @@
 """One supported stage material per model, with native Blender corner UVs."""
-import json
+from pathlib import Path
 import bpy
 import bmesh
 from .protocol import StageError, digest
@@ -9,7 +9,7 @@ def material_id(material):
     return material.get('mme_model_material_id') if material else None
 
 
-def create_materials(stage):
+def create_materials(stage, directory=None):
     result = {}
     for entry in stage.get('modelMaterials', []):
         material = bpy.data.materials.new(entry['name'])
@@ -17,6 +17,7 @@ def create_materials(stage):
         material['mme_model_material_id'] = entry['id']
         material['mme_model_material_source'] = stage['source']['sha256']
         material['mme_model_uses_uv'] = entry['usesUv']
+        configure_preview(material, entry.get('preview'), directory, stage)
         result[entry['id']] = material
     return result
 
@@ -71,3 +72,105 @@ def assign(obj, material):
     else:
         for face in obj.data.polygons:
             face.material_index = 0
+
+
+def preview_matrix(texture):
+    """HSD tobj.c MakeTextureMtx: S @ R @ T, conjugated by Blender's V flip."""
+    from mathutils import Matrix, Euler
+    scale = texture['scale']
+    repeats = (texture['repeatS'], texture['repeatT'])
+    factors = [repeats[i] / scale[i] if abs(scale[i]) >= 1.1920929e-7 else 0 for i in range(2)] + [scale[2]]
+    rotation = texture['rotation']
+    translation = texture['translation']
+    shift = (-translation[0], -translation[1] - (scale[1] / repeats[1] if texture['wrapT'] == 2 else 0), translation[2])
+    matrix = (Matrix.Diagonal((*factors, 1))
+              @ Euler((rotation[0], rotation[1], -rotation[2]), 'XYZ').to_matrix().to_4x4()
+              @ Matrix.Translation(shift))
+    flip = Matrix(((1, 0, 0, 0), (0, -1, 0, 1), (0, 0, 1, 0), (0, 0, 0, 1)))
+    return flip @ matrix @ flip
+
+
+def configure_preview(material, preview, directory, stage):
+    if not preview:
+        return
+    color = preview.get('color', [0.45, 0.45, 0.45, 1])
+    material.diffuse_color = color
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+    output = nodes.new('ShaderNodeOutputMaterial')
+    emission = nodes.new('ShaderNodeEmission')
+    # Byte colors describe sRGB; shader color sockets are scene-linear.
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in color[:3]]
+    emission.inputs['Color'].default_value = (*linear, 1)
+    links.new(emission.outputs[0], output.inputs['Surface'])
+    warning = preview.get('warning')
+    texture = preview.get('texture')
+    if warning:
+        material['mme_preview_warning'] = warning
+    if not texture or directory is None:
+        return
+    directory = Path(directory).resolve()
+    path = (directory / texture['file']).resolve()
+    if (not path.is_relative_to(directory)
+            or texture['file'] not in {entry['file'] for entry in stage['baselineFiles']}):
+        raise StageError('Texture preview file is outside the protected session baseline.')
+    image = bpy.data.images.load(str(path), check_existing=True)
+    image.colorspace_settings.name = 'sRGB'
+    image.pack()
+    sampler = nodes.new('ShaderNodeTexImage')
+    sampler.name = 'Stage Texture'
+    sampler.image = image
+    sampler.interpolation = 'Linear'
+    sampler.extension = 'EXTEND'
+    uv = nodes.new('ShaderNodeTexCoord')
+    matrix = preview_matrix(texture)
+    combine = nodes.new('ShaderNodeCombineXYZ')
+    for axis, wrap in enumerate((texture['wrapS'], texture['wrapT'])):
+        dot = nodes.new('ShaderNodeVectorMath')
+        dot.operation = 'DOT_PRODUCT'
+        dot.inputs[1].default_value = tuple(matrix[axis][i] for i in range(3))
+        links.new(uv.outputs['UV'], dot.inputs[0])
+        add = nodes.new('ShaderNodeMath')
+        add.operation = 'ADD'
+        add.inputs[1].default_value = matrix[axis][3]
+        links.new(dot.outputs['Value'], add.inputs[0])
+        value = add.outputs[0]
+        if wrap == 0:
+            clamp = nodes.new('ShaderNodeClamp')
+            links.new(value, clamp.inputs['Value'])
+            value = clamp.outputs[0]
+        else:
+            wrapped = nodes.new('ShaderNodeMath')
+            wrapped.operation = 'FRACT' if wrap == 1 else 'PINGPONG'
+            wrapped.inputs[1].default_value = 1
+            links.new(value, wrapped.inputs[0])
+            value = wrapped.outputs[0]
+        links.new(value, combine.inputs[axis])
+    links.new(combine.outputs[0], sampler.inputs['Vector'])
+    links.new(sampler.outputs['Color'], emission.inputs['Color'])
+    nodes.active = sampler
+    sampler.select = True
+    # A legible layout if the user opens the Shader Editor.
+    uv.location = (-900, 0)
+    combine.location = (-300, 0)
+    sampler.location = (-100, 0)
+    emission.location = (200, 0)
+    output.location = (400, 0)
+
+
+def show_preview(context, switch_viewport=True):
+    obj = context.active_object
+    material = obj.active_material if obj and obj.type == 'MESH' else None
+    image = None
+    if material and material.use_nodes:
+        node = material.node_tree.nodes.get('Stage Texture')
+        image = node.image if node else None
+    if context.screen:
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D' and switch_viewport:
+                area.spaces.active.shading.type = 'MATERIAL'
+            elif area.type == 'IMAGE_EDITOR' and area.ui_type == 'UV' and image:
+                area.spaces.active.image = image
+    return image

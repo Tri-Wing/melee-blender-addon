@@ -211,8 +211,25 @@ class MME_OT_model_material(bpy.types.Operator):
                 if material is None:
                     raise StageError('Stage material missing. Re-import to restore the material catalog.')
             surface.assign(obj, material)
+            surface.show_preview(context, switch_viewport=False)
             context.scene.mme_status = 'Material assigned to all faces. Use Blender UV tools for textured materials.'
         return execute_safely(self, context, action)
+
+
+class MME_OT_texture_preview(bpy.types.Operator):
+    bl_idname = 'mme.texture_preview'
+    bl_label = 'Texture Preview'
+
+    def execute(self, context):
+        surface.show_preview(context)
+        obj = context.active_object
+        material = obj.active_material if obj and obj.type == 'MESH' else None
+        warning = material.get('mme_preview_warning') if material else None
+        if (material and material.get('mme_model_uses_uv') and not warning
+                and (not material.use_nodes or not material.node_tree.nodes.get('Stage Texture'))):
+            warning = 'Re-import the stage with the updated backend to load texture previews.'
+        context.scene.mme_status = warning or 'Texture preview enabled. Stage lighting and shader effects are approximate.'
+        return {'FINISHED'}
 
 
 class MME_OT_assign(bpy.types.Operator):
@@ -353,6 +370,8 @@ class MME_PT_stage(bpy.types.Panel):
             row = layout.row()
             row.enabled = bool(selected)
             row.operator('mme.model_material', icon='MATERIAL')
+            layout.operator('mme.texture_preview', icon='TEXTURE')
+            layout.label(text='Texture previews do not export image edits.')
             layout.label(text='One material per model; UVs use the active map.')
             if not s.get('mme_model_materials'):
                 layout.label(text='Re-import to load stage materials.')
@@ -601,7 +620,7 @@ def update_dirty(scene_arg, depsgraph):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_texture_preview, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 
