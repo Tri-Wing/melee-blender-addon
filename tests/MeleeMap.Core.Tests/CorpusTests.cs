@@ -35,7 +35,8 @@ public class CorpusTests
                     var inventory = archive.Inspect();
                     Assert.NotEmpty(inventory.Roots);
                     archive.Validate();
-                    StageLightingReader.Read(archive.Layout);
+                    var lighting = StageLightingReader.Read(archive.Layout);
+                    StageAtmosphereReader.Read(archive.Layout, lighting.PreviewSetId);
                     var identities = new ModelIdentityCatalog();
                     var before = ModelIdentity.Capture(archive.Layout, identities);
                     var editableJobjs = JobjEditing.Select(archive.Layout, before);

@@ -12,7 +12,7 @@ import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty,
                        FloatVectorProperty, IntProperty, StringProperty)
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import animations, collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
+from . import animations, atmosphere, camera, collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
 from .protocol import StageError, read, run
 
 

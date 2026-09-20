@@ -93,6 +93,14 @@ reload workflow headlessly:
 2. Choose `GrNLa.dat`. Its ten groups appear under **Melee Stage → Models**,
    containing 93 grey meshes and the protected source hierarchy. Toggle all
    models with **Show / Hide Model Groups**, or individual groups in the Outliner.
+   The **Reference** collection contains an active **Melee Camera** built from
+   the camera pose and field of view stored in `grGroundParam`. Press Numpad 0
+   to view through it. On ordinary stages this is a stable stage preview because
+   the in-game match camera moves around the active fighters; fixed-camera stages
+   use the same stored pose directly. The Blender camera is preview-only and may
+   be moved, renamed, or deleted without affecting DAT export.
+   The scene World uses the selected group fog color, matching the clear color
+   Melee displays behind all stage geometry. This atmosphere is also preview-only.
 3. Choose **Enter Collision Editing**. Front view (`Numpad 1`) looks onto the
    gameplay plane. Move vertices along Blender X and Z; keep Blender Y at zero.
    Use the dedicated topology tools below to add or reconnect collision. Native
@@ -466,6 +474,10 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/animations.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/material_animations.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/camera.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/atmosphere.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,

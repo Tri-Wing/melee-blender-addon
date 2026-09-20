@@ -5,7 +5,7 @@ import tempfile
 import uuid
 import bpy
 from mathutils import Matrix
-from . import animations, collision, jobjs, lighting, modeling, surface
+from . import animations, atmosphere, camera, collision, jobjs, lighting, modeling, surface
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, deform_rest, joint_matrices, joint_srt, mesh_binding, mesh_pose
 
@@ -35,7 +35,10 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     editable_transform_ids = set(editable_transform_ids or ())
     sid = scene.mme_session_id
     collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
-    objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid]
+    # Preview cameras are disposable editor aids. Moving, renaming, or deleting
+    # one must never turn into a DAT edit or fail protected-scene validation.
+    objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid
+               and o.get('mme_role') != 'preview-camera']
     result = {'collections': [], 'objects': []}
     session_actions = [action for action in bpy.data.actions
                        if action.get('mme_session_id') == sid]
@@ -50,7 +53,8 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
         result['collections'].append({'props': properties(c),
             'parents': sorted(p.get('mme_id', p.name) for p in bpy.data.collections if c.name in p.children)
                        + (['SCENE'] if c.name in scene.collection.children else []),
-            'objects': sorted(o.get('mme_id', o.name) for o in c.objects),
+            'objects': sorted(o.get('mme_id', o.name) for o in c.objects
+                              if o.get('mme_role') != 'preview-camera'),
             'children': sorted(x.get('mme_id', x.name) for x in c.children)})
     for o in objects:
         if o.mode == 'EDIT':
@@ -181,7 +185,8 @@ def import_session(context, directory):
     source = read(directory / 'collision/collision.json')
     nodes, joints, world = joint_matrices(groups)
     sid = uuid.uuid4().hex
-    created_objects, created_collections, created_meshes, created_data, created_armatures, created_actions = [], [], [], [], [], []
+    created_objects, created_collections, created_meshes, created_data, created_armatures, created_actions, created_cameras, created_worlds = [], [], [], [], [], [], [], []
+    previous_world = scene.world
     material = None
     source_materials = {}
     editable_jobjs = jobjs.stage_targets(stage)
@@ -206,7 +211,9 @@ def import_session(context, directory):
         models = collection('Models', root, 'models', 'models')
         collisions = collection('Collision', root, 'collisions', 'collisions')
         lights = collection('Lights', root, 'lights', 'lights')
-        collection('Reference', root, 'reference', 'reference')
+        reference = collection('Reference', root, 'reference', 'reference')
+        camera.create(reference, stage, tag, created_objects, created_cameras, scene)
+        atmosphere.create(stage, scene, created_worlds)
         light_objects = lighting.create(lights, stage, tag, created_objects, created_data, collection)
         material = bpy.data.materials.new('Melee Preview Grey')
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
@@ -460,6 +467,7 @@ def import_session(context, directory):
     except Exception:
         scene.mme_session = ''
         scene.mme_session_id = ''
+        scene.world = previous_world
         for obj in reversed(created_objects):
             bpy.data.objects.remove(obj, do_unlink=True)
         for c in reversed(created_collections):
@@ -470,6 +478,12 @@ def import_session(context, directory):
         for data in created_data:
             if data.users == 0:
                 bpy.data.lights.remove(data)
+        for data in created_cameras:
+            if data.users == 0:
+                bpy.data.cameras.remove(data)
+        for world in created_worlds:
+            if world.users == 0:
+                bpy.data.worlds.remove(world)
         for armature in created_armatures:
             if armature.users == 0:
                 bpy.data.armatures.remove(armature)
