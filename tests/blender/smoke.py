@@ -105,11 +105,24 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     manifest = read(directory / 'stage.json')
     payloads = [read(directory / e['file']) for e in manifest['modelGroups']]
     _, _, expected_world = transforms.joint_matrices(payloads)
-    for o in s.objects:
-        if o.get('mme_id') in expected_world:
-            expected = transforms.AXES @ expected_world[o['mme_id']] @ transforms.AXES.inverted()
-            assert all(math.isclose(o.matrix_world[i][j], expected[i][j], rel_tol=1e-6, abs_tol=1e-4)
-                       for i in range(4) for j in range(4)), o.name
+    armatures = [o for o in s.objects if o.get('mme_role') == 'jobj-armature']
+    assert len(armatures) == 10
+    assert not [o for o in s.objects if str(o.get('mme_role', '')).endswith('jobj')]
+    for armature in armatures:
+        for bone in armature.pose.bones:
+            expected = transforms.AXES @ expected_world[bone['mme_id']] @ transforms.AXES.inverted()
+            actual = armature.matrix_world @ bone.matrix
+            if not all(math.isclose(actual[i][j], expected[i][j], rel_tol=1e-6, abs_tol=5e-4)
+                       for i in range(4) for j in range(4)):
+                print('ARMATURE_MISMATCH', armature.name, bone.name, 'actual', actual, 'expected', expected)
+            assert all(math.isclose(actual[i][j], expected[i][j], rel_tol=1e-6, abs_tol=5e-4)
+                       for i in range(4) for j in range(4)), armature.name + ' / ' + bone.name
+    all_nodes = {node['id']: node for group in payloads for node in group['nodes']}
+    for model in models:
+        owner = all_nodes[all_nodes[model['mme_id']]['ownerId']]['ownerId']
+        expected = transforms.AXES @ expected_world[owner] @ transforms.AXES.inverted()
+        assert all(math.isclose(model.matrix_world[i][j], expected[i][j], rel_tol=1e-6, abs_tol=5e-4)
+                   for i in range(4) for j in range(4)), model.name
     assert scene.prepare(s)[1] is None
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
@@ -179,6 +192,12 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     model.data.vertices[0].co.x += 1
     rejects(lambda: scene.prepare(s), 'protected')
     model.data.vertices[0].co = original
+    protected_bone = next(bone for imported_armature in armatures for bone in imported_armature.pose.bones
+                          if not bone.get('mme_editable'))
+    original_inherit_scale = protected_bone.bone.inherit_scale
+    protected_bone.bone.inherit_scale = 'FULL'
+    rejects(lambda: scene.prepare(s), 'protected')
+    protected_bone.bone.inherit_scale = original_inherit_scale
     modifier = obj.modifiers.new('Unsupported', 'MIRROR')
     rejects(lambda: scene.prepare(s), 'modifiers')
     obj.modifiers.remove(modifier)

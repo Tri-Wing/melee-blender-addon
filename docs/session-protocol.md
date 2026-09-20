@@ -28,6 +28,7 @@ edits/collision.json                     # optional replacement collision graph
 edits/models.json                        # optional batch of rigid model replacements
 edits/materials.json                     # optional static material changes
 edits/lights.json                        # optional static LOBJ changes
+edits/jobjs.json                         # optional static JOBJ SRT changes
 ```
 
 ## Manifest and protected identity
@@ -268,6 +269,47 @@ to the existing collision fields; `modelTriangles` totals the edited meshes.
 An omitted model edit preserves original model
 bytes regardless of collision changes. This model path has automated Blender and
 backend coverage; in-game acceptance remains pending.
+
+## Static JOBJ transform edits (additive v2 capability)
+
+New sessions set `capabilities.jobjTransformEdit` and list supported nodes in
+`editableJobjs` by opaque ID, model-group index, and JOBJ preorder index. The
+corresponding `group.json` joint records include `editable` and a
+`readOnlyReason` when the base transform cannot be edited safely.
+
+`edits/jobjs.json` contains only changed nodes:
+
+```json
+{
+  "protocolVersion": 2,
+  "coordinateSpace": "game-jobj-local",
+  "jobjs": [{
+    "id": "<editableJobjs entry id>",
+    "rotation": {"x": 0, "y": 0, "z": 0},
+    "scale": {"x": 1, "y": 1, "z": 1},
+    "translation": {"x": 0, "y": 0, "z": 0}
+  }]
+}
+```
+
+The backend recomputes eligibility from `source.dat`, requires finite XYZ Euler
+rotation/scale/translation and nonzero scale, then patches the nine big-endian
+SRT floats at JOBJ offsets `0x14` through `0x34`. It reloads the DAT and verifies
+the exact values before publishing. Hierarchy pointers, flags, render objects,
+animation descriptors, and all unrelated bytes remain unchanged. Apply results
+include `jobjChanged`.
+
+This first transform slice excludes transform-animated JOBJs, custom classes,
+RObj constraints, inverse-bind matrices, instancing, billboard/IK/quaternion or
+custom/independent matrix modes, and groups with collision attachments. Blender
+creates one armature per model group, represents every JOBJ as a source-identified
+bone, and uses native Pose Mode Move, Rotate, and Scale with XYZ Euler rotation.
+Rigid models are bone-parented to their owning JOBJ. Blender's aligned bone-scale
+inheritance reproduces HSD's compensated nonuniform parent scale. A JOBJ with
+child joints currently permits only uniform scale changes. Adding, deleting,
+reparenting, or reordering JOBJs remains protected. Skinned meshes are still
+imported with their static deformation baked; weights and animation curves are
+deferred.
 
 
 ### Read-only texture preview assets

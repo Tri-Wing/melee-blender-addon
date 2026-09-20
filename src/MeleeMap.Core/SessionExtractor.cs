@@ -23,6 +23,7 @@ public static class SessionExtractor
         var collision = CollisionData.Read(stage.Layout);
         var lighting = StageLightingReader.Read(stage.Layout);
         var editableModels = ModelEditing.SelectAll(stage.Layout, identity, out var readOnlyReasons);
+        var editableJobjs = JobjEditing.Select(stage.Layout, identity, out var jobjReadOnlyReasons);
         var editable = ModelEditing.Select(stage.Layout, identity) ?? editableModels.FirstOrDefault();
         var reader = new ArchiveDataReader(stage.Layout);
         var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
@@ -63,6 +64,8 @@ public static class SessionExtractor
                     joints = nodes.Where(n => n.Kind.EndsWith("jobj")).Select(n => new
                     {
                         id = n.Id, flags = unchecked((uint)reader.Int(n.SourceOffset + 4)),
+                        editable = editableJobjs.Any(target => target.Id == n.Id),
+                        readOnlyReason = jobjReadOnlyReasons.GetValueOrDefault(n.Id),
                         transformSpace = "game", rotationEncoding = "source-jobj-xyz",
                         rotation = Vec(n.SourceOffset + 0x14), scale = Vec(n.SourceOffset + 0x20), translation = Vec(n.SourceOffset + 0x2C),
                         inverseBindMatrix = InverseBind(n.SourceOffset),
@@ -156,10 +159,12 @@ public static class SessionExtractor
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0,
-                    modelEdit = editableModels.Length > 0, lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
+                    modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
+                    lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity),
+                editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,

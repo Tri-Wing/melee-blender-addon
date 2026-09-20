@@ -38,6 +38,8 @@ public class CorpusTests
                     StageLightingReader.Read(archive.Layout);
                     var identities = new ModelIdentityCatalog();
                     var before = ModelIdentity.Capture(archive.Layout, identities);
+                    var editableJobjs = JobjEditing.Select(archive.Layout, before);
+                    Assert.Equal(editableJobjs.Length, editableJobjs.Select(joint => joint.Id).Distinct().Count());
                     string saved = Path.Combine(output, Path.GetFileName(file));
                     archive.Roundtrip(saved, compare: true);
                     // No-edit preservation retains descriptor offsets; edited/relocated archives

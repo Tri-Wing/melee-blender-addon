@@ -8,7 +8,7 @@ namespace MeleeMap.Core;
 
 public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices,
     int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false,
-    bool LightChanged = false);
+    bool LightChanged = false, bool JobjChanged = false);
 
 public static class SessionApplier
 {
@@ -76,8 +76,9 @@ public static class SessionApplier
         string modelPath = Path.Combine(directory, "edits/models.json");
         string materialPath = Path.Combine(directory, "edits/materials.json");
         string lightPath = Path.Combine(directory, "edits/lights.json");
+        string jobjPath = Path.Combine(directory, "edits/jobjs.json");
         foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
-            Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath,
+            Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath || edit == jobjPath,
                 "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
@@ -146,6 +147,16 @@ public static class SessionApplier
             lightWrite = StageLightEditing.Write(source.Layout, new ArchiveLayout(bytes), edits!, declared);
             bytes = lightWrite.Bytes;
         }
+        JobjTransformWrite? jobjWrite = null;
+        if (File.Exists(jobjPath))
+        {
+            var declared = m.TryGetProperty("editableJobjs", out var list)
+                ? list.EnumerateArray().Select(e => e.GetProperty("id").GetString()!).ToArray() : [];
+            var edits = JsonSerializer.Deserialize<JobjTransformEdits>(File.ReadAllText(jobjPath), Json);
+            Require(edits != null, "JOBJ_EDIT_FORMAT", "Empty JOBJ transform edit document.");
+            jobjWrite = JobjEditing.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline, edits!, declared);
+            bytes = jobjWrite.Bytes;
+        }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -166,14 +177,15 @@ public static class SessionApplier
                     materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int replacementMaterial) ? replacementMaterial : material?.MobjOffset, culling);
             if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, modelBaseline, materialWrite);
             if (lightWrite != null) StageLightEditing.Verify(reloaded.Layout, lightWrite);
-            if (!changed && !modelChanged && materialWrite == null && lightWrite == null)
+            if (jobjWrite != null) JobjEditing.Verify(reloaded.Layout, modelBaseline, jobjWrite);
+            if (!changed && !modelChanged && materialWrite == null && lightWrite == null && jobjWrite == null)
                 Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length,
             modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null,
-            materialWrite != null, lightWrite != null);
+            materialWrite != null, lightWrite != null, jobjWrite != null);
 
         string Contained(string relative)
         {

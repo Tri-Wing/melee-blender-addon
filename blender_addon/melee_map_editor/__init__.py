@@ -11,7 +11,7 @@ import bmesh
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene, topology, materials, inspector, modeling, surface, material_properties
+from . import collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
 from .protocol import StageError, read, run
 
 
@@ -168,6 +168,35 @@ class MME_OT_edit_model(bpy.types.Operator):
             context.scene.mme_status = (f'Editing {obj.name}. Move vertices only; animated materials are preserved.'
                                         if info.get('positionsOnly') else
                                         f'Editing {obj.name}. Vertex moves preserve appearance; new faces use the assigned material.')
+        return execute_safely(self, context, action)
+
+
+class MME_OT_edit_jobj(bpy.types.Operator):
+    bl_idname = 'mme.edit_jobj'
+    bl_label = 'Select Editable JOBJ'
+
+    def execute(self, context):
+        def action():
+            infos = jobjs.targets(context.scene)
+            info = jobjs.selected_info(context) or (infos[0] if infos else None)
+            if info is None:
+                raise StageError('This stage has no editable static JOBJs.')
+            armature, bone = jobjs.target_bone(context.scene, info)
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            armature.hide_set(False)
+            armature.select_set(True)
+            context.view_layer.objects.active = armature
+            bpy.ops.object.mode_set(mode='POSE')
+            bpy.ops.pose.select_all(action='DESELECT')
+            # Blender 5.2 moved pose selection from Bone to PoseBone.
+            if hasattr(bone, 'select'):
+                bone.select = True
+            else:
+                bone.bone.select = True
+            armature.data.bones.active = bone.bone
+            context.scene.mme_status = f'Selected {armature.name} / {bone.name}. Use Blender Move, Rotate, and Scale in Pose Mode.'
         return execute_safely(self, context, action)
 
 
@@ -368,11 +397,26 @@ class MME_PT_stage(bpy.types.Panel):
             layout.label(text='One material per model; UVs use the active map.')
             if not s.get('mme_model_materials'):
                 layout.label(text='Re-import to load stage materials.')
-            layout.label(text='Object transforms and hierarchy are read-only.')
+            layout.label(text='Model-object transforms and hierarchy are read-only.')
         else:
             layout.label(text='No supported rigid models in this scene.')
         if 'mme_editable_meshes' not in s:
             layout.label(text='Re-import to enable multiple model targets.')
+        editable_jobjs = jobjs.targets(s)
+        if editable_jobjs:
+            layout.separator()
+            layout.label(text=f'{len(editable_jobjs)} editable static JOBJs')
+            layout.operator('mme.edit_jobj', icon='EMPTY_ARROWS')
+            active_bone = context.active_pose_bone
+            if active_bone and active_bone.get('mme_id') in {info['id'] for info in editable_jobjs}:
+                layout.label(text='Selected JOBJ: edited' if active_bone.get('mme_dirty') else 'Selected JOBJ: unchanged')
+            elif active_bone and active_bone.get('mme_role'):
+                layout.label(text='Selected JOBJ: read-only', icon='LOCKED')
+                layout.label(text=active_bone.get('mme_read_only_reason', 'Unsupported JOBJ transform mode.'))
+            layout.label(text='Use Pose Mode Move, Rotate, and Scale.')
+            layout.label(text='Hierarchy editing remains read-only.')
+        elif 'mme_editable_jobjs' in s:
+            layout.label(text='No editable static JOBJs in this stage.', icon='LOCKED')
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')
@@ -603,6 +647,7 @@ def update_dirty(scene_arg, depsgraph):
         return
     try:
         modeling.update_dirty(scene_arg, depsgraph)
+        jobjs.update_dirty(scene_arg, depsgraph)
         obj = scene.collision_object(scene_arg)
         # Small collision meshes make this cheap; model geometry is checked on export.
         dirty = collision.fingerprint(obj) != scene_arg.get('mme_collision_fingerprint')
@@ -671,7 +716,9 @@ class MME_PT_material(bpy.types.Panel):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_model_material, MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge, MME_PT_edge_raw, MME_PT_material)
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_model_material,
+           MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
+           MME_PT_edge_raw, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 

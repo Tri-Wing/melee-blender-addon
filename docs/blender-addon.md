@@ -1,8 +1,8 @@
 # Blender collision editing preview
 
 Development target: **Blender 4.5.0 on Linux**, with .NET 8 for the development
-backend. This milestone imports grey models and edits existing static collision
-vertices, properties, and topology, plus all structurally supported rigid models.
+backend. This milestone imports stage models and edits existing static collision,
+supported rigid geometry/material properties, lights, and static JOBJ transforms.
 The user has confirmed collision editing, model vertex movement, joined cubes,
 and corrected face culling in game. Multi-target export has also been confirmed in game. Appearance-preserving
 vertex editing has also been confirmed in game. New-geometry material/UV export
@@ -120,6 +120,25 @@ no-edit export preserves them. `GrGb.dat` is covered by the read-only smoke test
 Other stages may contain unsupported preview transforms/bindings and are not yet
 certified. Missing extracted meshes are reported in the sidebar.
 
+## Edit static JOBJ transforms
+
+Fresh imports create one armature for each model group and represent every JOBJ
+as a bone. Select a supported bone directly, or select one of its model
+descendants and click **Select Editable JOBJ** in the Melee Map sidebar. Use
+Blender's normal Pose Mode Move, Rotate, and Scale tools. Rotation mode must
+remain **XYZ Euler**. Validate and export normally; JOBJ transforms compose with
+geometry, collision, material, and light edits in the same export.
+
+The first static-transform slice keeps animated, constrained, skinned,
+instanced, billboard/IK/quaternion, custom-matrix, and collision-attached
+hierarchies read-only. Scaling a JOBJ that has child joints is limited to a
+uniform scale change; leaf JOBJs may be scaled independently per axis. JOBJ
+creation, deletion, reparenting, sibling reordering, and moving render objects
+between JOBJs remain read-only. A fresh import is required because older `.blend`
+files do not contain the armatures, JOBJ eligibility catalog, or transform
+baselines. Rigid models follow their owning bones. Skinned models retain their
+imported static deformation until skin weights and animation are supported.
+
 ## Collision surfaces
 
 The **Surface** dropdown replaces the numeric Material ID control. Select edges,
@@ -217,7 +236,7 @@ can contain separate vertices at the same position; native Merge by Distance is
 available for this model if appropriate for your edit.
 
 Object transforms, group/JOBJ/DOBJ/POBJ identities, and unsupported meshes remain
-protected. Eligible meshes must be rigid and unbound, with one POBJ per DOBJ,
+protected except for the SRT of explicitly marked **Editable JOBJ** nodes. Eligible meshes must be rigid and unbound, with one POBJ per DOBJ,
 no custom class, no material/texture animation on that DOBJ, and no group shape
 animation. Shared/interior descriptors, instancing, billboard transforms, and
 quaternion joints remain unsupported. Static textured and translucent source
@@ -383,6 +402,8 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/topology.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/models.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/jobjs.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,

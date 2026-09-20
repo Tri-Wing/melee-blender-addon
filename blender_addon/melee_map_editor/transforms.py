@@ -12,6 +12,13 @@ def vector(value):
     return Vector(tuple(value[k] for k in ('x', 'y', 'z')))
 
 
+def joint_srt(joint):
+    scale = vector(joint['scale'])
+    result = Euler(vector(joint['rotation']), 'XYZ').to_matrix().to_4x4() @ Matrix.Diagonal((*scale, 1))
+    result.translation = vector(joint['translation'])
+    return result
+
+
 def joint_matrices(groups, local_matrices=None):
     nodes = {n['id']: n for g in groups for n in g['nodes']}
     joints = {j['id']: j for g in groups for j in g['joints']}
@@ -27,8 +34,7 @@ def joint_matrices(groups, local_matrices=None):
         parent_world = visit(parent) if parent in joints else Matrix.Identity(4)
         parent_scale = scales.get(parent)
         scale = vector(joint['scale'])
-        rotation = Euler(vector(joint['rotation']), 'XYZ').to_matrix().to_4x4()
-        local = rotation @ Matrix.Diagonal((*scale, 1))
+        local = joint_srt(joint)
         # HSD compensates inherited scale on both sides of the rotation.
         if parent_scale is not None:
             if any(abs(x) < 1e-12 for x in parent_scale):

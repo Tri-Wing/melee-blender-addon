@@ -1,6 +1,6 @@
 # Melee Map Editor Blender Add-on Implementation Plan
 
-Status: Headless foundation implemented; see [format audit and current status](format-audit.md). Collision consistency checks, full GrNLa geometry extraction, and static collision apply are implemented. Blender 4.5.0 import and static collision vertex/property editing are implemented; see [the add-on guide](blender-addon.md). Dedicated collision topology tools and native deletion are now implemented. The user has reported all existing collision features working. Milestone 4 now supports geometry replacement for one eligible rigid mesh with an opaque grey material; automated export/reload tests pass, and model in-game acceptance remains pending.
+Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, and static JOBJ SRT editing are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
 
 ## 1. Summary
 
@@ -366,7 +366,12 @@ Supporting dynamic collision becomes the first collision follow-up after the `Gr
 
 ### 10.1 Import
 
-Decode each model group's JOBJ/DOBJ/POBJ hierarchy into grey Blender meshes. Preserve transforms and identity boundaries rather than flattening the whole stage into one mesh.
+Decode each model group's JOBJ hierarchy into a Blender armature and preserve
+DOBJ/POBJ identity around the imported meshes. Rigid models are bone-parented to
+their owning JOBJ. Preserve transforms and identity boundaries rather than
+flattening the whole stage into one mesh. Skinned meshes initially retain their
+statically evaluated import pose; a later animation slice will add weights and
+armature modifiers.
 
 For the POC:
 

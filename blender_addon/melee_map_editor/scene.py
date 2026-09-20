@@ -4,9 +4,10 @@ from pathlib import Path
 import tempfile
 import uuid
 import bpy
-from . import collision, lighting, modeling, surface
+from mathutils import Matrix
+from . import collision, jobjs, lighting, modeling, surface
 from .protocol import StageError, digest, load_session, read, run
-from .transforms import AXES, joint_matrices, mesh_pose
+from .transforms import AXES, joint_matrices, joint_srt, mesh_pose
 
 
 def session(scene):
@@ -29,8 +30,9 @@ def properties(item):
             if key.startswith('mme_') and key != 'mme_dirty' and key not in preview_controls}
 
 
-def inventory(scene, editable_id=None):
+def inventory(scene, editable_id=None, editable_transform_ids=None):
     editable_ids = {editable_id} if isinstance(editable_id, str) else set(editable_id or ())
+    editable_transform_ids = set(editable_transform_ids or ())
     sid = scene.mme_session_id
     collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid]
@@ -49,11 +51,27 @@ def inventory(scene, editable_id=None):
                'type': o.type, 'inScene': o.name in scene.objects}
         if o.get('mme_role') != 'light':
             # LOBJ transforms are editable light data rather than protected hierarchy.
-            row['matrix'] = [list(r) for r in o.matrix_basis]
             row['parentInverse'] = [list(r) for r in o.matrix_parent_inverse]
+            if o.get('mme_id') not in editable_transform_ids:
+                row['matrix'] = [list(r) for r in o.matrix_basis]
         if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
                 or (o.type == 'MESH' and o.data.shape_keys)):
             raise StageError(f'{o.name}: modifiers, constraints, shape keys and animation are not supported.')
+        if o.type == 'ARMATURE':
+            if any(bone.constraints for bone in o.pose.bones):
+                raise StageError(f'{o.name}: pose-bone constraints are not supported.')
+            row['bones'] = []
+            for bone in sorted(o.pose.bones, key=lambda item: item.get('mme_id', item.name)):
+                record = {'props': properties(bone), 'name': bone.name,
+                    'parent': bone.parent.get('mme_id', bone.parent.name) if bone.parent else None,
+                    'rotationMode': bone.rotation_mode,
+                    'restMatrix': [list(r) for r in bone.bone.matrix_local],
+                    'inheritScale': bone.bone.inherit_scale,
+                    'useConnect': bone.bone.use_connect,
+                    'useDeform': bone.bone.use_deform}
+                if bone.get('mme_id') not in editable_transform_ids:
+                    record['matrix'] = [list(r) for r in bone.matrix_basis]
+                row['bones'].append(record)
         if o.type == 'MESH' and o.get('mme_id') in editable_ids:
             # Native Join brings material slots along with geometry. The model
             # writer emits one grey material, so these slots are not protected.
@@ -71,27 +89,36 @@ def inventory(scene, editable_id=None):
     return result
 
 
-def protected_inventory_matches(scene, editable_id):
-    current = inventory(scene, editable_id)
+def protected_inventory_matches(scene, editable_id, editable_transform_ids=None):
+    current = inventory(scene, editable_id, editable_transform_ids)
     expected = scene.get('mme_guard')
     if digest(current) == expected:
         return True
+    inventories = [current]
+    if editable_transform_ids:
+        # Saved scenes from before JOBJ editing included every object transform.
+        # Match that old inventory without granting those scenes new permissions.
+        legacy = inventory(scene, editable_id)
+        if digest(legacy) == expected:
+            return True
+        inventories.append(legacy)
     # Older .blend files included the target's material slots in their guard.
     # All imported previews share one material. Try the surviving preview slot
     # lists against the OLD hash; never rebaseline hierarchy or other geometry.
     if not isinstance(editable_id, str):
         return False
-    target = next((row for row in current['objects']
-                   if row['props']['mme_id'] == editable_id), None)
-    if target is not None:
-        candidates = {tuple(m.name if m else None for m in obj.data.materials)
-                      for obj in scene.objects if obj.type == 'MESH'
-                      and obj.get('mme_session_id') == scene.mme_session_id
-                      and obj.get('mme_role') == 'pobj'}
-        for materials in candidates:
-            target['editableMaterials'] = list(materials)
-            if digest(current) == expected:
-                return True
+    candidates = {tuple(m.name if m else None for m in obj.data.materials)
+                  for obj in scene.objects if obj.type == 'MESH'
+                  and obj.get('mme_session_id') == scene.mme_session_id
+                  and obj.get('mme_role') == 'pobj'}
+    for candidate in inventories:
+        target = next((row for row in candidate['objects']
+                       if row['props']['mme_id'] == editable_id), None)
+        if target is not None:
+            for materials in candidates:
+                target['editableMaterials'] = list(materials)
+                if digest(candidate) == expected:
+                    return True
     return False
 
 
@@ -105,12 +132,13 @@ def import_session(context, directory):
         raise StageError('Import requires a fresh extracted session with no pending edits.')
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     source = read(directory / 'collision/collision.json')
-    local_matrices = {}
-    nodes, joints, world = joint_matrices(groups, local_matrices)
+    nodes, joints, world = joint_matrices(groups)
     sid = uuid.uuid4().hex
-    created_objects, created_collections, created_meshes, created_data = [], [], [], []
+    created_objects, created_collections, created_meshes, created_data, created_armatures = [], [], [], [], []
     material = None
     source_materials = {}
+    editable_jobjs = jobjs.stage_targets(stage)
+    editable_jobj_ids = {info['id'] for info in editable_jobjs}
 
     def tag(item, role, key, group=-1):
         item['mme_role'], item['mme_session_id'], item['mme_id'] = role, sid, key
@@ -136,10 +164,63 @@ def import_session(context, directory):
         source_materials = surface.create_materials(stage, directory, light_objects)
         scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
         objects = {}
+        bone_names = {}
+
+        def joint_chain(key):
+            chain = []
+            while key in joints:
+                chain.append(key)
+                key = nodes[key]['ownerId']
+            return chain
+
         for entry, group in zip(stage['modelGroups'], groups):
             c = collection(f"Group {group['index']:03d}", models, group['id'], index=group['index'])
+            group_joints = [node for node in group['nodes'] if node['id'] in joints]
+            armature_obj = None
+            if group_joints:
+                armature = bpy.data.armatures.new(f"Group {group['index']:03d} JOBJ Armature")
+                created_armatures.append(armature)
+                armature_obj = bpy.data.objects.new(armature.name, armature)
+                created_objects.append(armature_obj)
+                c.objects.link(armature_obj)
+                tag(armature_obj, 'jobj-armature', group['id'] + ':armature', group['index'])
+                armature_obj['mme_group_id'] = group['id']
+                armature_obj.show_in_front = True
+                armature.display_type = 'OCTAHEDRAL'
+                bpy.ops.object.select_all(action='DESELECT')
+                armature_obj.select_set(True)
+                context.view_layer.objects.active = armature_obj
+                bpy.ops.object.mode_set(mode='EDIT')
+                edit_bones = {}
+                for node in group_joints:
+                    name = f"JOBJ {node['index']:03d}"
+                    edit_bone = armature.edit_bones.new(name)
+                    edit_bone.head = (0, 0, 0)
+                    edit_bone.tail = (0, 0.25, 0)
+                    edit_bones[node['id']] = edit_bone
+                    bone_names[node['id']] = name
+                for node in group_joints:
+                    if node['ownerId'] in edit_bones:
+                        edit_bones[node['id']].parent = edit_bones[node['ownerId']]
+                        edit_bones[node['id']].use_connect = False
+                bpy.ops.object.mode_set(mode='POSE')
+                for node in group_joints:
+                    pose_bone = armature_obj.pose.bones[bone_names[node['id']]]
+                    source_joint = joints[node['id']]
+                    for item in (pose_bone, pose_bone.bone):
+                        tag(item, node['kind'], node['id'], group['index'])
+                        item['mme_source_index'] = node['index']
+                        item['mme_owner_id'] = node['ownerId'] or ''
+                        item['mme_instance_target'] = node['instanceTargetId'] or ''
+                        item['mme_editable'] = node['id'] in editable_jobj_ids
+                        if source_joint.get('readOnlyReason'):
+                            item['mme_read_only_reason'] = source_joint['readOnlyReason']
+                    pose_bone.rotation_mode = 'XYZ'
+                    pose_bone.bone.inherit_scale = 'ALIGNED'
+                    pose_bone.matrix_basis = AXES @ joint_srt(source_joint) @ AXES.inverted()
+                bpy.ops.object.mode_set(mode='OBJECT')
             for node in group['nodes']:
-                if node['kind'] in ('group', 'sentinel-group'):
+                if node['kind'] in ('group', 'sentinel-group') or node['id'] in joints:
                     continue
                 obj = bpy.data.objects.new(f"{node['kind'].upper()} {node['index']:03d}", None)
                 created_objects.append(obj)
@@ -154,14 +235,17 @@ def import_session(context, directory):
             for node in group['nodes']:
                 obj = objects.get(node['id'])
                 if obj:
-                    obj.parent = objects.get(node['ownerId'])
-                    if node['id'] in world:
-                        local = local_matrices[node['id']]
-                        # Parent inverse stores arbitrary affine transforms without TRS decomposition.
-                        if obj.parent is not None:
-                            obj.matrix_parent_inverse = AXES @ local @ AXES.inverted()
-                        else:
-                            obj.matrix_basis = AXES @ local @ AXES.inverted()
+                    if node['ownerId'] in joints:
+                        obj.parent = armature_obj
+                        obj.parent_type = 'BONE'
+                        obj.parent_bone = bone_names[node['ownerId']]
+                        obj.matrix_parent_inverse = Matrix.Translation((0, -0.25, 0))
+                        obj['mme_jobj_chain'] = json.dumps(joint_chain(node['ownerId']))
+                    else:
+                        obj.parent = objects.get(node['ownerId'])
+                        owner = objects.get(node['ownerId'])
+                        if owner and owner.get('mme_jobj_chain'):
+                            obj['mme_jobj_chain'] = owner['mme_jobj_chain']
             for filename in group['meshes']:
                 payload = read((directory / entry['file']).parent / filename)
                 positions, _ = mesh_pose(payload, nodes, joints, world)
@@ -191,6 +275,10 @@ def import_session(context, directory):
                 for key in obj.keys():
                     replacement[key] = obj[key]
                 replacement.parent = obj.parent
+                replacement.parent_type = obj.parent_type
+                replacement.parent_bone = obj.parent_bone
+                replacement.matrix_parent_inverse = obj.matrix_parent_inverse.copy()
+                replacement.matrix_basis = obj.matrix_basis.copy()
                 if payload.get('readOnlyReason'):
                     replacement['mme_read_only_reason'] = payload['readOnlyReason']
                     replacement.name = f"Read-only Model - Group {group['index']:03d} POBJ {payload['pobjIndex']:03d}"
@@ -207,6 +295,12 @@ def import_session(context, directory):
         scene['mme_editable_mesh'] = json.dumps(editable)
         editable_models = modeling.stage_targets(stage)
         scene['mme_editable_meshes'] = json.dumps(editable_models)
+        scene['mme_editable_jobjs'] = json.dumps(editable_jobjs)
+        jobj_baselines = {}
+        for info in editable_jobjs:
+            _, target = jobjs.target_bone(scene, info)
+            jobj_baselines[info['id']] = jobjs.matrix_values(target.matrix_basis)
+        scene['mme_jobj_baselines'] = json.dumps(jobj_baselines)
         baselines = {}
         for info in editable_models:
             target = modeling.target_object(scene, info)
@@ -220,7 +314,7 @@ def import_session(context, directory):
         # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
             scene['mme_model_baseline'] = baselines[editable['id']]
-        scene['mme_guard'] = digest(inventory(scene, modeling.target_ids(scene)))
+        scene['mme_guard'] = digest(inventory(scene, modeling.target_ids(scene), jobjs.target_ids(scene)))
         scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
         scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
@@ -246,6 +340,9 @@ def import_session(context, directory):
         for data in created_data:
             if data.users == 0:
                 bpy.data.lights.remove(data)
+        for armature in created_armatures:
+            if armature.users == 0:
+                bpy.data.armatures.remove(armature)
         for source_material in source_materials.values():
             if source_material.users == 0:
                 bpy.data.materials.remove(source_material)
@@ -259,7 +356,7 @@ def prepare(scene):
     stage = load_session(directory)
     editable = modeling.target_info(scene)
     ids = modeling.target_ids(scene) if 'mme_editable_meshes' in scene else (editable['id'] if editable else None)
-    if not protected_inventory_matches(scene, ids):
+    if not protected_inventory_matches(scene, ids, jobjs.target_ids(scene)):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
     obj = collision_object(scene)
@@ -272,6 +369,8 @@ def prepare(scene):
     from . import material_properties
     material_properties.edits(scene, stage)
     lighting.edits(scene, stage)
+    groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
+    jobjs.edits(scene, stage, groups)
     return directory, edits if dirty else None
 
 
@@ -282,9 +381,13 @@ def apply(scene, cli, dotnet, output):
     from . import material_properties
     material_edits = material_properties.edits(scene, stage)
     light_edits = lighting.edits(scene, stage)
+    groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
+    jobj_edits = jobjs.edits(scene, stage, groups)
     payloads = {}
     if light_edits is not None:
         payloads[directory / 'edits/lights.json'] = light_edits
+    if jobj_edits is not None:
+        payloads[directory / 'edits/jobjs.json'] = jobj_edits
     if material_edits is not None:
         payloads[directory / 'edits/materials.json'] = material_edits
     if edits is not None:
