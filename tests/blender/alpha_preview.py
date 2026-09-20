@@ -62,7 +62,8 @@ for i, (name, changes, rgb, vertex, tex_alpha, _) in enumerate(cases):
         texture.name = 'Stage Texture'
         texture.image = image
         surface.configure_alpha_preview(material, settings)
-    assert material.surface_render_method == 'DITHERED'
+    expected_method = 'BLENDED' if settings['blendMode'] != 0 else 'DITHERED'
+    assert material.surface_render_method == expected_method, (name, material.surface_render_method)
 
 camera = bpy.data.objects.new('Camera', bpy.data.cameras.new('Camera'))
 s.collection.objects.link(camera)

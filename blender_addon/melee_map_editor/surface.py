@@ -918,10 +918,14 @@ def configure_alpha_preview(material, settings):
         links.new(stage_surface.outputs[0], shader.inputs[2])
     shader.name = 'Stage Alpha Surface'
     links.new(shader.outputs[0], output.inputs['Surface'])
+    # EEVEE's dithered path turns fractional alpha into visible screen-door noise.
+    # Use forward blending for GX framebuffer blends, while keeping dithering for
+    # opaque alpha-test materials whose shader output is already binary.
+    blended = mode != 0
     if hasattr(material, 'surface_render_method'):
-        material.surface_render_method = 'DITHERED'
+        material.surface_render_method = 'BLENDED' if blended else 'DITHERED'
     elif hasattr(material, 'blend_method'):
-        material.blend_method = 'HASHED'
+        material.blend_method = 'BLEND' if blended else 'HASHED'
 
 
 def color_transfer(material, socket, *, to_linear):
