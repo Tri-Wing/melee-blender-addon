@@ -388,7 +388,9 @@ Blender combines joint and material data for a slot into one Stage Animation
 Action. The timeline currently evaluates MOBJ ambient/diffuse/specular/
 alpha and TObj translation/scale/rotation/blend against the imported preview
 shader. It resets animated values to their source material state when another
-slot omits that target. Image/palette swaps, texture registers, pixel-engine
+slot omits that target. Vertex-color RGB sources remain driven by their mesh
+color attribute rather than the MOBJ's unused diffuse value. Image/palette swaps,
+texture registers, pixel-engine
 reference values, and animation export remain deferred. No-op DAT export retains
 all original material animation descriptors and buffers byte-for-byte.
 
@@ -399,7 +401,9 @@ New `modelMaterials` entries include `preview: { color, texture, textures, warni
 `texture` remains the first-layer compatibility alias. `textures` stores the
 ordered TObj layers; each contains its `file`, dimensions, wrap modes, repeats,
 source SRT, color operation/blend, UV-channel index, `coordinateType`, and
-`lightmapFlags`. Coordinate type 0 uses mesh UVs; type 1 generates reflection
+`lightmapFlags`. A texture's optional `tev` object stores a custom ADD/SUB color
+stage, its four inputs, constant/TEV registers, bias, scale, and clamp. Coordinate
+type 0 uses mesh UVs; type 1 generates reflection
 coordinates from the camera-space surface normal. The lightmap field preserves
 the HSD diffuse, specular, ambient, extension, and shadow routing bits (`0x10`
 through `0x100`).
@@ -542,10 +546,12 @@ retains the texture color. BLEND (3) mixes the base color and texture using
 JOBJ 003 / DOBJ 003 uses 75% diffuse RGB (38, 25, 25) and 25% texture. Older sessions without these fields keep their
 previous preview behavior. Texture layers assigned to diffuse/ambient and
 specular lightmap passes are evaluated separately before the corresponding HSD
-lighting calculation; extension layers are applied afterward. Other TEV details
-remain approximate.
+lighting calculation; extension layers are applied afterward. Supported custom
+TEV ADD/SUB color stages run in the same stored-color domain before the texture's
+color operation. TEV comparisons and cross-stage routing remain approximate.
 Regression coverage includes GrNLa Group 003 / JOBJ 004 / DOBJ 000, whose diffuse
-RGB is (12, 25, 76), GrSt's vertex-color material, and the colored diffuse plus
+RGB is (12, 25, 76), GrGd Group 001 / JOBJ 004 / DOBJ 000's dark custom TEV
+overlay, GrSt's vertex-color material, and the colored diffuse plus
 grayscale specular maps on GrGb Group 001's first two POBJs.
 
 For BLEND previews, interpolation occurs in GX's stored color-value domain.

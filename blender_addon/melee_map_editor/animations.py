@@ -283,6 +283,10 @@ def _apply_material(material, target, source_frame):
         'diffuse': list((preview.get('color') or [1, 1, 1, 1])[:3]),
         'specular': list((preview.get('specularColor') or [0, 0, 0, 1])[:3])
     }
+    # HSD's vertex-color source bypasses MOBJ diffuse RGB. Keep the texture
+    # pass neutral while material animation updates transforms and alpha.
+    if preview.get('useVertexColor'):
+        colors['diffuse'] = [1, 1, 1]
     alpha = (preview.get('alpha') or {}).get('material', 1)
     for track in target['tracks']:
         value = _value(track['keys'], frame)

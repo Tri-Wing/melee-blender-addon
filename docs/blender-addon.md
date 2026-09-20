@@ -164,6 +164,9 @@ Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
 TObj translation, scale, rotation, and blend values. Texture image/palette swaps,
 animated TEV registers, pixel-engine reference values, and material animation
 editing/export are not implemented yet.
+When an MOBJ selects vertex color as its RGB source, playback keeps the texture
+pass neutral and continues to use the mesh's vertex RGB instead of its unused
+MOBJ diffuse value.
 Looping follows both serialized AOBJ flags and the model-group animation flag
 byte that Melee applies at runtime; the latter is used by animations such as
 GrNLa Group 003. The preview wraps when the HSD end frame is reached, matching
@@ -339,7 +342,8 @@ Standard multi-texture materials using the first two GX UV channels apply each
 TObj in source order within its HSD lightmap pass. Diffuse/ambient textures,
 specular textures, and extension textures are routed separately. Both UV channels
 and each layer's independent transform, color operation, and blend value are
-retained. This includes the two moving water layers on GrYt Group 001 / JOBJ 008 /
+retained. Supported custom TEV ADD/SUB color stages also apply their source inputs,
+constant registers, bias, scale, and clamp. This includes the two moving water layers on GrYt Group 001 / JOBJ 008 /
 DOBJ 031 and the colored diffuse plus grayscale specular textures on GrGb Group
 001's first two POBJs.
 
@@ -349,7 +353,8 @@ texture transform. GrGb Group 002 / JOBJ 052 / DOBJ 007 and JOBJ 053 / DOBJ 004
 use this path.
 
 The texture preview also uses supported MOBJ lighting flags and imported LOBJ
-descriptor values. Full TEV channel routing, mip filtering, animated materials
+descriptor values. TEV comparison operations and full cross-stage channel routing,
+mip filtering, animated materials
 and lights, and unsupported material types are not reproduced. Unsupported/invalid images
 fall back to a solid material with a preview warning. Texture painting and shader
 node changes do not author game assets or affect DAT export.
@@ -491,7 +496,7 @@ channels appear under Mesh Data > Color Attributes as **Stage Color 0** and
 **Stage Color 1**. Both retain RGBA values on face corners, preserving seams.
 The first available channel multiplies the base material/texture color. The second channel
 is stored for inspection. Material, texture and vertex alpha are previewed using
-the source settings; custom game TEV channel routing remains approximate.
+the source settings; unsupported custom game TEV routing remains approximate.
 
 Vertex painting and alpha edits on static editable rigid meshes are exported
 to DAT, including independent colors at face corners. The **Melee Material**
@@ -506,7 +511,8 @@ using vertex-color materials (for example GrSt Group 003 / JOBJ 004 / DOBJ 013)
 and read-only meshes also receive their supported base textures. These previews
 do not make the source materials available for assignment to replacement
 geometry. Highlight, shadow, toon, gradation, and other unsupported
-texture-coordinate generators, along with custom TEV programs, retain the
+texture-coordinate generators, along with unsupported TEV comparisons and
+cross-stage inputs, retain the
 existing preview limitations.
 
 ## Alpha previews
@@ -571,8 +577,8 @@ environment. The ambient LOBJ contribution is multiplied by the material's
 ambient RGB before directional and positional diffuse light is added. Fresh
 imports use the selected stage LOBJ set's ambient, infinite,
 point, and spot lights, including diffuse/specular flags and attenuation. The
-main HSD texture-lightmap passes are preserved; custom TEV programs and the
-complete GX material-channel routing remain approximate.
+main HSD texture-lightmap passes and supported custom TEV ADD/SUB color stages are
+preserved; TEV comparisons and complete GX material-channel routing remain approximate.
 
 Preview-only materials that remain ineligible show an object-specific reason in
 the panel, such as material animation or an unsupported texture/render layout,

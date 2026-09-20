@@ -9,10 +9,12 @@ public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, str
     bool UseVertexColor = false, bool DiffuseLighting = false, bool SpecularLighting = false,
     float[]? SpecularColor = null, float Shininess = 50, float[]? AmbientColor = null,
     PreviewTexture[]? Textures = null);
+public sealed record PreviewTev(int ColorOperation, int ColorBias, int ColorScale, bool ColorClamp,
+    int ColorA, int ColorB, int ColorC, int ColorD, float[] Konst, float[] Tev0, float[] Tev1);
 public sealed record PreviewTexture(string File, int Width, int Height, int WrapS, int WrapT,
     int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation,
     int ColorOperation = 5, float ColorBlend = 1, int TexCoord = 0, int LightmapFlags = 0,
-    int CoordinateType = 0);
+    int CoordinateType = 0, PreviewTev? Tev = null);
 
 /// <summary>Read-only, bounded texture decoding for Blender previews; never used as DAT export input.</summary>
 public static class TexturePreview
@@ -40,6 +42,7 @@ public static class TexturePreview
         {
             int? current = r.Pointer(material.MobjOffset + 8);
             var textures = new List<PreviewTexture>(); var seen = new HashSet<int>();
+            var warnings = new List<string>();
             while (current.HasValue)
             {
                 int t = current.Value;
@@ -52,7 +55,7 @@ public static class TexturePreview
                 textures.Add(Decode(t, source - 4));
                 current = r.Pointer(t + 4);
             }
-            return Preview(textures.ToArray());
+            return Preview(textures.ToArray(), warnings.Count == 0 ? null : string.Join(" ", warnings));
 
             PreviewTexture Decode(int t, int texCoord)
             {
@@ -113,8 +116,27 @@ public static class TexturePreview
                 string file = $"models/textures/{image:x8}-{r.Pointer(t + 0x50).GetValueOrDefault():x8}.tga";
                 string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
+                PreviewTev? tev = null;
+                int? tevOffset = r.Pointer(t + 0x58);
+                if (tevOffset.HasValue && (unchecked((uint)r.Int(tevOffset.Value + 0x1C)) & 0x40000000) != 0)
+                {
+                    int colorTevOperation = r.Byte(tevOffset.Value);
+                    if (colorTevOperation is not 0 and not 1)
+                        warnings.Add("Unsupported custom TEV color comparison is omitted.");
+                    else
+                    {
+                        float[] Color(int at) => Enumerable.Range(0, 4)
+                            .Select(i => r.Byte(at + i) / 255f).ToArray();
+                        tev = new(colorTevOperation, r.Byte(tevOffset.Value + 2), r.Byte(tevOffset.Value + 4),
+                            r.Byte(tevOffset.Value + 6) != 0,
+                            r.Byte(tevOffset.Value + 8), r.Byte(tevOffset.Value + 9),
+                            r.Byte(tevOffset.Value + 10), r.Byte(tevOffset.Value + 11),
+                            Color(tevOffset.Value + 0x10), Color(tevOffset.Value + 0x14),
+                            Color(tevOffset.Value + 0x18));
+                    }
+                }
                 return new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation,
-                    colorOperation, Math.Clamp(blend, 0, 1), texCoord, flags & 0x1F0, flags & 15);
+                    colorOperation, Math.Clamp(blend, 0, 1), texCoord, flags & 0x1F0, flags & 15, tev);
             }
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)

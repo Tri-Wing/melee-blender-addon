@@ -569,11 +569,79 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         sampler.location = (-300, -index * 260)
         samplers.append(sampler)
 
+    def custom_tev_color(index, layer, sampler, encoded_texture):
+        """Evaluate an HSD custom TEV ADD/SUB color stage in byte-color space."""
+        tev = layer.get('tev')
+        if not tev:
+            return encoded_texture
+
+        def source(code):
+            return {
+                8: encoded_texture,
+                9: sampler.outputs['Alpha'],
+                12: (1, 1, 1, 1),
+                13: (.5, .5, .5, 1),
+                15: (0, 0, 0, 1),
+                0x80: tev['konst'],
+                0x81: [tev['konst'][0]] * 3 + [1],
+                0x82: [tev['konst'][1]] * 3 + [1],
+                0x83: [tev['konst'][2]] * 3 + [1],
+                0x84: [tev['konst'][3]] * 3 + [1],
+                0x85: tev['tev0'],
+                0x86: [tev['tev0'][3]] * 3 + [1],
+                0x87: tev['tev1'],
+                0x88: [tev['tev1'][3]] * 3 + [1]
+            }.get(code, encoded_texture)
+
+        suffix = '' if index == 0 else f' {index + 1}'
+
+        def operation(kind, left, right, name):
+            result = nodes.new('ShaderNodeMixRGB')
+            result.name = f'Stage Custom TEV {name}{suffix}'
+            result.blend_type = kind
+            result.inputs[0].default_value = 1
+            for value, socket in ((left, result.inputs[1]), (right, result.inputs[2])):
+                if isinstance(value, (tuple, list)):
+                    socket.default_value = value
+                else:
+                    links.new(value, socket)
+            return result
+
+        def vector_operation(kind, value, amount, name):
+            result = nodes.new('ShaderNodeVectorMath')
+            result.name = f'Stage Custom TEV {name}{suffix}'
+            result.operation = kind
+            links.new(value, result.inputs[0])
+            result.inputs[1].default_value = (amount, amount, amount)
+            return result
+
+        a, b = source(tev['colorA']), source(tev['colorB'])
+        c, d = source(tev['colorC']), source(tev['colorD'])
+        inverse = operation('SUBTRACT', (1, 1, 1, 1), c, 'One Minus C')
+        a_term = operation('MULTIPLY', a, inverse.outputs[0], 'A Term')
+        b_term = operation('MULTIPLY', b, c, 'B Term')
+        mixed = operation('ADD', a_term.outputs[0], b_term.outputs[0], 'Mix')
+        result = operation('ADD' if tev['colorOperation'] == 0 else 'SUBTRACT',
+                           d, mixed.outputs[0], 'Color')
+        bias = {1: .5, 2: -.5}.get(tev['colorBias'], 0)
+        if bias:
+            result = vector_operation('ADD', result.outputs[0], bias, 'Bias')
+        scale = {1: 2, 2: 4, 3: .5}.get(tev['colorScale'], 1)
+        if scale != 1:
+            result = vector_operation('MULTIPLY', result.outputs[0], scale, 'Scale')
+        if tev['colorClamp']:
+            result = operation('MULTIPLY', result.outputs[0], (1, 1, 1, 1), 'Clamp')
+            result.use_clamp = True
+        result.name = f'Stage Custom TEV{suffix}'
+        result['mme_texture_index'] = index
+        return result.outputs[0]
+
     def texture_chain(label, selected, base):
         """Apply one HSD lightmap pass in stored byte-color space."""
         encoded_result = None
         for pass_index, (index, layer, sampler) in enumerate(selected):
             encoded_texture = color_transfer(material, sampler.outputs['Color'], to_linear=False)
+            encoded_texture = custom_tev_color(index, layer, sampler, encoded_texture)
             operation = layer.get('colorOperation', 5)
             combine_color = nodes.new('ShaderNodeMixRGB')
             combine_color.name = (label if pass_index == 0 else
@@ -623,7 +691,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
     extension_layers = [(i, layer, sampler) for i, layer, sampler, flags in tagged if flags & 0x80]
 
     diffuse_result = None
-    if len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 4:
+    if (len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 4
+            and not diffuse_layers[0][1].get('tev')):
         # Preserve the established preview response for the common single
         # modulate texture: Blender already supplies the sampled color in linear space.
         _, layer, sampler = diffuse_layers[0]
@@ -636,7 +705,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         tint.inputs[1].default_value = (*linear, 1)
         links.new(sampler.outputs['Color'], tint.inputs[2])
         diffuse_result = tint.outputs[0]
-    elif len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 5:
+    elif (len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 5
+          and not diffuse_layers[0][1].get('tev')):
         diffuse_result = diffuse_layers[0][2].outputs['Color']
     else:
         diffuse_encoded = texture_chain('Stage Diffuse Tint', diffuse_layers,

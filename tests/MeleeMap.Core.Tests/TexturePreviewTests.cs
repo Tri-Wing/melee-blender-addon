@@ -69,6 +69,25 @@ public class TexturePreviewTests
         Assert.NotEqual(mesh.TexCoords0[0], mesh.TexCoords1[0]);
     }
 
+    [CorpusFact]
+    public void ExtractsDreamLandCustomTevColorStage()
+    {
+        string source = Path.Combine(CorpusTests.CorpusDirectory, "GrGd.dat");
+        if (!File.Exists(source)) return;
+        using var directory = new TemporaryDirectory();
+        var archive = new StageArchive(source);
+        var preview = TexturePreview.Extract(archive.Layout,
+            new("whispy overlay", "whispy overlay", 0x33E9C, true), directory.Path);
+
+        var tev = Assert.IsType<PreviewTev>(preview.Texture!.Tev);
+        Assert.Equal(0, tev.ColorOperation);
+        Assert.True(tev.ColorClamp);
+        Assert.Equal(new[] { 0x85, 0x80, 8, 15 },
+            new[] { tev.ColorA, tev.ColorB, tev.ColorC, tev.ColorD });
+        Assert.All(tev.Konst.Take(3), value => Assert.Equal(25 / 255f, value));
+        Assert.All(tev.Tev0.Take(3), value => Assert.Equal(25 / 255f, value));
+    }
+
     [Theory]
     [InlineData(6)] // RGBA8 split AR/GB planes, 4x4 tiles.
     [InlineData(8)] // CI4 with RGB565 palette, 8x8 tiles.
