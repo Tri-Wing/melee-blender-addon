@@ -102,16 +102,17 @@ def mesh_binding(payload, nodes, joints, world, rests):
     right = right or Matrix.Identity(4)
     owner_inverse = owner_world.inverted()
     positions, assignments = [], []
+    normals = [] if payload.get('normals') else None
     epsilon = 1.1920929e-7
-    for position, envelope_index in zip(payload['positions'], payload['envelopeIndices']):
+    for vertex_index, (position, envelope_index) in enumerate(zip(payload['positions'], payload['envelopeIndices'])):
         envelope = envelopes[envelope_index]
-        source = right @ vector(position)
+        binding = right
         if envelope[0]['weight'] >= 1 - epsilon:
             bone = envelope[0]['jobjId']
             # HSD omits inverse bind multiplication for root-space, single-bone
             # vertices. Fold that exception into the stored vertex position.
-            source = (rests[bone] @ source if not has_right else
-                      rests[bone] @ inverse_bind(joints, bone) @ source)
+            binding = (rests[bone] if not has_right else
+                       rests[bone] @ inverse_bind(joints, bone) @ right)
             weights = [(bone, 1.0)]
         else:
             weights = [(item['jobjId'], item['weight']) for item in envelope
@@ -124,9 +125,15 @@ def mesh_binding(payload, nodes, joints, world, rests):
                             for i in range(4) for j in range(4))
                 if error > 5e-4:
                     raise StageError(f'Blended envelope uses a scaled or sheared inverse bind that Blender cannot represent ({error:.6g}).')
-        positions.append(owner_inverse @ source)
+        transform = owner_inverse @ binding
+        positions.append(transform @ vector(position))
+        if normals is not None:
+            normal = transform.to_3x3().inverted_safe().transposed() @ vector(payload['normals'][vertex_index])
+            if normal.length_squared:
+                normal.normalize()
+            normals.append(normal)
         assignments.append(weights)
-    return positions, assignments
+    return positions, assignments, normals
 
 
 def mesh_pose(payload, nodes, joints, world):

@@ -46,28 +46,43 @@ def import_uvs(mesh, source):
             uv.data[loop.index].uv = (value['x'], 1 - value['y'])
 
 
-def display_triangle_indices(source):
+def enable_source_normals(material):
+    """Enable the per-vertex GX normal path for a material assigned to a source mesh."""
+    if not material or not material.node_tree:
+        return
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    for node in nodes:
+        if not node.name.startswith('Stage Preview Normal'):
+            continue
+        suffix = node.name.removeprefix('Stage Preview Normal')
+        valid = nodes.get(f'Stage Source Normal Available{suffix}')
+        if valid is not None:
+            links.new(valid.outputs['Fac'], node.inputs[0])
+
+
+def display_triangle_indices(source, positions=None, normals=None):
     """Orient GX triangles toward their stored normals for Blender display."""
     indices = source['triangleIndices']
-    normals = source.get('normals')
-    if not normals or source.get('envelopes'):
-        return indices, False
-    positions = source['positions']
-    score = 0.0
-    for offset in range(0, len(indices), 3):
-        a, b, c = (Vector(tuple(positions[indices[offset + corner]][axis]
-                                  for axis in ('x', 'y', 'z'))) for corner in range(3))
-        face = (b - a).cross(c - a)
-        if face.length_squared == 0:
-            continue
-        normal = Vector(tuple(normals[indices[offset]][axis] for axis in ('x', 'y', 'z')))
-        score += face.normalized().dot(normal)
-    if score >= 0:
-        return indices, False
+    normals = normals if normals is not None else source.get('normals')
+    if not normals:
+        return indices, [False] * (len(indices) // 3)
+    positions = positions if positions is not None else source['positions']
+
+    def value(items, index):
+        item = items[index]
+        return item.copy() if isinstance(item, Vector) else Vector(tuple(item[axis] for axis in ('x', 'y', 'z')))
+
     result = []
+    reversed_faces = []
     for offset in range(0, len(indices), 3):
-        result.extend((indices[offset], indices[offset + 2], indices[offset + 1]))
-    return result, True
+        a, b, c = (value(positions, indices[offset + corner]) for corner in range(3))
+        face = (b - a).cross(c - a)
+        normal = sum((value(normals, indices[offset + corner]) for corner in range(3)), Vector())
+        reverse = face.length_squared > 0 and normal.length_squared > 0 and face.dot(normal) < 0
+        reversed_faces.append(reverse)
+        corners = indices[offset:offset + 3]
+        result.extend((corners[0], corners[2], corners[1]) if reverse else corners)
+    return result, reversed_faces
 
 
 def fingerprint(obj, protect_all=False):
@@ -149,6 +164,35 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
     shader = nodes.new('ShaderNodeEmission')
     shader.name = 'Stage Surface'
     color_input = shader.inputs['Color']
+
+    def preview_normal(geometry, suffix=''):
+        """Use exact GX normals without Blender's polygon-hemisphere clamping."""
+        attribute = nodes.new('ShaderNodeAttribute')
+        attribute.name = f'Stage Source Normal{suffix}'
+        attribute.attribute_type = 'GEOMETRY'
+        attribute.attribute_name = 'Stage Normal'
+        transform = nodes.new('ShaderNodeVectorTransform')
+        transform.name = f'Stage Source Normal Transform{suffix}'
+        transform.vector_type = 'NORMAL'
+        transform.convert_from = 'OBJECT'
+        transform.convert_to = 'WORLD'
+        links.new(attribute.outputs['Vector'], transform.inputs['Vector'])
+        normalize = nodes.new('ShaderNodeVectorMath')
+        normalize.name = f'Stage Source Normal Normalize{suffix}'
+        normalize.operation = 'NORMALIZE'
+        links.new(transform.outputs['Vector'], normalize.inputs[0])
+        valid = nodes.new('ShaderNodeAttribute')
+        valid.name = f'Stage Source Normal Available{suffix}'
+        valid.attribute_type = 'GEOMETRY'
+        valid.attribute_name = 'Stage Normal Valid'
+        mix = nodes.new('ShaderNodeMix')
+        mix.name = f'Stage Preview Normal{suffix}'
+        mix.data_type = 'VECTOR'
+        mix.inputs[0].default_value = 0
+        links.new(geometry.outputs['Normal'], mix.inputs[4])
+        links.new(normalize.outputs['Vector'], mix.inputs[5])
+        return mix.outputs[1]
+
     # Byte colors describe sRGB; shader color sockets are scene-linear.
     linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in color[:3]]
     # Vertex-color materials take their base color from the mesh, not diffuse RGB.
@@ -304,7 +348,7 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
                 dict(type='infinite', color=[.4, .4, .4, 1], diffuse=True,
                      specular=True, hidden=False, position=dict(x=.35, y=.82, z=.45))]
 
-        normal = geometry.outputs['Normal']
+        normal = preview_normal(geometry)
         if not game_lights:
             camera_normal = nodes.new('ShaderNodeVectorTransform')
             camera_normal.name = 'Stage Camera Normal'
@@ -465,7 +509,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             camera_normal.vector_type = 'NORMAL'
             camera_normal.convert_from = 'WORLD'
             camera_normal.convert_to = 'CAMERA'
-            links.new(geometry.outputs['Normal'], camera_normal.inputs['Vector'])
+            links.new(preview_normal(geometry, f' Reflection {index + 1}'),
+                      camera_normal.inputs['Vector'])
             separate = nodes.new('ShaderNodeSeparateXYZ')
             links.new(camera_normal.outputs['Vector'], separate.inputs['Vector'])
             reflection = nodes.new('ShaderNodeCombineXYZ')

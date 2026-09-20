@@ -417,9 +417,11 @@ envelope deformation, and transform-animation playback. Positions use
 `(X, -Z, Y)` exactly once at the boundary.
 The source hierarchy is retained, including separate JOBJ/DOBJ/POBJ identities.
 Affine parent matrices retain shear without Blender's local TRS decomposition.
-Rigid meshes retain decoded normals. GX triangles whose winding opposes those
+Rigid and envelope-deformed meshes retain decoded normals. GX triangles whose winding opposes those
 normals are reversed for Blender display and restored to their original order
-on export. Deformed preview meshes use generated normals. Material, texture, shape, and light animation, billboard behavior,
+on export. The material preview reads an exact normal attribute because Blender's
+native custom normals clamp values that cross a polygon's hemisphere. Material,
+texture, shape, and light animation, billboard behavior,
 constraints, instanced drawing, and stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow
 geometry export; unsupported preview meshes remain read-only.

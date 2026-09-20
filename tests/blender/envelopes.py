@@ -59,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix='mme-envelope-blender-') as temp:
     worst_error = 0
     worst_info = None
 
+    found_source_normals = False
     for payload, _ in enveloped:
         obj = objects[payload['id']]
         assert obj.get('mme_enveloped')
@@ -69,6 +70,10 @@ with tempfile.TemporaryDirectory(prefix='mme-envelope-blender-') as temp:
         evaluated_mesh = evaluated.to_mesh()
         try:
             assert len(evaluated_mesh.vertices) == len(expected_positions)
+            if payload.get('normals'):
+                found_source_normals = True
+                assert all(polygon.use_smooth for polygon in obj.data.polygons)
+                assert len(evaluated_mesh.corner_normals) == len(evaluated_mesh.loops)
             for vertex, expected_position in zip(evaluated_mesh.vertices, expected_positions):
                 actual = evaluated.matrix_world @ vertex.co
                 expected = transforms.AXES @ (owner_world @ expected_position)
@@ -88,6 +93,7 @@ with tempfile.TemporaryDirectory(prefix='mme-envelope-blender-') as temp:
                                     sum(item['weight'] for item in envelope), abs_tol=1e-5)
                 break
     assert found_blend
+    assert found_source_normals
     assert worst_error < 2e-2, (STAGE, worst_error, worst_info)
 
     # A source control bone drives its generated deform bone and weighted mesh.

@@ -334,13 +334,19 @@ def import_session(context, directory):
             for filename in group['meshes']:
                 payload = read((directory / entry['file']).parent / filename)
                 assignments = None
+                imported_normals = None
                 if payload.get('envelopes'):
-                    positions, assignments = mesh_binding(payload, nodes, joints, world, deform_rests)
+                    positions, assignments, imported_normals = mesh_binding(
+                        payload, nodes, joints, world, deform_rests)
                 else:
                     positions, _ = mesh_pose(payload, nodes, joints, world)
+                    if payload.get('normals'):
+                        from .transforms import vector
+                        imported_normals = [vector(normal) for normal in payload['normals']]
                 mesh = bpy.data.meshes.new(f"Group {group['index']:03d} Mesh")
                 created_meshes.append(mesh)
-                indices, reversed_winding = surface.display_triangle_indices(payload)
+                indices, reversed_faces = surface.display_triangle_indices(
+                    payload, positions, imported_normals)
                 mesh.from_pydata([AXES @ p for p in positions], [],
                                  [indices[i:i+3] for i in range(0, len(indices), 3)])
                 mesh.materials.append(source_materials.get(payload['id'], material))
@@ -353,12 +359,21 @@ def import_session(context, directory):
                         source_materials[payload['id']] = preview_material
                         mesh.materials[0] = preview_material
                     surface.configure_color_preview(mesh.materials[0], color_layers[0])
-                if payload.get('normals') and not payload.get('envelopes'):
-                    from .transforms import vector
-                    mesh.normals_split_custom_set_from_vertices([AXES.to_3x3() @ vector(n) for n in payload['normals']])
+                if imported_normals:
+                    source_normals = mesh.attributes.new(
+                        name='Stage Normal', type='FLOAT_VECTOR', domain='POINT')
+                    source_normal_valid = mesh.attributes.new(
+                        name='Stage Normal Valid', type='FLOAT', domain='POINT')
+                    for item, normal in zip(source_normals.data, imported_normals):
+                        item.vector = AXES.to_3x3() @ normal
+                    for item in source_normal_valid.data:
+                        item.value = 1
+                    surface.enable_source_normals(mesh.materials[0])
+                    mesh.normals_split_custom_set_from_vertices(
+                        [AXES.to_3x3() @ normal for normal in imported_normals])
                     for polygon in mesh.polygons:
                         polygon.use_smooth = True
-                    mesh['mme_reversed_source_winding'] = reversed_winding
+                    mesh['mme_reversed_source_faces'] = [int(value) for value in reversed_faces]
                 obj = objects[payload['id']]
                 # Blender object types cannot change from Empty to Mesh: replace the placeholder.
                 replacement = bpy.data.objects.new(obj.name, mesh)

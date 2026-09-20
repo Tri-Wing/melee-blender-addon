@@ -109,7 +109,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         # Re-triangulating can rotate degenerate triangle corners and would
         # incorrectly turn a vertex move into a grey topology replacement.
         original_indices = source['triangleIndices'] if source else []
-        display_indices, reversed_winding = surface.display_triangle_indices(source) if source else ([], False)
+        display_indices, reversed_faces = (surface.display_triangle_indices(source) if source else ([], []))
         same_topology = (source is not None and len(positions) == len(source['positions'])
                          and len(mesh.polygons) * 3 == len(original_indices)
                          and all(list(face.vertices) == display_indices[i * 3:i * 3 + 3]
@@ -128,7 +128,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
             layer = mesh.color_attributes.get(f'Stage Color {channel}')
             if layer is None:
                 raise StageError('An imported stage color attribute was removed. Restore it before export.')
-            loops = (source_order_loops(mesh, reversed_winding) if same_topology else
+            loops = (source_order_loops(mesh, reversed_faces) if same_topology else
                      [i for triangle in mesh.loop_triangles for i in triangle.loops])
             colors = [list(layer.data[mesh.loops[i].vertex_index if layer.domain == 'POINT' else i].color) for i in loops]
             changed = (not same_topology or any(abs(value - original_colors[index][component]) > 1e-6
@@ -152,7 +152,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                     raise StageError('This stage material needs a UV map. Unwrap the model in Blender before exporting.')
                 # Same-topology faces retain original corner ordering, including
                 # strip degenerates. Otherwise use Blender's triangulated loops.
-                loops = (source_order_loops(mesh, reversed_winding) if same_topology else
+                loops = (source_order_loops(mesh, reversed_faces) if same_topology else
                          [i for triangle in mesh.loop_triangles for i in triangle.loops])
                 result['texCoords'] = [{'x': uv.data[i].uv.x, 'y': 1 - uv.data[i].uv.y} for i in loops]
         return result
@@ -160,11 +160,11 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         bpy.data.meshes.remove(mesh)
 
 
-def source_order_loops(mesh, reversed_winding):
+def source_order_loops(mesh, reversed_faces):
     loops = []
-    for face in mesh.polygons:
+    for face, reverse in zip(mesh.polygons, reversed_faces):
         values = list(face.loop_indices)
-        loops.extend((values[0], values[2], values[1]) if reversed_winding else values)
+        loops.extend((values[0], values[2], values[1]) if reverse else values)
     return loops
 
 

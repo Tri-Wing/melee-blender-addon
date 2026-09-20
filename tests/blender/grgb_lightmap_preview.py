@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='mme-grgb-lightmap-') as tmp:
                             if read(tmp / 'session/models/group-002' / name)['id'] == lit_target['id']))
     source_indices = source_mesh['triangleIndices']
     assert list(lit_obj.data.polygons[0].vertices) == [source_indices[0], source_indices[2], source_indices[1]]
-    assert lit_obj.data['mme_reversed_source_winding']
+    assert lit_obj.data['mme_reversed_source_faces'][0]
     assert all(polygon.use_smooth for polygon in lit_obj.data.polygons)
     source_normal = Vector(tuple(source_mesh['normals'][source_indices[0]][axis]
                                  for axis in ('x', 'z', 'y')))
@@ -138,5 +138,23 @@ with tempfile.TemporaryDirectory(prefix='mme-grgb-lightmap-') as tmp:
     first = integer(mobj + 8)
     second = integer(first + 4)
     assert floating(first + 0x44) == .25 and floating(second + 0x44) == .75
+
+    smooth_obj = next(obj for obj in bpy.context.scene.objects
+                      if obj.name.endswith('Group 001 POBJ 000.007'))
+    group_one = read(tmp / 'session/models/group-001/group.json')
+    smooth_payload = next(read(tmp / 'session/models/group-001' / name)
+                          for name in group_one['meshes']
+                          if read(tmp / 'session/models/group-001' / name)['id'] == smooth_obj.get('mme_id'))
+    assert smooth_obj.get('mme_enveloped') and smooth_payload['normals']
+    assert all(polygon.use_smooth for polygon in smooth_obj.data.polygons)
+    assert len(smooth_obj.data.corner_normals) == len(smooth_obj.data.loops)
+    exact_normals = smooth_obj.data.attributes['Stage Normal']
+    assert len(exact_normals.data) == len(smooth_obj.data.vertices)
+    assert max((exact_normals.data[loop.vertex_index].vector.normalized()
+                - smooth_obj.data.corner_normals[loop.index].vector).length
+               for loop in smooth_obj.data.loops) > .1
+    assert len(set(smooth_obj.data['mme_reversed_source_faces'])) == 2
+    preview_normal = smooth_obj.active_material.node_tree.nodes['Stage Preview Normal']
+    assert preview_normal.inputs[5].links[0].from_node.name == 'Stage Source Normal Normalize'
 
 print('GRGB LIGHTMAP PREVIEW PASS: diffuse/specular roles and reflection-mapped metal materials')
