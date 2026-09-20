@@ -340,7 +340,7 @@ def import_session(context, directory):
                     positions, _ = mesh_pose(payload, nodes, joints, world)
                 mesh = bpy.data.meshes.new(f"Group {group['index']:03d} Mesh")
                 created_meshes.append(mesh)
-                indices = payload['triangleIndices']
+                indices, reversed_winding = surface.display_triangle_indices(payload)
                 mesh.from_pydata([AXES @ p for p in positions], [],
                                  [indices[i:i+3] for i in range(0, len(indices), 3)])
                 mesh.materials.append(source_materials.get(payload['id'], material))
@@ -356,6 +356,9 @@ def import_session(context, directory):
                 if payload.get('normals') and not payload.get('envelopes'):
                     from .transforms import vector
                     mesh.normals_split_custom_set_from_vertices([AXES.to_3x3() @ vector(n) for n in payload['normals']])
+                    for polygon in mesh.polygons:
+                        polygon.use_smooth = True
+                    mesh['mme_reversed_source_winding'] = reversed_winding
                 obj = objects[payload['id']]
                 # Blender object types cannot change from Empty to Mesh: replace the placeholder.
                 replacement = bpy.data.objects.new(obj.name, mesh)

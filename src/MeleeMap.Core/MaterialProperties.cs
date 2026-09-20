@@ -4,13 +4,18 @@ using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
+public sealed record EditableTextureProperties(int Index, int Offset, int ColorOperation, int AlphaOperation,
+    int LightmapFlags, int TexCoord, int CoordinateType, float Blend, bool CanEditBlend);
 public sealed record EditableMaterialProperties(string Id, int MobjOffset, int MaterialOffset, int? TextureOffset, int? PixelOffset,
     int[] Diffuse, float Alpha, float? TextureBlend, bool CanEditDiffuse, bool CanEditAlpha, bool CanEditBlend,
     bool AlphaAffectsVisibility, bool UseVertexColor, bool CanToggleVertexColor,
-    int AlphaSource, uint RenderFlags, uint EditableRenderFlagsMask, int TransparencyMode);
+    int AlphaSource, uint RenderFlags, uint EditableRenderFlagsMask, int TransparencyMode,
+    int[] Ambient, int[] Specular, float Shininess, EditableTextureProperties[] Textures);
 public sealed record MaterialPropertyEdit([property: JsonRequired] string Id, int[]? Diffuse = null,
     float? Alpha = null, float? TextureBlend = null, bool? UseVertexColor = null,
-    uint? RenderFlags = null, int? TransparencyMode = null, int? AlphaSource = null);
+    uint? RenderFlags = null, int? TransparencyMode = null, int? AlphaSource = null,
+    int[]? Ambient = null, int[]? Specular = null, float? Shininess = null,
+    float[]? TextureBlends = null);
 public sealed record MaterialPropertyEdits([property: JsonRequired] int ProtocolVersion,
     [property: JsonRequired] MaterialPropertyEdit[] Materials);
 public sealed record MaterialPropertyWrite(byte[] Bytes, Dictionary<string, int> Bindings,
@@ -32,15 +37,29 @@ public static class MaterialProperties
             int? material = r.Pointer(mobj + 12), texture = r.Pointer(mobj + 8), pixel = r.Pointer(mobj + 20);
             if (!material.HasValue) continue;
             r.Check(material.Value, 20);
-            // First slice: a standard material with at most one regular UV texture.
-            if (texture.HasValue && (r.Pointer(texture.Value) != null || r.Pointer(texture.Value + 4) != null
-                || r.Int(texture.Value + 12) != 4 || (r.Int(texture.Value + 0x40) & 0x0100000F) != 0)) continue;
+            var textures = new List<EditableTextureProperties>(); var seen = new HashSet<int>();
+            int? current = texture; bool supportedTextures = true;
+            while (current.HasValue)
+            {
+                int t = current.Value;
+                if (textures.Count >= 8 || !seen.Add(t) || r.Pointer(t) != null) { supportedTextures = false; break; }
+                int source = r.Int(t + 12), flags = r.Int(t + 0x40), coordinateType = flags & 15;
+                float blend = r.Float(t + 0x44);
+                if (source is < 4 or > 5 || (flags & 0x01000000) != 0 || coordinateType is < 0 or > 1
+                    || !float.IsFinite(blend) || blend < 0 || blend > 1)
+                { supportedTextures = false; break; }
+                int colorOperation = (flags >> 16) & 15, alphaOperation = (flags >> 20) & 15;
+                textures.Add(new(textures.Count, t, colorOperation, alphaOperation, flags & 0x1F0,
+                    source - 4, coordinateType, blend, colorOperation == 3 || alphaOperation == 2));
+                current = r.Pointer(t + 4);
+            }
+            if (!supportedTextures) continue;
             float sourceAlpha = r.Float(material.Value + 12);
-            float? sourceBlend = texture.HasValue ? r.Float(texture.Value + 0x44) : null;
+            float shininess = r.Float(material.Value + 16);
+            float? sourceBlend = textures.Count > 0 ? textures[0].Blend : null;
             if (!float.IsFinite(sourceAlpha) || sourceAlpha < 0 || sourceAlpha > 1
-                || (sourceBlend.HasValue && (!float.IsFinite(sourceBlend.Value) || sourceBlend < 0 || sourceBlend > 1))) continue;
+                || !float.IsFinite(shininess) || shininess < 0 || shininess > 128) continue;
             var alpha = AlphaPreview.Read(archive, mobj);
-            int colorOp = texture.HasValue ? (r.Int(texture.Value + 0x40) >> 16) & 15 : 0;
             bool useVertexColor = (r.Int(mobj + 4) & 2) != 0;
             bool hasVertexColors = Gx.GxMeshDecoder.Decode(archive, target.PobjOffset).Colors0 != null;
             uint renderFlags = unchecked((uint)r.Int(mobj + 4));
@@ -56,10 +75,13 @@ public static class MaterialProperties
                 Enumerable.Range(0, 3).Select(i => (int)r.Byte(material.Value + 4 + i)).ToArray(),
                 sourceAlpha, sourceBlend,
                 (r.Int(mobj + 4) & 2) == 0, !alpha.Vertex || alpha.MultiplyMaterial,
-                texture.HasValue && (colorOp == 3 || alpha.TextureOperation == 2),
+                textures.FirstOrDefault()?.CanEditBlend == true,
                 alpha.BlendMode == 1 || alpha.Compare0 != 7 || alpha.Compare1 != 7,
                 useVertexColor, hasVertexColors, (int)((renderFlags >> 13) & 3),
-                renderFlags, EditableRenderFlagsMask, transparency));
+                renderFlags, EditableRenderFlagsMask, transparency,
+                Enumerable.Range(0, 3).Select(i => (int)r.Byte(material.Value + i)).ToArray(),
+                Enumerable.Range(0, 3).Select(i => (int)r.Byte(material.Value + 8 + i)).ToArray(),
+                shininess, textures.ToArray()));
         }
         return result.ToArray();
     }
@@ -78,7 +100,8 @@ public static class MaterialProperties
                 && eligible.ContainsKey(edit.Id), "MATERIAL_EDIT_TARGET", "Material is unsupported, animated, duplicated, or absent from this session.");
             var target = eligible[edit!.Id];
             Require(edit.Diffuse != null || edit.Alpha.HasValue || edit.TextureBlend.HasValue || edit.UseVertexColor.HasValue
-                || edit.RenderFlags.HasValue || edit.TransparencyMode.HasValue || edit.AlphaSource.HasValue,
+                || edit.RenderFlags.HasValue || edit.TransparencyMode.HasValue || edit.AlphaSource.HasValue
+                || edit.Ambient != null || edit.Specular != null || edit.Shininess.HasValue || edit.TextureBlends != null,
                 "MATERIAL_EDIT_FORMAT", "A material edit must change at least one supported property.");
             bool materialMode = edit.UseVertexColor == false || !target.UseVertexColor;
             bool materialAlphaMode = materialMode || edit.AlphaSource is 1 or 3 || target.CanEditAlpha;
@@ -87,10 +110,23 @@ public static class MaterialProperties
                 "MATERIAL_VERTEX_COLOR", "Vertex-color mode cannot be changed for this material.");
             Require(edit.Diffuse == null || ((target.CanEditDiffuse || materialMode) && edit.Diffuse.Length == 3 && edit.Diffuse.All(v => v is >= 0 and <= 255)),
                 "MATERIAL_DIFFUSE", "Diffuse edits require three RGB bytes and a material using diffuse color.");
+            Require(edit.Ambient == null || (edit.Ambient.Length == 3 && edit.Ambient.All(v => v is >= 0 and <= 255)),
+                "MATERIAL_AMBIENT", "Ambient edits require three RGB bytes.");
+            Require(edit.Specular == null || (edit.Specular.Length == 3 && edit.Specular.All(v => v is >= 0 and <= 255)),
+                "MATERIAL_SPECULAR", "Specular edits require three RGB bytes.");
+            Require(edit.Shininess == null || (float.IsFinite(edit.Shininess.Value) && edit.Shininess is >= 0 and <= 128),
+                "MATERIAL_SHININESS", "Shininess must be finite and between zero and 128.");
             Require(edit.Alpha == null || (materialAlphaMode && float.IsFinite(edit.Alpha.Value) && edit.Alpha >= 0 && edit.Alpha <= 1),
                 "MATERIAL_ALPHA", "Material alpha must be finite, between zero and one, and used by this material.");
             Require(edit.TextureBlend == null || (target.CanEditBlend && float.IsFinite(edit.TextureBlend.Value)
                 && edit.TextureBlend >= 0 && edit.TextureBlend <= 1), "MATERIAL_BLEND", "Texture blend requires a supported blend operation and a finite value between zero and one.");
+            Require(edit.TextureBlend == null || edit.TextureBlends == null, "MATERIAL_BLEND",
+                "Use either the legacy first-layer blend or the per-layer blend list, not both.");
+            Require(edit.TextureBlends == null || (edit.TextureBlends.Length == target.Textures.Length
+                && edit.TextureBlends.Select((value, index) => float.IsFinite(value) && value >= 0 && value <= 1
+                    && (!BitConverter.SingleToInt32Bits(value).Equals(BitConverter.SingleToInt32Bits(target.Textures[index].Blend))
+                        ? target.Textures[index].CanEditBlend : true)).All(value => value)),
+                "MATERIAL_BLEND", "Texture blends must match the source layer count and only change supported blend operations.");
             Require(edit.RenderFlags == null || ((edit.RenderFlags.Value ^ target.RenderFlags) & ~target.EditableRenderFlagsMask) == 0,
                 "MATERIAL_RENDER_FLAGS", "The material edit changes protected render flags.");
             Require(edit.TransparencyMode == null || edit.TransparencyMode is >= 0 and <= 3,
@@ -127,13 +163,36 @@ public static class MaterialProperties
                 finalFlags = edit.TransparencyMode.Value == 0 ? finalFlags & ~(1u << 30) : finalFlags | (1u << 30);
             int mat = Copy(original.MaterialOffset, 20, block =>
             {
+                if (edit.Ambient != null)
+                    for (int i = 0; i < 3; i++) block[i] = (byte)edit.Ambient[i];
                 if (edit.Diffuse != null)
                     for (int i = 0; i < 3; i++) block[4 + i] = (byte)edit.Diffuse[i];
+                if (edit.Specular != null)
+                    for (int i = 0; i < 3; i++) block[8 + i] = (byte)edit.Specular[i];
                 if (edit.Alpha.HasValue) Put(block, 12, BitConverter.SingleToInt32Bits(edit.Alpha.Value));
+                if (edit.Shininess.HasValue) Put(block, 16, BitConverter.SingleToInt32Bits(edit.Shininess.Value));
             });
             int? tex = original.TextureOffset;
+            float[]? blends = edit.TextureBlends;
             if (edit.TextureBlend.HasValue)
-                tex = Copy(tex!.Value, 0x5C, block => Put(block, 0x44, BitConverter.SingleToInt32Bits(edit.TextureBlend.Value)));
+            {
+                blends = original.Textures.Select(texture => texture.Blend).ToArray();
+                blends[0] = edit.TextureBlend.Value;
+            }
+            if (blends != null)
+            {
+                int? next = null;
+                for (int i = original.Textures.Length - 1; i >= 0; i--)
+                {
+                    int nextValue = next ?? 0, index = i;
+                    next = Copy(original.Textures[i].Offset, 0x5C, block =>
+                    {
+                        Put(block, 4, nextValue);
+                        Put(block, 0x44, BitConverter.SingleToInt32Bits(blends[index]));
+                    });
+                }
+                tex = next;
+            }
             bool depthFlagsChanged = edit.RenderFlags.HasValue
                 && ((edit.RenderFlags.Value ^ original.RenderFlags) & ((1u << 27) | (1u << 29))) != 0;
             int? pixel = original.PixelOffset;

@@ -57,8 +57,25 @@ def initialize(material, entry, definition, directory, stage):
     material['mme_material_updating'] = True
     try:
         material.mme_diffuse = [linear(c / 255) for c in definition['diffuse']]
+        material.mme_ambient = [linear(c / 255) for c in definition.get('ambient',
+                                [round(c * 255) for c in preview.get('ambientColor', [1, 1, 1])[:3]])]
+        material.mme_specular = [linear(c / 255) for c in definition.get('specular',
+                                 [round(c * 255) for c in preview.get('specularColor', [0, 0, 0])[:3]])]
+        material.mme_shininess = definition.get('shininess', preview.get('shininess', 50))
         material.mme_alpha = definition['alpha']
         material.mme_texture_blend = definition['textureBlend'] if definition['textureBlend'] is not None else 1
+        material.mme_texture_layers.clear()
+        texture_definitions = definition.get('textures') or []
+        for index, source in enumerate(texture_definitions):
+            layer = material.mme_texture_layers.add()
+            layer.name = f'Texture Layer {index + 1}'
+            layer.blend = source.get('blend', 1)
+            layer['mme_index'] = index
+            layer['mme_role'] = source.get('lightmapFlags', 0)
+            layer['mme_tex_coord'] = source.get('texCoord', 0)
+            layer['mme_coordinate_type'] = source.get('coordinateType', 0)
+            layer['mme_color_operation'] = source.get('colorOperation', 0)
+            layer['mme_can_edit_blend'] = source.get('canEditBlend', False)
         material.mme_use_vertex_color = definition['useVertexColor']
         material.mme_alpha_source = next(name for name, value in ALPHA_SOURCES.items()
                                          if value == definition['alphaSource'])
@@ -136,9 +153,21 @@ def update(material, context):
         preview['diffuseLighting'] = material.mme_diffuse_lighting
         preview['specularLighting'] = material.mme_specular_lighting
         preview['color'] = [byte(c) / 255 for c in material.mme_diffuse] + [1]
+        preview['ambientColor'] = [byte(c) / 255 for c in material.mme_ambient] + [1]
+        preview['specularColor'] = [byte(c) / 255 for c in material.mme_specular] + [1]
+        preview['shininess'] = material.mme_shininess
+        textures = preview.get('textures') or ([preview['texture']] if preview.get('texture') else [])
+        if len(textures) > 1:
+            blends = [layer.blend for layer in material.mme_texture_layers]
+        else:
+            blends = [material.mme_texture_blend] if textures else []
+        for texture, blend in zip(textures, blends):
+            texture['colorBlend'] = blend
+        if preview.get('texture') and blends:
+            preview['texture']['colorBlend'] = blends[0]
         if preview.get('alpha'):
             preview['alpha']['material'] = material.mme_alpha
-            preview['alpha']['textureBlend'] = material.mme_texture_blend
+            preview['alpha']['textureBlend'] = blends[0] if blends else 1
             alpha_source = ALPHA_SOURCES[material.mme_alpha_source]
             vertex_alpha = (material.mme_use_vertex_color if alpha_source == 0 else alpha_source in (2, 3))
             preview['alpha']['vertex'] = vertex_alpha
@@ -148,10 +177,6 @@ def update(material, context):
                 preview['alpha']['blendMode'] = 0 if transparency == 0 else 3 if transparency == 3 else 1
                 preview['alpha']['sourceFactor'] = 4 if transparency == 1 else 1
                 preview['alpha']['destinationFactor'] = 5 if transparency == 1 else 1 if transparency >= 2 else 5
-        if preview.get('texture'):
-            preview['texture']['colorBlend'] = material.mme_texture_blend
-            if preview.get('textures'):
-                preview['textures'][0]['colorBlend'] = material.mme_texture_blend
         color_node = material.node_tree.nodes.get('Stage Vertex Color') if material.node_tree else None
         color_layer = color_node.layer_name if color_node else material.get('mme_vertex_color_layer', 'Stage Color 0')
         from . import lighting
@@ -188,10 +213,19 @@ def edits(scene, stage):
         source_use_vertex_color = source.get('useVertexColor', baseline['useVertexColor'])
         source_can_toggle = source.get('canToggleVertexColor', baseline['canToggleVertexColor'])
         rgb = [byte(c) for c in material.mme_diffuse]
-        alpha, blend = material.mme_alpha, material.mme_texture_blend
+        ambient = [byte(c) for c in material.mme_ambient]
+        specular = [byte(c) for c in material.mme_specular]
+        shininess = material.mme_shininess
+        texture_definitions = source.get('textures') or baseline.get('textures') or []
+        blends = ([layer.blend for layer in material.mme_texture_layers]
+                  if len(texture_definitions) > 1 else
+                  [material.mme_texture_blend] if texture_definitions else [])
+        alpha = material.mme_alpha
         use_vertex_color = material.mme_use_vertex_color
-        if not all(math.isfinite(v) and 0 <= v <= 1 for v in (alpha, blend)):
-            raise StageError('Material alpha and texture blend must be finite values between zero and one.')
+        if not all(math.isfinite(v) and 0 <= v <= 1 for v in (alpha, *blends)):
+            raise StageError('Material alpha and texture blends must be finite values between zero and one.')
+        if not math.isfinite(shininess) or not 0 <= shininess <= 128:
+            raise StageError('Material shininess must be finite and between zero and 128.')
         value = {'id': key}
         alpha_source = ALPHA_SOURCES[material.mme_alpha_source]
         source_alpha_source = source.get('alphaSource', baseline['alphaSource'])
@@ -224,15 +258,28 @@ def edits(scene, stage):
             if not source['canEditDiffuse'] and use_vertex_color:
                 raise StageError('This material uses vertex color; diffuse color editing is not supported.')
             value['diffuse'] = rgb
+        if ambient != source.get('ambient', baseline.get('ambient')):
+            value['ambient'] = ambient
+        if specular != source.get('specular', baseline.get('specular')):
+            value['specular'] = specular
+        source_shininess = source.get('shininess', baseline.get('shininess', 50))
+        if struct.pack('f', shininess) != struct.pack('f', source_shininess):
+            value['shininess'] = shininess
         if struct.pack('f', alpha) != struct.pack('f', source['alpha']):
             if not source['canEditAlpha'] and not (alpha_source in (1, 3) or not use_vertex_color):
                 raise StageError('This material uses vertex alpha; material alpha editing is not supported.')
             value['alpha'] = alpha
-        original_blend = source['textureBlend'] if source['textureBlend'] is not None else 1
-        if struct.pack('f', blend) != struct.pack('f', original_blend):
-            if not source['canEditBlend']:
-                raise StageError('This material does not use a supported texture blend operation.')
-            value['textureBlend'] = blend
+        source_blends = [texture.get('blend', 1) for texture in texture_definitions]
+        changed_blends = [index for index, (blend, original) in enumerate(zip(blends, source_blends))
+                          if struct.pack('f', blend) != struct.pack('f', original)]
+        for index in changed_blends:
+            if not texture_definitions[index].get('canEditBlend', False):
+                raise StageError(f'Texture layer {index + 1} does not use an editable blend operation.')
+        if changed_blends:
+            if len(texture_definitions) == 1:
+                value['textureBlend'] = blends[0]
+            else:
+                value['textureBlends'] = blends
         if key in values_by_id and values_by_id[key] != value:
             raise StageError('Copies of one stage material have conflicting properties. Use a single material datablock for that stage material.')
         values_by_id[key] = value

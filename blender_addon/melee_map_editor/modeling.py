@@ -109,9 +109,10 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         # Re-triangulating can rotate degenerate triangle corners and would
         # incorrectly turn a vertex move into a grey topology replacement.
         original_indices = source['triangleIndices'] if source else []
+        display_indices, reversed_winding = surface.display_triangle_indices(source) if source else ([], False)
         same_topology = (source is not None and len(positions) == len(source['positions'])
                          and len(mesh.polygons) * 3 == len(original_indices)
-                         and all(list(face.vertices) == original_indices[i * 3:i * 3 + 3]
+                         and all(list(face.vertices) == display_indices[i * 3:i * 3 + 3]
                                  for i, face in enumerate(mesh.polygons)))
         if info.get('positionsOnly') and (not same_topology or appearance_changed):
             raise StageError('This model has animated materials: move vertices only. Undo topology, UV or material assignment changes before export.')
@@ -127,7 +128,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
             layer = mesh.color_attributes.get(f'Stage Color {channel}')
             if layer is None:
                 raise StageError('An imported stage color attribute was removed. Restore it before export.')
-            loops = ([i for face in mesh.polygons for i in face.loop_indices] if same_topology else
+            loops = (source_order_loops(mesh, reversed_winding) if same_topology else
                      [i for triangle in mesh.loop_triangles for i in triangle.loops])
             colors = [list(layer.data[mesh.loops[i].vertex_index if layer.domain == 'POINT' else i].color) for i in loops]
             changed = (not same_topology or any(abs(value - original_colors[index][component]) > 1e-6
@@ -151,12 +152,20 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                     raise StageError('This stage material needs a UV map. Unwrap the model in Blender before exporting.')
                 # Same-topology faces retain original corner ordering, including
                 # strip degenerates. Otherwise use Blender's triangulated loops.
-                loops = ([i for face in mesh.polygons for i in face.loop_indices] if same_topology else
+                loops = (source_order_loops(mesh, reversed_winding) if same_topology else
                          [i for triangle in mesh.loop_triangles for i in triangle.loops])
                 result['texCoords'] = [{'x': uv.data[i].uv.x, 'y': 1 - uv.data[i].uv.y} for i in loops]
         return result
     finally:
         bpy.data.meshes.remove(mesh)
+
+
+def source_order_loops(mesh, reversed_winding):
+    loops = []
+    for face in mesh.polygons:
+        values = list(face.loop_indices)
+        loops.extend((values[0], values[2], values[1]) if reversed_winding else values)
+    return loops
 
 
 def update_dirty(scene, depsgraph):

@@ -22,6 +22,8 @@ def create_materials(stage, directory=None, light_objects=None):
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
         if preview_only:
             material['mme_preview_model_id'] = entry['id']
+            if entry.get('materialReadOnlyReason'):
+                material['mme_material_read_only_reason'] = entry['materialReadOnlyReason']
         else:
             material['mme_model_material_id'] = entry['id']
         material['mme_model_material_source'] = stage['source']['sha256']
@@ -42,6 +44,30 @@ def import_uvs(mesh, source):
         for loop in mesh.loops:
             value = coordinates[loop.vertex_index]
             uv.data[loop.index].uv = (value['x'], 1 - value['y'])
+
+
+def display_triangle_indices(source):
+    """Orient GX triangles toward their stored normals for Blender display."""
+    indices = source['triangleIndices']
+    normals = source.get('normals')
+    if not normals or source.get('envelopes'):
+        return indices, False
+    positions = source['positions']
+    score = 0.0
+    for offset in range(0, len(indices), 3):
+        a, b, c = (Vector(tuple(positions[indices[offset + corner]][axis]
+                                  for axis in ('x', 'y', 'z'))) for corner in range(3))
+        face = (b - a).cross(c - a)
+        if face.length_squared == 0:
+            continue
+        normal = Vector(tuple(normals[indices[offset]][axis] for axis in ('x', 'y', 'z')))
+        score += face.normalized().dot(normal)
+    if score >= 0:
+        return indices, False
+    result = []
+    for offset in range(0, len(indices), 3):
+        result.extend((indices[offset], indices[offset + 2], indices[offset + 1]))
+    return result, True
 
 
 def fingerprint(obj, protect_all=False):
@@ -329,12 +355,15 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
 
         illumination = rgb('Stage Ambient Light', (0, 0, 0) if diffuse_lighting else (1, 1, 1))
         if diffuse_lighting:
+            material_ambient = rgb('Stage Material Ambient',
+                                   linear_color(preview.get('ambientColor') or [1, 1, 1, 1]))
             for source in active_lights:
                 if source['type'] != 'ambient':
                     continue
                 obj = (light_objects or {}).get(source.get('id'))
                 contribution = color_scale('Stage Ambient Light Color', light_color(source, obj),
                                            light_strength(source, obj))
+                contribution = color_scale('Stage Material Ambient Color', contribution, material_ambient)
                 illumination = color_add('Stage Ambient Light Add', illumination, contribution)
         specular_light = rgb('Stage Specular Light', (0, 0, 0))
         first_diffuse = first_specular = True

@@ -1,13 +1,15 @@
 """Green Greens keeps its color texture separate from its grayscale specular map."""
 import os
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import bpy
+from mathutils import Vector
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
-from melee_map_editor import scene
+from melee_map_editor import material_properties, scene
 from melee_map_editor.protocol import read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -85,5 +87,56 @@ with tempfile.TemporaryDirectory(prefix='mme-grgb-lightmap-') as tmp:
         texture = nodes['Stage Texture' if reflection_index == 0 else 'Stage Texture 2']
         assert texture.inputs['Vector'].is_linked
         assert nodes['Stage Extension Texture']
+
+    lit_dobj = next(node for node in metal_group['nodes'] if node['kind'] == 'dobj'
+                    and node['index'] == 1
+                    and metal_nodes_by_id[node['ownerId']]['index'] == 52)
+    lit_target = next(node for node in metal_group['nodes']
+                      if node['kind'] == 'pobj' and node.get('ownerId') == lit_dobj['id'])
+    definition = next(entry for entry in stage['editableMaterialProperties'] if entry['id'] == lit_target['id'])
+    assert definition['ambient'] == [128, 128, 134]
+    assert [layer['lightmapFlags'] for layer in definition['textures']] == [0x10, 0x20]
+    lit_obj = next(obj for obj in bpy.context.scene.objects if obj.get('mme_id') == lit_target['id'])
+    source_mesh = read(tmp / 'session/models/group-002' /
+                       next(name for name in metal_group['meshes']
+                            if read(tmp / 'session/models/group-002' / name)['id'] == lit_target['id']))
+    source_indices = source_mesh['triangleIndices']
+    assert list(lit_obj.data.polygons[0].vertices) == [source_indices[0], source_indices[2], source_indices[1]]
+    assert lit_obj.data['mme_reversed_source_winding']
+    assert all(polygon.use_smooth for polygon in lit_obj.data.polygons)
+    source_normal = Vector(tuple(source_mesh['normals'][source_indices[0]][axis]
+                                 for axis in ('x', 'z', 'y')))
+    source_normal.y *= -1
+    assert source_normal.dot(lit_obj.data.polygons[0].normal) > .9
+    material = lit_obj.active_material
+    assert len(material.mme_texture_layers) == 2
+    assert [layer['mme_role'] for layer in material.mme_texture_layers] == [0x10, 0x20]
+    ambient = material.node_tree.nodes['Stage Material Ambient']
+    expected_ambient = [material_properties.linear(value / 255) for value in (128, 128, 134)]
+    assert all(abs(a - b) < 1e-6 for a, b in zip(ambient.outputs[0].default_value, expected_ambient))
+    assert material_properties.edits(bpy.context.scene, stage) is None
+
+    material.mme_ambient = [material_properties.linear(value / 255) for value in (64, 32, 16)]
+    material.mme_specular = [material_properties.linear(value / 255) for value in (10, 20, 30)]
+    material.mme_shininess = 77
+    material.mme_texture_layers[0].blend = .25
+    material.mme_texture_layers[1].blend = .75
+    edit = next(entry for entry in material_properties.edits(bpy.context.scene, stage)['materials']
+                if entry['id'] == lit_target['id'])
+    assert edit == {'id': lit_target['id'], 'ambient': [64, 32, 16], 'specular': [10, 20, 30],
+                    'shininess': 77, 'textureBlends': [.25, .75]}
+    output = tmp / 'material-edited.dat'
+    scene.apply(bpy.context.scene, CLI, 'dotnet', output)
+    data = output.read_bytes()
+    integer = lambda offset: struct.unpack_from('>I', data, 32 + offset)[0]
+    floating = lambda offset: struct.unpack_from('>f', data, 32 + offset)[0]
+    mobj = integer(lit_dobj['sourceOffset'] + 8)
+    material_offset = integer(mobj + 12)
+    assert list(data[32 + material_offset:32 + material_offset + 3]) == [64, 32, 16]
+    assert list(data[32 + material_offset + 8:32 + material_offset + 11]) == [10, 20, 30]
+    assert floating(material_offset + 16) == 77
+    first = integer(mobj + 8)
+    second = integer(first + 4)
+    assert floating(first + 0x44) == .25 and floating(second + 0x44) == .75
 
 print('GRGB LIGHTMAP PREVIEW PASS: diffuse/specular roles and reflection-mapped metal materials')

@@ -505,8 +505,11 @@ and leaves shared image color-space settings and DAT export data unchanged.
 
 The additive `editableMaterialProperties` manifest catalog identifies eligible
 static model materials by their source mesh ID. It includes original RGB bytes,
-material alpha, independent alpha source, optional texture blend, MOBJ render flags, the editable flag
-mask, standard transparency mode and per-property availability. Legacy
+ambient/specular RGB, shininess, material alpha, independent alpha source,
+MOBJ render flags, the editable flag mask, standard transparency mode, and an
+ordered `textures` list. Each texture entry records its source offset, lightmap
+role, coordinate source, color/alpha operations, blend value, and blend-edit
+permission. The legacy first-layer `textureBlend` fields remain for compatibility. Legacy
 sessions without this catalog retain their old permissions.
 
 `edits/materials.json` accepts only the current protocol and a nonempty material
@@ -516,15 +519,19 @@ list, for example:
 {
   "protocolVersion": 2,
   "materials": [
-    {"id": "<source-mesh-id>", "diffuse": [30, 100, 210], "alpha": 0.375,
-     "textureBlend": 0.75, "alphaSource": 1,
+    {"id": "<source-mesh-id>", "ambient": [64, 64, 70],
+     "diffuse": [30, 100, 210], "specular": [255, 255, 255],
+     "shininess": 40, "alpha": 0.375,
+     "textureBlends": [0.75, 0.5], "alphaSource": 1,
      "transparencyMode": 1, "renderFlags": 1610612756}
   ]
 }
 ```
 
-Each entry changes at least one optional field. Diffuse components are integer
-bytes; alpha/blend must be finite in [0,1]. The backend recomputes eligibility
+Each entry changes at least one optional field. Color components are integer
+bytes; alpha and every texture blend must be finite in [0,1], while shininess
+must be finite in [0,128]. `textureBlends` must match the source TObj count and
+can change only layers using a BLEND operation. The backend recomputes eligibility
 and field permissions from source.dat. `transparencyMode` is 0 opaque, 1 alpha
 blend, 2 additive, or 3 subtractive. `renderFlags` may change only the declared
 mask: diffuse/specular/toon, depth offset, effect, shadow, depth always, all
@@ -535,8 +542,8 @@ animated targets, and validates the entire batch before output publication.
 Materials no longer used after geometry replacement are rejected rather than
 silently dropping edits.
 
-The writer appends copied MOBJ/material records, copies the first TOBJ only
-when its blending value changes, and copies or creates a 12-byte PE descriptor
+The writer appends copied MOBJ/material records, copies and relinks the complete
+TObj chain when any layer's blending value changes, and copies or creates a 12-byte PE descriptor
 when transparency needs one. Standard transparency updates MOBJ XLU and PE
 blend mode/factors together. Depth-always and no-depth-write changes are also
 mirrored into an existing PE descriptor. It retains relocation entries and all other

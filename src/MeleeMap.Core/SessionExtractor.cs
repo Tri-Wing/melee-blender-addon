@@ -133,6 +133,9 @@ public static class SessionExtractor
             }).ToArray();
             // Preview-only materials never enter the reusable export material catalog.
             var catalogIds = previewMaterials.Select(m => m.Id).ToHashSet();
+            var editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity);
+            var editableMaterialIds = editableMaterialProperties.Select(material => material.Id).ToHashSet();
+            var editableModelsById = editableModels.ToDictionary(model => model.Id);
             var nodesById = identity.Nodes.ToDictionary(n => n.Id);
             var basePreviews = meshes.Where(m => !catalogIds.Contains(m.Node.Id)).Select(m =>
             {
@@ -144,7 +147,13 @@ public static class SessionExtractor
                 var material = new ModelMaterial(m.Node.Id,
                     $"Base Material G{m.Node.GroupIndex:D3} J{m.Joint.Index:D3} D{m.Dobj.Index:D3}",
                     m.Mobj!.Value, reader.Pointer(m.Mobj.Value + 8) != null);
-                return new { material.Id, material.Name, material.UsesUv,
+                string? materialReadOnlyReason = editableMaterialIds.Contains(material.Id) ? null
+                    : editableModelsById.TryGetValue(material.Id, out var target) && target.PositionsOnly
+                        ? "Material editing is unavailable for this object because it uses material animation."
+                        : editableModelsById.ContainsKey(material.Id)
+                            ? "Material editing is unavailable for this object because its source texture or render configuration is not supported for DAT export."
+                            : "Material editing is unavailable for this object because its geometry and material layout cannot be safely exported.";
+                return new { material.Id, material.Name, material.UsesUv, materialReadOnlyReason,
                     preview = TexturePreview.Extract(stage.Layout, material, temporary) };
             }).ToArray();
             var baselineFiles = Directory.GetFiles(temporary, "*", SearchOption.AllDirectories)
@@ -165,7 +174,7 @@ public static class SessionExtractor
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "material-animations", "shape-animations", "animation-export", "dynamic-collision-editing", "stage-parameters" },
-                editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity),
+                editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,

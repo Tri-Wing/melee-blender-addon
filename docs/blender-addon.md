@@ -417,8 +417,9 @@ envelope deformation, and transform-animation playback. Positions use
 `(X, -Z, Y)` exactly once at the boundary.
 The source hierarchy is retained, including separate JOBJ/DOBJ/POBJ identities.
 Affine parent matrices retain shear without Blender's local TRS decomposition.
-Rigid meshes retain decoded normals; deformed preview meshes use generated
-normals. Material, texture, shape, and light animation, billboard behavior,
+Rigid meshes retain decoded normals. GX triangles whose winding opposes those
+normals are reversed for Blender display and restored to their original order
+on export. Deformed preview meshes use generated normals. Material, texture, shape, and light animation, billboard behavior,
 constraints, instanced drawing, and stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow
 geometry export; unsupported preview meshes remain read-only.
@@ -517,7 +518,8 @@ and Gamma 1, to preserve the saturated colors used by Melee.
 After reloading the add-on and importing a fresh DAT session, select a supported
 static model and open **Material Properties > Melee Material**. The panel
 supports **Use Vertex Colors**, **Alpha Source**, **Diffuse Color**, **Material Alpha**,
-**Texture Blend**, and **Transparency**. Transparency can be Opaque, Alpha
+**Ambient Color**, **Specular Color**, **Shininess**, per-layer **Texture Blend**, and
+**Transparency**. Transparency can be Opaque, Alpha
 Blend, Additive, or Subtractive; changing it updates both the MOBJ render queue
 flag and the PE blend state. For source vertex-color materials, clearing **Use Vertex
 Colors** switches the exported MOBJ to material color and material alpha, then
@@ -525,8 +527,11 @@ exposes the diffuse and alpha controls. The painted color attribute remains on
 the mesh and can be enabled again. Changes
 update the preview immediately and are included in normal validation/export.
 Unavailable controls are disabled according to the source material's settings.
-Texture Blend is enabled only when the material uses a color or alpha BLEND
-operation.
+Multi-texture materials show each layer's diffuse/specular/ambient/extension
+role, UV or reflection coordinate source, and color operation. Texture Blend is
+enabled independently for layers using a color or alpha BLEND operation. Export
+copies and relinks the complete source TObj chain, preserving its images,
+transforms, coordinate selectors, roles, and unedited flags.
 
 **Alpha Source** is independent of RGB source and supports the four HSD modes:
 Compatibility, Material Alpha, Vertex Alpha, and Material × Vertex. Vertex
@@ -545,10 +550,16 @@ Unlit Melee materials keep the emission preview used for exact base colors.
 Lit materials also use emission, fed by explicit normal/light calculations that
 follow HSD's diffuse and Blinn-Phong specular equations. Specular uses the DAT
 material's RGB and shininess and never reflects Blender's HDRI or world
-environment. Fresh imports use the selected stage LOBJ set's ambient, infinite,
+environment. The ambient LOBJ contribution is multiplied by the material's
+ambient RGB before directional and positional diffuse light is added. Fresh
+imports use the selected stage LOBJ set's ambient, infinite,
 point, and spot lights, including diffuse/specular flags and attenuation. The
 main HSD texture-lightmap passes are preserved; custom TEV programs and the
 complete GX material-channel routing remain approximate.
+
+Preview-only materials that remain ineligible show an object-specific reason in
+the panel, such as material animation or an unsupported texture/render layout,
+instead of describing the entire session as read-only.
 
 ## Stage lights
 

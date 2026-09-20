@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 import bmesh
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty,
+                       FloatVectorProperty, IntProperty, StringProperty)
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from . import animations, collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
 from .protocol import StageError, read, run
@@ -705,6 +706,14 @@ def load_animation(_):
         pass
 
 
+class MME_TextureLayerProperties(bpy.types.PropertyGroup):
+    def update_blend(self, context):
+        material_properties.update(self.id_data, context)
+
+    blend: FloatProperty(name='Blend', min=0, max=1, default=1,
+                         update=update_blend, options=set())
+
+
 class MME_PT_material(bpy.types.Panel):
     bl_label = 'Melee Material'
     bl_space_type = 'PROPERTIES'
@@ -721,7 +730,8 @@ class MME_PT_material(bpy.types.Panel):
         info = material_properties.definition(material)
         layout = self.layout
         if not info:
-            layout.label(text='Material properties are read-only in this session.', icon='LOCKED')
+            layout.label(text=material.get('mme_material_read_only_reason',
+                         'This material uses unsupported source data.'), icon='LOCKED')
             return
         if info['canToggleVertexColor']:
             layout.prop(material, 'mme_use_vertex_color')
@@ -739,11 +749,35 @@ class MME_PT_material(bpy.types.Panel):
         layout.prop(material, 'mme_transparency')
         if info['canEditDiffuse'] or not material.mme_use_vertex_color:
             layout.prop(material, 'mme_diffuse')
+        if material.mme_diffuse_lighting:
+            layout.prop(material, 'mme_ambient')
+        if material.mme_specular_lighting:
+            layout.prop(material, 'mme_specular')
+            layout.prop(material, 'mme_shininess')
         uses_material_alpha = alpha_source in (1, 3) or (alpha_source == 0 and not material.mme_use_vertex_color)
         if info['canEditAlpha'] or uses_material_alpha:
             layout.prop(material, 'mme_alpha')
-        if info['canEditBlend']:
+        texture_definitions = info.get('textures') or []
+        if len(texture_definitions) == 1 and info['canEditBlend']:
             layout.prop(material, 'mme_texture_blend')
+        elif len(texture_definitions) > 1:
+            roles = ((0x10, 'Diffuse'), (0x20, 'Specular'), (0x40, 'Ambient'),
+                     (0x80, 'Extension'), (0x100, 'Shadow'))
+            operations = ('None', 'Alpha Mask', 'RGB Mask', 'Blend', 'Modulate',
+                          'Replace', 'Pass', 'Add', 'Subtract')
+            box = layout.box()
+            box.label(text='Texture Layers')
+            for index, (source, layer) in enumerate(zip(texture_definitions, material.mme_texture_layers)):
+                role = ' + '.join(label for bit, label in roles if source.get('lightmapFlags', 0) & bit) or 'Unassigned'
+                coordinate = ('Reflection' if source.get('coordinateType') == 1
+                              else f"UV {source.get('texCoord', 0)}")
+                operation = source.get('colorOperation', 0)
+                name = operations[operation] if 0 <= operation < len(operations) else f'Operation {operation}'
+                column = box.column(align=True)
+                column.label(text=f'Layer {index + 1}: {role} · {coordinate} · {name}')
+                row = column.row()
+                row.enabled = source.get('canEditBlend', False)
+                row.prop(layer, 'blend')
         if info.get('editableRenderFlagsMask'):
             box = layout.box()
             box.label(text='Render Flags')
@@ -757,8 +791,7 @@ class MME_PT_material(bpy.types.Panel):
             box.prop(material, 'mme_all_textures')
             box.prop(material, 'mme_effect')
             box.prop(material, 'mme_user_render_flag')
-        if info['canEditDiffuse'] or info['canEditAlpha'] or info['canEditBlend'] or info['canToggleVertexColor']:
-            layout.label(text='Exports to models using this Blender material.')
+        layout.label(text='Exports to models using this Blender material.')
         if material.get('mme_material_error'):
             layout.label(text=material['mme_material_error'], icon='ERROR')
 
@@ -766,7 +799,7 @@ class MME_PT_material(bpy.types.Panel):
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
-           MME_PT_edge_raw, MME_PT_material)
+           MME_PT_edge_raw, MME_TextureLayerProperties, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
 
@@ -777,10 +810,17 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Material.mme_diffuse = FloatVectorProperty(name='Diffuse Color', subtype='COLOR', size=3, min=0, max=1,
         default=(1, 1, 1), update=material_properties.update, options=set())
+    bpy.types.Material.mme_ambient = FloatVectorProperty(name='Ambient Color', subtype='COLOR', size=3, min=0, max=1,
+        default=(0, 0, 0), update=material_properties.update, options=set())
+    bpy.types.Material.mme_specular = FloatVectorProperty(name='Specular Color', subtype='COLOR', size=3, min=0, max=1,
+        default=(1, 1, 1), update=material_properties.update, options=set())
+    bpy.types.Material.mme_shininess = FloatProperty(name='Shininess', min=0, max=128, default=50,
+        update=material_properties.update, options=set())
     bpy.types.Material.mme_alpha = FloatProperty(name='Material Alpha', min=0, max=1, default=1,
         update=material_properties.update, options=set())
     bpy.types.Material.mme_texture_blend = FloatProperty(name='Texture Blend', min=0, max=1, default=1,
         update=material_properties.update, options=set())
+    bpy.types.Material.mme_texture_layers = CollectionProperty(type=MME_TextureLayerProperties)
     bpy.types.Material.mme_use_vertex_color = BoolProperty(name='Use Vertex Colors', default=False,
         update=material_properties.update, options=set())
     bpy.types.Material.mme_transparency = EnumProperty(name='Transparency', items=(
@@ -830,7 +870,8 @@ def unregister():
     if load_animation in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_animation)
     animations.clear_cache()
-    for prop in ('mme_diffuse', 'mme_alpha', 'mme_texture_blend', 'mme_use_vertex_color', 'mme_transparency', 'mme_alpha_source',
+    for prop in ('mme_diffuse', 'mme_ambient', 'mme_specular', 'mme_shininess', 'mme_alpha',
+                 'mme_texture_blend', 'mme_texture_layers', 'mme_use_vertex_color', 'mme_transparency', 'mme_alpha_source',
                  *(name for name, _ in material_properties.RENDER_FLAGS)):
         delattr(bpy.types.Material, prop)
     for prop in SCENE_PROPS:

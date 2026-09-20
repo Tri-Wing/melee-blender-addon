@@ -10,6 +10,45 @@ public class MaterialPropertiesTests
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
 
+    [CorpusFact]
+    public void GreenGreensTwoLayerMaterialEditsLightingColorsAndBothTextureBlends()
+    {
+        string sourcePath = Path.Combine(CorpusTests.CorpusDirectory, "GrGb.dat");
+        if (!File.Exists(sourcePath)) return;
+        string root = Path.Combine(Path.GetTempPath(), "mme-grgb-material-" + Guid.NewGuid().ToString("N"));
+        string session = Path.Combine(root, "session"), output = Path.Combine(root, "out.dat");
+        try
+        {
+            var source = new StageArchive(sourcePath);
+            SessionExtractor.Extract(source, session);
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session, "stage.json")));
+            var definition = manifest.RootElement.GetProperty("editableMaterialProperties").EnumerateArray()
+                .Single(entry => entry.GetProperty("mobjOffset").GetInt32() == 0x6760);
+            string id = definition.GetProperty("id").GetString()!;
+            Assert.Equal(new[] { 128, 128, 134 }, definition.GetProperty("ambient").EnumerateArray().Select(v => v.GetInt32()));
+            Assert.Equal(2, definition.GetProperty("textures").GetArrayLength());
+            Assert.Equal(new[] { 0x10, 0x20 }, definition.GetProperty("textures").EnumerateArray()
+                .Select(texture => texture.GetProperty("lightmapFlags").GetInt32()));
+            File.WriteAllText(Path.Combine(session, "edits/materials.json"), JsonSerializer.Serialize(
+                new MaterialPropertyEdits(2, [new(id, Ambient: [64, 32, 16], Specular: [10, 20, 30],
+                    Shininess: 77, TextureBlends: [.25f, .75f])]), Json));
+
+            SessionApplier.Apply(session, output);
+            var written = new StageArchive(output); var r = new ArchiveDataReader(written.Layout);
+            int mobj = r.Pointer(0xF418 + 8)!.Value;
+            Assert.NotEqual(0x6760, mobj);
+            int material = r.Pointer(mobj + 12)!.Value;
+            Assert.Equal(new[] { 64, 32, 16 }, Enumerable.Range(0, 3).Select(i => (int)r.Byte(material + i)));
+            Assert.Equal(new[] { 10, 20, 30 }, Enumerable.Range(0, 3).Select(i => (int)r.Byte(material + 8 + i)));
+            Assert.Equal(77, r.Float(material + 16));
+            int first = r.Pointer(mobj + 8)!.Value, second = r.Pointer(first + 4)!.Value;
+            Assert.Equal(.25f, r.Float(first + 0x44)); Assert.Equal(.75f, r.Float(second + 0x44));
+            Assert.Null(r.Pointer(second + 4));
+            Assert.Equal(0x30010, r.Int(first + 0x40)); Assert.Equal(0x30020, r.Int(second + 0x40));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [PrimaryFixtureFact]
     public void PropertyEditsCloneOnlySelectedMaterialAndComposeWithGeometryAndAssignments()
     {
@@ -58,8 +97,13 @@ public class MaterialPropertiesTests
             ([valid, new(animated.Id, [1,2,3])], "MATERIAL_EDIT_TARGET"),
             ([new(target.Id, [256,0,0])], "MATERIAL_DIFFUSE"),
             ([new(target.Id, [1,2])], "MATERIAL_DIFFUSE"),
+            ([new(target.Id, Ambient: [256,0,0])], "MATERIAL_AMBIENT"),
+            ([new(target.Id, Specular: [1,2])], "MATERIAL_SPECULAR"),
+            ([new(target.Id, Shininess: 129)], "MATERIAL_SHININESS"),
             ([new(target.Id, Alpha: -1)], "MATERIAL_ALPHA"),
             ([new(target.Id, TextureBlend: 2)], "MATERIAL_BLEND"),
+            ([new(target.Id, TextureBlends: [])], "MATERIAL_BLEND"),
+            ([new(target.Id, TextureBlends: [2])], "MATERIAL_BLEND"),
             ([new(target.Id, RenderFlags: 0)], "MATERIAL_RENDER_FLAGS"),
             ([new(target.Id, TransparencyMode: 4)], "MATERIAL_TRANSPARENCY"),
             ([new(target.Id, AlphaSource: 4)], "MATERIAL_ALPHA_SOURCE"),
