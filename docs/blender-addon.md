@@ -324,9 +324,17 @@ The preview applies the source UV repeat, scale, rotation, translation, clamp,
 and mirror settings without changing the editable UV map. The UV Editor shows
 the original image; the viewport shows it with the source material transforms.
 Standard multi-texture materials using the first two GX UV channels apply each
-TObj in source order. Both UV channels and each layer's independent transform,
-color operation, and blend value are retained. This includes the two moving
-water layers on GrYt Group 001 / JOBJ 008 / DOBJ 031.
+TObj in source order within its HSD lightmap pass. Diffuse/ambient textures,
+specular textures, and extension textures are routed separately. Both UV channels
+and each layer's independent transform, color operation, and blend value are
+retained. This includes the two moving water layers on GrYt Group 001 / JOBJ 008 /
+DOBJ 031 and the colored diffuse plus grayscale specular textures on GrGb Group
+001's first two POBJs.
+
+Reflection-mapped metallic materials generate coordinates from the camera-space
+surface normal, matching HSD's environment-map projection before applying the
+texture transform. GrGb Group 002 / JOBJ 052 / DOBJ 007 and JOBJ 053 / DOBJ 004
+use this path.
 
 The texture preview also uses supported MOBJ lighting flags and imported LOBJ
 descriptor values. Full TEV channel routing, mip filtering, animated materials
@@ -479,8 +487,9 @@ Material previews are independent of export-material eligibility. Static meshes
 using vertex-color materials (for example GrSt Group 003 / JOBJ 004 / DOBJ 013)
 and read-only meshes also receive their supported base textures. These previews
 do not make the source materials available for assignment to replacement
-geometry. Unsupported texture-coordinate generators and custom TEV programs
-retain the existing preview limitations.
+geometry. Highlight, shadow, toon, gradation, and other unsupported
+texture-coordinate generators, along with custom TEV programs, retain the
+existing preview limitations.
 
 ## Alpha previews
 
@@ -538,7 +547,8 @@ follow HSD's diffuse and Blinn-Phong specular equations. Specular uses the DAT
 material's RGB and shininess and never reflects Blender's HDRI or world
 environment. Fresh imports use the selected stage LOBJ set's ambient, infinite,
 point, and spot lights, including diffuse/specular flags and attenuation. The
-complete GX material-channel and texture-lightmap routing remains approximate.
+main HSD texture-lightmap passes are preserved; custom TEV programs and the
+complete GX material-channel routing remain approximate.
 
 ## Stage lights
 

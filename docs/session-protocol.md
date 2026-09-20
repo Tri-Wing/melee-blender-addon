@@ -344,7 +344,11 @@ source animation structures byte-for-byte.
 New `modelMaterials` entries include `preview: { color, texture, textures, warning }`.
 `texture` remains the first-layer compatibility alias. `textures` stores the
 ordered TObj layers; each contains its `file`, dimensions, wrap modes, repeats,
-source SRT, color operation/blend, and UV-channel index.
+source SRT, color operation/blend, UV-channel index, `coordinateType`, and
+`lightmapFlags`. Coordinate type 0 uses mesh UVs; type 1 generates reflection
+coordinates from the camera-space surface normal. The lightmap field preserves
+the HSD diffuse, specular, ambient, extension, and shadow routing bits (`0x10`
+through `0x100`).
 Decoded top-left BGRA TGA files live under `models/textures/` and participate in
 `baselineFiles` hashes alongside model/collision JSON. Existing sessions without
 preview fields remain valid. Preview assets never supply DAT texture data.
@@ -355,8 +359,9 @@ size. Dimensions are limited to 2048 per axis; unsupported or malformed texture
 previews produce a warning and solid fallback rather than blocking extraction.
 Blender loads each image as sRGB, packs it, and creates an unlit preview shader.
 Source SRT follows `tobj.c:MakeTextureMtx` (S @ R @ T), conjugated by the adapter's
-V flip, with independent wrap handling. These nodes are visual aids and are not
-used by apply.
+V flip, with independent wrap handling. Reflection maps follow the engine's
+camera-space normal projection before applying the same TObj SRT. These nodes are
+visual aids and are not used by apply.
 
 ### Animated-material rigid meshes
 
@@ -481,9 +486,13 @@ white when `preview.useVertexColor` selects mesh color instead. REPLACE (5)
 retains the texture color. BLEND (3) mixes the base color and texture using
 `preview.texture.colorBlend` (the source TOBJ blending value). GrNLa Group 003 /
 JOBJ 003 / DOBJ 003 uses 75% diffuse RGB (38, 25, 25) and 25% texture. Older sessions without these fields keep their
-previous preview behavior. Full specular/game lighting remains approximate.
+previous preview behavior. Texture layers assigned to diffuse/ambient and
+specular lightmap passes are evaluated separately before the corresponding HSD
+lighting calculation; extension layers are applied afterward. Other TEV details
+remain approximate.
 Regression coverage includes GrNLa Group 003 / JOBJ 004 / DOBJ 000, whose diffuse
-RGB is (12, 25, 76), and GrSt's vertex-color material.
+RGB is (12, 25, 76), GrSt's vertex-color material, and the colored diffuse plus
+grayscale specular maps on GrGb Group 001's first two POBJs.
 
 For BLEND previews, interpolation occurs in GX's stored color-value domain.
 Blender's sRGB texture samples are converted back to those values before mixing

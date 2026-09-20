@@ -118,6 +118,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
     output = nodes.new('ShaderNodeOutputMaterial')
     diffuse_lighting = preview.get('diffuseLighting', False)
     specular_lighting = preview.get('specularLighting', False)
+    specular_color_input = None
+    surface_result = None
     shader = nodes.new('ShaderNodeEmission')
     shader.name = 'Stage Surface'
     color_input = shader.inputs['Color']
@@ -385,6 +387,7 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             specular_color.blend_type = 'MULTIPLY'
             specular_color.inputs[0].default_value = 1
             specular_color.inputs[1].default_value = (*linear_color(specular), 1)
+            specular_color_input = specular_color.inputs[1]
             links.new(specular_light, specular_color.inputs[2])
             add = nodes.new('ShaderNodeMixRGB')
             add.name = 'Stage Specular Add'
@@ -393,7 +396,7 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             links.new(result, add.inputs[1])
             links.new(specular_color.outputs[0], add.inputs[2])
             result = add.outputs[0]
-        links.new(result, shader.inputs['Color'])
+        surface_result = result
         geometry.location = (-900, -500)
         diffuse.location = (50, -150)
     links.new(shader.outputs[0], output.inputs['Surface'])
@@ -403,6 +406,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
     if warning:
         material['mme_preview_warning'] = warning
     if not textures or directory is None:
+        if surface_result is not None:
+            links.new(surface_result, shader.inputs['Color'])
         configure_alpha_preview(material, preview.get('alpha'))
         return
     directory = Path(directory).resolve()
@@ -421,10 +426,37 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         sampler.image = image
         sampler.interpolation = 'Linear'
         sampler.extension = 'EXTEND'
-        uv = nodes.new('ShaderNodeUVMap')
-        uv.name = 'Stage UV' if index == 0 else f'Stage UV {index + 1}'
-        coordinate = layer.get('texCoord', 0)
-        uv.uv_map = 'UVMap' if coordinate == 0 else f'UVMap.{coordinate:03d}'
+        coordinate_type = layer.get('coordinateType', 0)
+        if coordinate_type == 1:
+            geometry = nodes.new('ShaderNodeNewGeometry')
+            geometry.name = 'Stage Reflection Normal' if index == 0 else f'Stage Reflection Normal {index + 1}'
+            camera_normal = nodes.new('ShaderNodeVectorTransform')
+            camera_normal.name = ('Stage Reflection Camera Normal' if index == 0
+                                  else f'Stage Reflection Camera Normal {index + 1}')
+            camera_normal.vector_type = 'NORMAL'
+            camera_normal.convert_from = 'WORLD'
+            camera_normal.convert_to = 'CAMERA'
+            links.new(geometry.outputs['Normal'], camera_normal.inputs['Vector'])
+            separate = nodes.new('ShaderNodeSeparateXYZ')
+            links.new(camera_normal.outputs['Vector'], separate.inputs['Vector'])
+            reflection = nodes.new('ShaderNodeCombineXYZ')
+            reflection.name = ('Stage Reflection Coordinates' if index == 0
+                               else f'Stage Reflection Coordinates {index + 1}')
+            for axis in range(2):
+                scale = nodes.new('ShaderNodeMath')
+                scale.operation = 'MULTIPLY_ADD'
+                scale.inputs[1].default_value = .5
+                scale.inputs[2].default_value = .5
+                links.new(separate.outputs[axis], scale.inputs[0])
+                links.new(scale.outputs[0], reflection.inputs[axis])
+            reflection.inputs[2].default_value = 0
+            coordinates = reflection.outputs[0]
+        else:
+            uv = nodes.new('ShaderNodeUVMap')
+            uv.name = 'Stage UV' if index == 0 else f'Stage UV {index + 1}'
+            coordinate = layer.get('texCoord', 0)
+            uv.uv_map = 'UVMap' if coordinate == 0 else f'UVMap.{coordinate:03d}'
+            coordinates = uv.outputs['UV']
         matrix = preview_matrix(layer)
         combine = nodes.new('ShaderNodeCombineXYZ')
         combine.name = 'Stage Texture Coordinates' if index == 0 else f'Stage Texture Coordinates {index + 1}'
@@ -432,7 +464,7 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             dot = nodes.new('ShaderNodeVectorMath')
             dot.operation = 'DOT_PRODUCT'
             dot.inputs[1].default_value = tuple(matrix[axis][i] for i in range(3))
-            links.new(uv.outputs['UV'], dot.inputs[0])
+            links.new(coordinates, dot.inputs[0])
             add = nodes.new('ShaderNodeMath')
             add.operation = 'ADD'
             add.inputs[1].default_value = matrix[axis][3]
@@ -450,51 +482,39 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
                 value = wrapped.outputs[0]
             links.new(value, combine.inputs[axis])
         links.new(combine.outputs[0], sampler.inputs['Vector'])
-        uv.location = (-900, -index * 260)
+        if coordinate_type == 0:
+            uv.location = (-900, -index * 260)
         combine.location = (-550, -index * 260)
         sampler.location = (-300, -index * 260)
         samplers.append(sampler)
 
-    operation = texture.get('colorOperation', 5)
-    if len(textures) == 1 and operation in (3, 4):
-        tint = nodes.new('ShaderNodeMixRGB')
-        tint.name = 'Stage Diffuse Tint'
-        tint.blend_type = 'MULTIPLY' if operation == 4 else 'MIX'
-        tint.inputs[0].default_value = 1 if operation == 4 else texture.get('colorBlend', 1)
-        if operation == 3:
-            # GX interpolates stored color values, not scene-linear light.
-            # Decode the mixed result only after the TEV blend calculation.
-            tint.inputs[1].default_value = (1, 1, 1, 1) if preview.get('useVertexColor') else color
-            encoded = color_transfer(material, samplers[0].outputs['Color'], to_linear=False)
-            links.new(encoded, tint.inputs[2])
-            result = color_transfer(material, tint.outputs[0], to_linear=True)
-            links.new(result, color_input)
-        else:
-            tint.inputs[1].default_value = (*linear, 1)
-            links.new(samplers[0].outputs['Color'], tint.inputs[2])
-            links.new(tint.outputs[0], color_input)
-        tint.location = (100, 100)
-    elif len(textures) > 1:
-        # HSD applies TObjs in list order. Perform the TEV arithmetic in encoded
-        # byte color space, then decode the final result for Blender.
+    def texture_chain(label, selected, base):
+        """Apply one HSD lightmap pass in stored byte-color space."""
         encoded_result = None
-        base = (1, 1, 1, 1) if preview.get('useVertexColor') else color
-        for index, (layer, sampler) in enumerate(zip(textures, samplers)):
+        for pass_index, (index, layer, sampler) in enumerate(selected):
             encoded_texture = color_transfer(material, sampler.outputs['Color'], to_linear=False)
             operation = layer.get('colorOperation', 5)
             combine_color = nodes.new('ShaderNodeMixRGB')
-            combine_color.name = 'Stage Diffuse Tint' if index == 0 else f'Stage Texture Blend {index + 1}'
-            combine_color.inputs[1].default_value = base
+            combine_color.name = (label if pass_index == 0 else
+                                  f'Stage Texture Blend {pass_index + 1}' if label == 'Stage Diffuse Tint'
+                                  else f'{label} {pass_index + 1}')
+            if isinstance(base, (tuple, list)):
+                combine_color.inputs[1].default_value = base
+            else:
+                links.new(base, combine_color.inputs[1])
             if encoded_result is not None:
                 links.new(encoded_result, combine_color.inputs[1])
             links.new(encoded_texture, combine_color.inputs[2])
-            if operation == 3:
+            if operation == 1:
+                combine_color.blend_type = 'MIX'
+                links.new(sampler.outputs['Alpha'], combine_color.inputs[0])
+            elif operation == 3:
                 combine_color.blend_type = 'MIX'
                 combine_color.inputs[0].default_value = layer.get('colorBlend', 1)
             elif operation == 4:
                 combine_color.blend_type = 'MULTIPLY'
                 combine_color.inputs[0].default_value = 1
-            elif operation == 6:
+            elif operation in (0, 6):
                 combine_color.blend_type = 'MIX'
                 combine_color.inputs[0].default_value = 0
             elif operation == 7:
@@ -508,10 +528,58 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
                 combine_color.inputs[0].default_value = 1
             combine_color.location = (0, -index * 220)
             encoded_result = combine_color.outputs[0]
-        result = color_transfer(material, encoded_result, to_linear=True)
-        links.new(result, color_input)
+        return encoded_result
+
+    # HSD evaluates diffuse/ambient, specular, and extension lightmaps in
+    # separate passes. Older session files lack this field and retain their
+    # original all-diffuse behavior.
+    tagged = [(index, layer, sampler, layer.get('lightmapFlags', 0x10))
+              for index, (layer, sampler) in enumerate(zip(textures, samplers))]
+    diffuse_layers = [(i, layer, sampler) for i, layer, sampler, flags in tagged if flags & 0x50]
+    specular_layers = [(i, layer, sampler) for i, layer, sampler, flags in tagged if flags & 0x20]
+    extension_layers = [(i, layer, sampler) for i, layer, sampler, flags in tagged if flags & 0x80]
+
+    diffuse_result = None
+    if len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 4:
+        # Preserve the established preview response for the common single
+        # modulate texture: Blender already supplies the sampled color in linear space.
+        _, layer, sampler = diffuse_layers[0]
+        tint = nodes.new('ShaderNodeMixRGB')
+        tint.name = 'Stage Diffuse Tint'
+        tint.blend_type = 'MULTIPLY'
+        tint.inputs[0].default_value = 1
+        tint.inputs[1].default_value = (*linear, 1)
+        links.new(sampler.outputs['Color'], tint.inputs[2])
+        diffuse_result = tint.outputs[0]
+    elif len(diffuse_layers) == 1 and diffuse_layers[0][1].get('colorOperation', 5) == 5:
+        diffuse_result = diffuse_layers[0][2].outputs['Color']
     else:
-        links.new(samplers[0].outputs['Color'], color_input)
+        diffuse_encoded = texture_chain('Stage Diffuse Tint', diffuse_layers,
+                                        (1, 1, 1, 1) if preview.get('useVertexColor') else color)
+        diffuse_result = color_transfer(material, diffuse_encoded, to_linear=True) if diffuse_encoded else None
+    if diffuse_result is not None:
+        if diffuse_lighting or specular_lighting:
+            links.new(diffuse_result, color_input)
+        else:
+            surface_result = diffuse_result
+
+    if specular_color_input is not None and specular_layers:
+        specular = preview.get('specularColor') or [.25, .25, .25, 1]
+        specular_encoded = texture_chain('Stage Specular Texture', specular_layers, specular)
+        links.new(color_transfer(material, specular_encoded, to_linear=True), specular_color_input)
+
+    if extension_layers:
+        if surface_result is None:
+            base = nodes.new('ShaderNodeRGB')
+            base.name = 'Stage Extension Base'
+            base.outputs[0].default_value = (*linear, 1)
+            surface_result = base.outputs[0]
+        extension_base = color_transfer(material, surface_result, to_linear=False)
+        extension_encoded = texture_chain('Stage Extension Texture', extension_layers, extension_base)
+        surface_result = color_transfer(material, extension_encoded, to_linear=True)
+
+    if surface_result is not None:
+        links.new(surface_result, shader.inputs['Color'])
     nodes.active = samplers[0]
     samplers[0].select = True
     # A legible layout if the user opens the Shader Editor.

@@ -11,7 +11,8 @@ public sealed record MaterialPreview(float[] Color, PreviewTexture? Texture, str
     PreviewTexture[]? Textures = null);
 public sealed record PreviewTexture(string File, int Width, int Height, int WrapS, int WrapT,
     int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation,
-    int ColorOperation = 5, float ColorBlend = 1, int TexCoord = 0);
+    int ColorOperation = 5, float ColorBlend = 1, int TexCoord = 0, int LightmapFlags = 0,
+    int CoordinateType = 0);
 
 /// <summary>Read-only, bounded texture decoding for Blender previews; never used as DAT export input.</summary>
 public static class TexturePreview
@@ -44,9 +45,10 @@ public static class TexturePreview
                 int t = current.Value;
                 Require(textures.Count < 8 && seen.Add(t), "TEXTURE_PREVIEW", "Texture chain is too long or cyclic.");
                 int source = r.Int(t + 12);
+                int flags = r.Int(t + 0x40), coordinateType = flags & 15;
                 Require(r.Pointer(t) == null && source is >= 4 and <= 5
-                    && (r.Int(t + 0x40) & 0x0100000F) == 0,
-                    "TEXTURE_PREVIEW", "Base texture requires unsupported texture coordinates or a custom class.");
+                    && (flags & 0x01000000) == 0 && coordinateType is 0 or 1,
+                    "TEXTURE_PREVIEW", "Texture requires unsupported texture coordinates, bump mapping, or a custom class.");
                 textures.Add(Decode(t, source - 4));
                 current = r.Pointer(t + 4);
             }
@@ -103,7 +105,8 @@ public static class TexturePreview
                 float[] Vec(int at) => [r.Float(at), r.Float(at + 4), r.Float(at + 8)];
                 var scale = Vec(t + 0x1C); var rotation = Vec(t + 0x10); var translation = Vec(t + 0x28);
                 int wrapS = r.Int(t + 0x34), wrapT = r.Int(t + 0x38), repeatS = r.Byte(t + 0x3C), repeatT = r.Byte(t + 0x3D);
-                int colorOperation = (r.Int(t + 0x40) >> 16) & 15; float blend = r.Float(t + 0x44);
+                int flags = r.Int(t + 0x40);
+                int colorOperation = (flags >> 16) & 15; float blend = r.Float(t + 0x44);
                 Require(wrapS is >= 0 and <= 2 && wrapT is >= 0 and <= 2 && repeatS > 0 && repeatT > 0
                     && colorOperation is >= 0 and <= 8 && float.IsFinite(blend)
                     && scale.Concat(rotation).Concat(translation).All(float.IsFinite), "TEXTURE_PREVIEW", "Unsupported texture transform or color operation.");
@@ -111,7 +114,7 @@ public static class TexturePreview
                 string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
                 return new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation,
-                    colorOperation, Math.Clamp(blend, 0, 1), texCoord);
+                    colorOperation, Math.Clamp(blend, 0, 1), texCoord, flags & 0x1F0, flags & 15);
             }
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)

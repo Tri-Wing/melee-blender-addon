@@ -7,6 +7,47 @@ namespace MeleeMap.Core.Tests;
 public class TexturePreviewTests
 {
     [CorpusFact]
+    public void ExtractsGreenGreensDiffuseAndSpecularLightmapsSeparately()
+    {
+        string source = Path.Combine(CorpusTests.CorpusDirectory, "GrGb.dat");
+        if (!File.Exists(source)) return;
+        using var directory = new TemporaryDirectory();
+        var archive = new StageArchive(source);
+        foreach (int mobj in new[] { 0x27E84, 0x27D30 })
+        {
+            var preview = TexturePreview.Extract(archive.Layout,
+                new("test", "test", mobj, true), directory.Path);
+            Assert.Equal(2, preview.Textures!.Length);
+            Assert.Equal(new[] { 0x10, 0x20 }, preview.Textures.Select(texture => texture.LightmapFlags));
+            Assert.All(preview.Textures, texture => Assert.Equal(5, texture.ColorOperation));
+        }
+    }
+
+    [CorpusFact]
+    public void ExtractsGreenGreensReflectionMappedMetalMaterials()
+    {
+        string source = Path.Combine(CorpusTests.CorpusDirectory, "GrGb.dat");
+        if (!File.Exists(source)) return;
+        using var directory = new TemporaryDirectory();
+        var archive = new StageArchive(source);
+        var reflectionOnly = TexturePreview.Extract(archive.Layout,
+            new("test", "test", 0x62B8, true), directory.Path);
+        Assert.Null(reflectionOnly.Warning);
+        var reflectionTextures = reflectionOnly.Textures!;
+        Assert.Equal([1], reflectionTextures.Select(texture => texture.CoordinateType));
+        Assert.Equal([0x80], reflectionTextures.Select(texture => texture.LightmapFlags));
+        Assert.Equal([4], reflectionTextures.Select(texture => texture.ColorOperation));
+
+        var diffuseAndReflection = TexturePreview.Extract(archive.Layout,
+            new("test", "test", 0x6914, true), directory.Path);
+        Assert.Null(diffuseAndReflection.Warning);
+        var combinedTextures = diffuseAndReflection.Textures!;
+        Assert.Equal([0, 1], combinedTextures.Select(texture => texture.CoordinateType));
+        Assert.Equal([0x10, 0x80], combinedTextures.Select(texture => texture.LightmapFlags));
+        Assert.All(combinedTextures, texture => Assert.Equal(3, texture.ColorOperation));
+    }
+
+    [CorpusFact]
     public void ExtractsYoshisStoryWaterTextureLayersAndBothUvChannels()
     {
         string source = Path.Combine(CorpusTests.CorpusDirectory, "GrYt.dat");
