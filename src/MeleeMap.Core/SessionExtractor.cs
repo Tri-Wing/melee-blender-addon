@@ -37,6 +37,8 @@ public static class SessionExtractor
         Require(meshes.Count > 0, "EXTRACT_NO_MODEL_TARGET", "No supported model target found; session extraction has not been published.");
         var selected = meshes[0].Node;
         var groups = identity.Nodes.Where(n => n.Kind is "group" or "sentinel-group").ToArray();
+        var materialAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
+            group => StageMaterialAnimations.Read(stage, identity, group.GroupIndex));
         var vertexIds = collision.Vertices.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var lineIds = collision.Lines.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var jointIds = collision.Joints.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
@@ -59,6 +61,7 @@ public static class SessionExtractor
                 string groupPath = $"models/group-{group.GroupIndex:D3}";
                 var nodes = identity.Nodes.Where(n => n.GroupIndex == group.GroupIndex).ToArray();
                 var jointAnimations = StageJointAnimations.Read(stage, identity, group.GroupIndex);
+                var materialAnimations = materialAnimationsByGroup[group.GroupIndex];
                 Write($"{groupPath}/group.json", new
                 {
                     protocolVersion = ProtocolVersion, id = group.Id, index = group.GroupIndex, protectedIdentity = true, nodes,
@@ -72,7 +75,7 @@ public static class SessionExtractor
                         inverseBindMatrix = InverseBind(n.SourceOffset),
                         childSourceOffset = reader.Pointer(n.SourceOffset + 8), nextSourceOffset = reader.Pointer(n.SourceOffset + 12)
                     }),
-                    jointAnimations,
+                    jointAnimations, materialAnimations,
                     meshes = meshes.Where(m => m.Node.GroupIndex == group.GroupIndex).Select(m => $"mesh-{m.Node.Id}.json")
                 });
             }
@@ -172,8 +175,11 @@ public static class SessionExtractor
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0,
                     modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
+                    materialAnimationPreview = materialAnimationsByGroup.Values.Any(animations => animations.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
-                deferredCapabilities = new[] { "material-animations", "shape-animations", "animation-export", "dynamic-collision-editing", "stage-parameters" },
+                deferredCapabilities = new[] { "material-animation-export", "texture-image-animation-preview",
+                    "texture-register-animation-preview", "material-pixel-animation-preview", "shape-animations",
+                    "animation-export", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
                 modelMaterials = previewMaterials,

@@ -3,8 +3,8 @@
 Development target: **Blender 4.5.0 on Linux**, with .NET 8 for the development
 backend. This milestone imports stage models and edits existing static collision,
 supported rigid geometry/material properties, lights, and static JOBJ transforms.
-It also imports JOBJ animation sets as read-only Blender Actions and plays their
-original HSD curves on the armatures.
+It also imports JOBJ and material animation slots as read-only Blender Actions
+and plays their original HSD curves on the armatures and preview materials.
 The user has confirmed collision editing, model vertex movement, joined cubes,
 and corrected face culling in game. Multi-target export has also been confirmed in game. Appearance-preserving
 vertex editing has also been confirmed in game. New-geometry material/UV export
@@ -144,10 +144,11 @@ by generated deform bones. The mesh object retains its fixed bind-pose transform
 the armature supplies all animated motion so the owner JOBJ is not applied twice.
 Their geometry and weights remain read-only.
 
-## Preview JOBJ animations
+## Preview stage animations
 
-Each model-group joint-animation slot imports as a Blender Action named
-`Group NNN JOBJ Animation NNN`. The first slot is active by default. Move the
+Each model-group joint or material animation slot imports as a Blender Action named
+`Group NNN Stage Animation NNN`. Joint and material data sharing a source slot
+play together. The first slot is active by default. Move the
 timeline to preview the stage motion. The sidebar shows the current Action for
 the selected armature and provides **Previous** and **Next** controls when a
 group has multiple slots. You can also choose an imported Action in Blender's
@@ -156,6 +157,10 @@ Action Editor.
 Playback evaluates the decoded HSD constant, linear, Hermite, and slope keys
 directly rather than approximating them with baked Blender curves. It drives the
 source JOBJ bones, generated envelope bones, rigid children, and weighted meshes.
+Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
+TObj translation, scale, rotation, and blend values. Texture image/palette swaps,
+animated TEV registers, pixel-engine reference values, and material animation
+editing/export are not implemented yet.
 Looping follows both serialized AOBJ flags and the model-group animation flag
 byte that Melee applies at runtime; the latter is used by animations such as
 GrNLa Group 003. The preview wraps when the HSD end frame is reached, matching
@@ -420,9 +425,10 @@ Affine parent matrices retain shear without Blender's local TRS decomposition.
 Rigid and envelope-deformed meshes retain decoded normals. GX triangles whose winding opposes those
 normals are reversed for Blender display and restored to their original order
 on export. The material preview reads an exact normal attribute because Blender's
-native custom normals clamp values that cross a polygon's hemisphere. Material,
-texture, shape, and light animation, billboard behavior,
-constraints, instanced drawing, and stage-code pose updates are not simulated. Source-hidden
+native custom normals clamp values that cross a polygon's hemisphere. Texture
+image/palette swaps, animated texture registers and pixel-engine values, shape
+and light animation, billboard behavior, constraints, instanced drawing, and
+stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow
 geometry export; unsupported preview meshes remain read-only.
 Quaternion joints and shared-joint mesh previews currently fail import with an
@@ -446,6 +452,8 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/envelopes.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/animations.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/material_animations.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,

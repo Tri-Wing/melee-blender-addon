@@ -61,7 +61,7 @@ a corresponding basis change for joint transforms.
 Each `group.json` contains the protected group identity and index, complete JOBJ,
 DOBJ, and POBJ identity/ownership records, joint flags and source SRT, inverse-bind
 matrices when present (original row-major 3x4 floats), transform-only
-`jointAnimations`, and mesh paths. Joint XYZ rotation fields retain their source
+`jointAnimations`, `materialAnimations`, and mesh paths. Joint XYZ rotation fields retain their source
 encoding; unusual transform modes still need explicit handling in the Blender importer.
 
 Every decoded POBJ has local positions, optional normals, corner-based triangle
@@ -337,6 +337,26 @@ frame 0. Looping wraps at `endFrame`, using the zero rewind frame initialized by
 the engine. The selected Action is preview state and is part of the protected scene
 inventory; no animation edit file is emitted. DAT export therefore preserves the
 source animation structures byte-for-byte.
+
+### Read-only material animation playback
+
+Each group also stores `materialAnimations` by the same model-group animation
+`slot`. Material targets use the stable POBJ/material preview ID and retain MOBJ
+tracks for ambient, diffuse, specular, alpha, and pixel-engine values. Nested
+texture targets identify the source GX texture-map ID and resolved TObj layer,
+and retain image/palette, translation, scale, rotation, blend, LOD, konst, and
+TEV-register tracks. Track keys use the same decoded HSD frame/value/tangent/
+interpolation representation as JOBJ animation. `materialEndFrame` and
+`materialLoop` keep the MOBJ AOBJ timing separate from each nested texture AOBJ;
+the target and set `endFrame`/`loop` values summarize their combined slot.
+
+Blender combines joint and material data for a slot into one read-only Stage
+Animation Action. The timeline currently evaluates MOBJ ambient/diffuse/specular/
+alpha and TObj translation/scale/rotation/blend against the imported preview
+shader. It resets animated values to their source material state when another
+slot omits that target. Image/palette swaps, texture registers, pixel-engine
+reference values, and animation export remain deferred. No-op DAT export retains
+all original material animation descriptors and buffers byte-for-byte.
 
 
 ### Read-only texture preview assets

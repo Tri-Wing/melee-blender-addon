@@ -203,7 +203,7 @@ class MME_OT_edit_jobj(bpy.types.Operator):
 
 class MME_OT_animation(bpy.types.Operator):
     bl_idname = 'mme.cycle_animation'
-    bl_label = 'Cycle Joint Animation'
+    bl_label = 'Cycle Stage Animation'
     bl_options = {'REGISTER'}
     direction: IntProperty(default=1)
 
@@ -211,7 +211,7 @@ class MME_OT_animation(bpy.types.Operator):
         def action():
             armature = animations.cycle(context, self.direction)
             if armature is None:
-                raise StageError('This stage has no imported joint animations.')
+                raise StageError('This stage has no imported stage animations.')
             current = animations.active_action(armature)
             context.scene.mme_status = f'Previewing {current.name}'
         return execute_safely(self, context, action)
@@ -438,7 +438,7 @@ class MME_PT_stage(bpy.types.Panel):
                               and animations.actions(obj)]
         if animated_armatures:
             layout.separator()
-            layout.label(text=f'{sum(len(animations.actions(obj)) for obj in animated_armatures)} joint animation actions')
+            layout.label(text=f'{sum(len(animations.actions(obj)) for obj in animated_armatures)} stage animation actions')
             active_armature = (context.active_object if context.active_object in animated_armatures
                                else animated_armatures[0])
             active_action = animations.active_action(active_armature)

@@ -1,6 +1,6 @@
 """Static HSD pose, following jobj.c, mtx.c and displayfunc.c in the decomp.
 
-Animation, billboarding, constraints and stage-code pose changes are not evaluated.
+Billboarding, constraints and stage-code pose changes are not evaluated.
 """
 from mathutils import Euler, Matrix, Vector
 from .protocol import StageError

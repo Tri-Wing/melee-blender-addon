@@ -28,6 +28,7 @@ def create_materials(stage, directory=None, light_objects=None):
             material['mme_model_material_id'] = entry['id']
         material['mme_model_material_source'] = stage['source']['sha256']
         material['mme_model_uses_uv'] = entry['usesUv']
+        material['mme_animation_preview'] = json.dumps(entry.get('preview') or {})
         configure_preview(material, entry.get('preview'), directory, stage, light_objects)
         if entry['id'] in definitions:
             material_properties.initialize(material, entry, definitions[entry['id']], directory, stage)
@@ -536,10 +537,16 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         combine.name = 'Stage Texture Coordinates' if index == 0 else f'Stage Texture Coordinates {index + 1}'
         for axis, wrap in enumerate((layer['wrapS'], layer['wrapT'])):
             dot = nodes.new('ShaderNodeVectorMath')
+            axis_name = 'U' if axis == 0 else 'V'
+            suffix = '' if index == 0 else f' {index + 1}'
+            dot.name = f'Stage Texture Matrix {axis_name}{suffix}'
+            dot['mme_texture_index'] = index
             dot.operation = 'DOT_PRODUCT'
             dot.inputs[1].default_value = tuple(matrix[axis][i] for i in range(3))
             links.new(coordinates, dot.inputs[0])
             add = nodes.new('ShaderNodeMath')
+            add.name = f'Stage Texture Offset {axis_name}{suffix}'
+            add['mme_texture_index'] = index
             add.operation = 'ADD'
             add.inputs[1].default_value = matrix[axis][3]
             links.new(dot.outputs['Value'], add.inputs[0])
@@ -572,6 +579,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
             combine_color.name = (label if pass_index == 0 else
                                   f'Stage Texture Blend {pass_index + 1}' if label == 'Stage Diffuse Tint'
                                   else f'{label} {pass_index + 1}')
+            combine_color['mme_texture_index'] = index
+            combine_color['mme_texture_operation'] = layer.get('colorOperation', 5)
             if isinstance(base, (tuple, list)):
                 combine_color.inputs[1].default_value = base
             else:
@@ -620,6 +629,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         _, layer, sampler = diffuse_layers[0]
         tint = nodes.new('ShaderNodeMixRGB')
         tint.name = 'Stage Diffuse Tint'
+        tint['mme_texture_index'] = diffuse_layers[0][0]
+        tint['mme_texture_operation'] = 4
         tint.blend_type = 'MULTIPLY'
         tint.inputs[0].default_value = 1
         tint.inputs[1].default_value = (*linear, 1)
@@ -757,11 +768,14 @@ def configure_alpha_preview(material, settings):
         return result.outputs[0]
 
     vertex = nodes.get('Stage Vertex Color')
-    alpha = settings['material']
+    material_alpha = node('ShaderNodeValue')
+    material_alpha.name = 'Stage Material Alpha'
+    material_alpha.outputs[0].default_value = settings['material']
+    alpha = material_alpha.outputs[0]
     if settings['vertex']:
         alpha = vertex.outputs['Alpha'] if vertex else 1
         if settings['multiplyMaterial']:
-            alpha = math('MULTIPLY', alpha, settings['material'])
+            alpha = math('MULTIPLY', alpha, material_alpha.outputs[0])
     texture = nodes.get('Stage Texture')
     if texture:
         tex = texture.outputs['Alpha']

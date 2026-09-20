@@ -1,6 +1,6 @@
 # Melee Map Editor Blender Add-on Implementation Plan
 
-Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, static JOBJ SRT editing, envelope binding, and read-only JOBJ animation playback are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
+Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, static JOBJ SRT editing, envelope binding, and read-only JOBJ/material animation playback are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
 
 ## 1. Summary
 
