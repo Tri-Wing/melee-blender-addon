@@ -38,7 +38,8 @@ with tempfile.TemporaryDirectory(prefix='mme-jobj-blender-') as tmp:
     parents = {nodes[key]['ownerId'] for key in joints}
     imported_armatures = jobjs.armatures(s)
     assert len(imported_armatures) == sum(bool(group['joints']) for group in groups)
-    assert sum(len(armature.pose.bones) for armature in imported_armatures) == len(joints)
+    assert sum(sum(bone.get('mme_role') == 'jobj' for bone in armature.pose.bones)
+               for armature in imported_armatures) == len(joints)
     assert not [obj for obj in s.objects if str(obj.get('mme_role', '')).endswith('jobj')]
 
     info = next(item for item in jobjs.targets(s) if item['id'] not in parents

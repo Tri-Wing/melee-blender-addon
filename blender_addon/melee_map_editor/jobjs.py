@@ -42,6 +42,9 @@ def selected_info(context):
     bone = context.active_pose_bone
     if bone and context.active_object in armatures(context.scene) and bone.get('mme_id') in allowed:
         return allowed[bone['mme_id']]
+    if bone and context.active_object in armatures(context.scene) \
+            and bone.get('mme_source_jobj_id') in allowed:
+        return allowed[bone['mme_source_jobj_id']]
     obj = context.active_object
     if obj and obj.get('mme_session_id') == context.scene.mme_session_id:
         for key in json.loads(obj.get('mme_jobj_chain', '[]')):

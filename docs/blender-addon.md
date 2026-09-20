@@ -3,6 +3,8 @@
 Development target: **Blender 4.5.0 on Linux**, with .NET 8 for the development
 backend. This milestone imports stage models and edits existing static collision,
 supported rigid geometry/material properties, lights, and static JOBJ transforms.
+It also imports JOBJ animation sets as read-only Blender Actions and plays their
+original HSD curves on the armatures.
 The user has confirmed collision editing, model vertex movement, joined cubes,
 and corrected face culling in game. Multi-target export has also been confirmed in game. Appearance-preserving
 vertex editing has also been confirmed in game. New-geometry material/UV export
@@ -136,8 +138,32 @@ uniform scale change; leaf JOBJs may be scaled independently per axis. JOBJ
 creation, deletion, reparenting, sibling reordering, and moving render objects
 between JOBJs remain read-only. A fresh import is required because older `.blend`
 files do not contain the armatures, JOBJ eligibility catalog, or transform
-baselines. Rigid models follow their owning bones. Skinned models retain their
-imported static deformation until skin weights and animation are supported.
+baselines. Rigid models follow their owning bones. Enveloped models import with
+their source weights as Blender vertex groups and use an Armature modifier driven
+by generated deform bones. The mesh object retains its fixed bind-pose transform;
+the armature supplies all animated motion so the owner JOBJ is not applied twice.
+Their geometry and weights remain read-only.
+
+## Preview JOBJ animations
+
+Each model-group joint-animation slot imports as a Blender Action named
+`Group NNN JOBJ Animation NNN`. The first slot is active by default. Move the
+timeline to preview the stage motion. The sidebar shows the current Action for
+the selected armature and provides **Previous** and **Next** controls when a
+group has multiple slots. You can also choose an imported Action in Blender's
+Action Editor.
+
+Playback evaluates the decoded HSD constant, linear, Hermite, and slope keys
+directly rather than approximating them with baked Blender curves. It drives the
+source JOBJ bones, generated envelope bones, rigid children, and weighted meshes.
+Looping follows both serialized AOBJ flags and the model-group animation flag
+byte that Melee applies at runtime; the latter is used by animations such as
+GrNLa Group 003. The preview wraps when the HSD end frame is reached, matching
+`HSD_AObjInterpretAnim`.
+Actions and their selected slots survive `.blend` save/load. The animation data
+is read-only in this milestone: timeline playback is preview state, and export
+preserves the original DAT animation bytes. Re-import the stage after updating
+the add-on because older scenes do not contain these Actions.
 
 ## Collision surfaces
 
@@ -378,13 +404,14 @@ sessions. Do not edit the session's baseline files.
 
 ## Preview limitations
 
-The importer implements the static HSD joint pose, inherited scale compensation,
-and envelope deformation. Positions use `(X, -Z, Y)` exactly once at the boundary.
+The importer implements the HSD joint pose, inherited scale compensation,
+envelope deformation, and transform-animation playback. Positions use
+`(X, -Z, Y)` exactly once at the boundary.
 The source hierarchy is retained, including separate JOBJ/DOBJ/POBJ identities.
 Affine parent matrices retain shear without Blender's local TRS decomposition.
 Rigid meshes retain decoded normals; deformed preview meshes use generated
-normals. Textures, source materials, animation, billboard behavior, constraints,
-instanced drawing, and stage-code pose updates are not simulated. Source-hidden
+normals. Material, texture, shape, and light animation, billboard behavior,
+constraints, instanced drawing, and stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow
 geometry export; unsupported preview meshes remain read-only.
 Quaternion joints and shared-joint mesh previews currently fail import with an
@@ -404,6 +431,10 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/models.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/jobjs.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/envelopes.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/animations.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,

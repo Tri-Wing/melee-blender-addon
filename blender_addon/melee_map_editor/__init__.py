@@ -11,7 +11,7 @@ import bmesh
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
+from . import animations, collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
 from .protocol import StageError, read, run
 
 
@@ -197,6 +197,22 @@ class MME_OT_edit_jobj(bpy.types.Operator):
                 bone.bone.select = True
             armature.data.bones.active = bone.bone
             context.scene.mme_status = f'Selected {armature.name} / {bone.name}. Use Blender Move, Rotate, and Scale in Pose Mode.'
+        return execute_safely(self, context, action)
+
+
+class MME_OT_animation(bpy.types.Operator):
+    bl_idname = 'mme.cycle_animation'
+    bl_label = 'Cycle Joint Animation'
+    bl_options = {'REGISTER'}
+    direction: IntProperty(default=1)
+
+    def execute(self, context):
+        def action():
+            armature = animations.cycle(context, self.direction)
+            if armature is None:
+                raise StageError('This stage has no imported joint animations.')
+            current = animations.active_action(armature)
+            context.scene.mme_status = f'Previewing {current.name}'
         return execute_safely(self, context, action)
 
 
@@ -417,6 +433,20 @@ class MME_PT_stage(bpy.types.Panel):
             layout.label(text='Hierarchy editing remains read-only.')
         elif 'mme_editable_jobjs' in s:
             layout.label(text='No editable static JOBJs in this stage.', icon='LOCKED')
+        animated_armatures = [obj for obj in s.objects if obj.type == 'ARMATURE'
+                              and animations.actions(obj)]
+        if animated_armatures:
+            layout.separator()
+            layout.label(text=f'{sum(len(animations.actions(obj)) for obj in animated_armatures)} joint animation actions')
+            active_armature = (context.active_object if context.active_object in animated_armatures
+                               else animated_armatures[0])
+            active_action = animations.active_action(active_armature)
+            if active_action:
+                layout.label(text=active_action.name)
+            row = layout.row(align=True)
+            row.operator('mme.cycle_animation', text='Previous').direction = -1
+            row.operator('mme.cycle_animation', text='Next').direction = 1
+            layout.label(text='Use the timeline to preview. Animation is read-only.')
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')
@@ -646,6 +676,7 @@ def update_dirty(scene_arg, depsgraph):
     if not scene_arg.mme_session:
         return
     try:
+        animations.apply(scene_arg)
         modeling.update_dirty(scene_arg, depsgraph)
         jobjs.update_dirty(scene_arg, depsgraph)
         obj = scene.collision_object(scene_arg)
@@ -654,6 +685,23 @@ def update_dirty(scene_arg, depsgraph):
         if bool(obj.get('mme_dirty')) != dirty:
             obj['mme_dirty'] = dirty
     except (StageError, ReferenceError):
+        pass
+
+
+@bpy.app.handlers.persistent
+def update_animation(scene_arg, depsgraph=None):
+    try:
+        animations.apply(scene_arg)
+    except (StageError, ReferenceError, FileNotFoundError):
+        pass
+
+
+@bpy.app.handlers.persistent
+def load_animation(_):
+    animations.clear_cache()
+    try:
+        animations.apply(bpy.context.scene)
+    except (StageError, ReferenceError, FileNotFoundError):
         pass
 
 
@@ -716,7 +764,7 @@ class MME_PT_material(bpy.types.Panel):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_model_material,
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
            MME_PT_edge_raw, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
@@ -764,6 +812,8 @@ def register():
         description='Collision surface response (friction and contact effects)',
         items=materials.ITEMS, get=materials.get_surface, set=materials.set_surface)
     bpy.app.handlers.depsgraph_update_post.append(update_dirty)
+    bpy.app.handlers.frame_change_post.append(update_animation)
+    bpy.app.handlers.load_post.append(load_animation)
     if not bpy.app.background:
         _draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_collision, (), 'WINDOW', 'POST_VIEW')
 
@@ -775,6 +825,11 @@ def unregister():
         _draw_handle = None
     if update_dirty in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(update_dirty)
+    if update_animation in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(update_animation)
+    if load_animation in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(load_animation)
+    animations.clear_cache()
     for prop in ('mme_diffuse', 'mme_alpha', 'mme_texture_blend', 'mme_use_vertex_color', 'mme_transparency', 'mme_alpha_source',
                  *(name for name, _ in material_properties.RENDER_FLAGS)):
         delattr(bpy.types.Material, prop)

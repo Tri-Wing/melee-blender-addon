@@ -11,7 +11,7 @@ from mathutils import Matrix, Vector
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
 import melee_map_editor as addon
-from melee_map_editor import scene, collision, transforms
+from melee_map_editor import animations, scene, collision, transforms
 from melee_map_editor.protocol import StageError, read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -100,7 +100,9 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     assert sum(len(o.data.polygons) for o in models) == 13597
     assert len(obj.data.vertices) == len(obj.data.edges) == 16
     assert obj.data.attributes['mme_line'].domain == 'EDGE'
-    assert all(o.parent and o.parent.get('mme_role') == 'dobj' for o in models)
+    assert all(o.parent and (o.parent.get('mme_role') == 'jobj-armature'
+                            if o.get('mme_enveloped') else o.parent.get('mme_role') == 'dobj')
+               for o in models)
     # Imported world transforms must retain the exact affine joint pose, including shear.
     manifest = read(directory / 'stage.json')
     payloads = [read(directory / e['file']) for e in manifest['modelGroups']]
@@ -108,8 +110,14 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     armatures = [o for o in s.objects if o.get('mme_role') == 'jobj-armature']
     assert len(armatures) == 10
     assert not [o for o in s.objects if str(o.get('mme_role', '')).endswith('jobj')]
+    original_actions = {armature: armature.animation_data.action for armature in armatures
+                        if armature.animation_data}
+    for armature in original_actions:
+        armature.animation_data.action = None
+    animations.apply(s)
+    bpy.context.view_layer.update()
     for armature in armatures:
-        for bone in armature.pose.bones:
+        for bone in (item for item in armature.pose.bones if item.get('mme_role') == 'jobj'):
             expected = transforms.AXES @ expected_world[bone['mme_id']] @ transforms.AXES.inverted()
             actual = armature.matrix_world @ bone.matrix
             if not all(math.isclose(actual[i][j], expected[i][j], rel_tol=1e-6, abs_tol=5e-4)
@@ -123,6 +131,10 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
         expected = transforms.AXES @ expected_world[owner] @ transforms.AXES.inverted()
         assert all(math.isclose(model.matrix_world[i][j], expected[i][j], rel_tol=1e-6, abs_tol=5e-4)
                    for i in range(4) for j in range(4)), model.name
+    for armature, action in original_actions.items():
+        armature.animation_data.action = action
+    animations.apply(s)
+    bpy.context.view_layer.update()
     assert scene.prepare(s)[1] is None
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()

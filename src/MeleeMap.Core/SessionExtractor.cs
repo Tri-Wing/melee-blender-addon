@@ -58,6 +58,7 @@ public static class SessionExtractor
             {
                 string groupPath = $"models/group-{group.GroupIndex:D3}";
                 var nodes = identity.Nodes.Where(n => n.GroupIndex == group.GroupIndex).ToArray();
+                var jointAnimations = StageJointAnimations.Read(stage, identity, group.GroupIndex);
                 Write($"{groupPath}/group.json", new
                 {
                     protocolVersion = ProtocolVersion, id = group.Id, index = group.GroupIndex, protectedIdentity = true, nodes,
@@ -71,6 +72,7 @@ public static class SessionExtractor
                         inverseBindMatrix = InverseBind(n.SourceOffset),
                         childSourceOffset = reader.Pointer(n.SourceOffset + 8), nextSourceOffset = reader.Pointer(n.SourceOffset + 12)
                     }),
+                    jointAnimations,
                     meshes = meshes.Where(m => m.Node.GroupIndex == group.GroupIndex).Select(m => $"mesh-{m.Node.Id}.json")
                 });
             }
@@ -90,7 +92,7 @@ public static class SessionExtractor
                     pobjIndex = node.Index, sourceOffset = node.SourceOffset, coordinateSpace = "game", representation = "untextured-grey",
                     pobjFlags = reader.UShort(node.SourceOffset + 12),
                     editable = editableModels.Any(t => t.Id == node.Id),
-                    readOnlyReason = mesh.Envelopes != null ? "Skinned geometry is not supported yet."
+                    readOnlyReason = mesh.Envelopes != null ? "Envelope geometry editing is not supported yet."
                         : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
                         : readOnlyReasons.GetValueOrDefault(node.Id),
                     vertexSpace = mesh.Envelopes != null ? "envelope-source" : "joint-local",
@@ -162,7 +164,7 @@ public static class SessionExtractor
                     modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
-                deferredCapabilities = new[] { "textures", "materials", "animations", "dynamic-collision-editing", "stage-parameters" },
+                deferredCapabilities = new[] { "material-animations", "shape-animations", "animation-export", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity),
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
                 modelMaterials = previewMaterials,

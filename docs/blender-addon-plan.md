@@ -1,6 +1,6 @@
 # Melee Map Editor Blender Add-on Implementation Plan
 
-Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, and static JOBJ SRT editing are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
+Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, static JOBJ SRT editing, envelope binding, and read-only JOBJ animation playback are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
 
 ## 1. Summary
 
@@ -369,9 +369,10 @@ Supporting dynamic collision becomes the first collision follow-up after the `Gr
 Decode each model group's JOBJ hierarchy into a Blender armature and preserve
 DOBJ/POBJ identity around the imported meshes. Rigid models are bone-parented to
 their owning JOBJ. Preserve transforms and identity boundaries rather than
-flattening the whole stage into one mesh. Skinned meshes initially retain their
-statically evaluated import pose; a later animation slice will add weights and
-armature modifiers.
+flattening the whole stage into one mesh. Enveloped meshes use decoded HSD
+weights, generated deform bones, and Blender Armature modifiers while remaining
+geometry-edit protected. Joint-animation slots import as read-only Blender
+Actions and evaluate the original HSD interpolation on timeline changes.
 
 For the POC:
 
@@ -676,7 +677,7 @@ Planned map-editor expansion areas include:
 - Full JOBJ hierarchy editing and reference remapping.
 - Adding, deleting, and reordering model groups with stage-code-aware validation.
 - Textures, palettes, UVs, vertex colors, GX/TEV materials, and faithful previews.
-- Joint, material, texture, and shape animation editing.
+- Joint animation editing/export; material, texture, and shape animation preview/editing.
 - Dynamic collision and collision-to-model attachments.
 - General points, spawn points, camera and blast-zone controls, and stage parameters.
 - Cameras, light animation and unsupported LOBJ fields, fog, splines, shadows, particles, and effects.

@@ -33,6 +33,12 @@ with tempfile.TemporaryDirectory(prefix='mme-reload-') as directory:
         handlers = [h for h in bpy.app.handlers.depsgraph_update_post
                     if h.__module__ == 'melee_map_editor']
         assert handlers == [module.update_dirty]
+        frame_handlers = [h for h in bpy.app.handlers.frame_change_post
+                          if h.__module__ == 'melee_map_editor']
+        assert frame_handlers == [module.update_animation]
+        load_handlers = [h for h in bpy.app.handlers.load_post
+                         if h.__module__ == 'melee_map_editor']
+        assert load_handlers == [module.load_animation]
     # Reproduce Blender Text Editor's synthetic root-level __file__ while its
     # Text datablock retains the real on-disk filepath. Use an unrelated cwd.
     area = bpy.context.screen.areas[0]
@@ -65,4 +71,4 @@ with tempfile.TemporaryDirectory(prefix='mme-reload-') as directory:
     import melee_map_editor as module
     assert module.scene.prepare(bpy.context.scene)[1] == expected
     module.scene.apply(bpy.context.scene, cli, 'dotnet', directory / 'reloaded.dat')
-print('BLENDER_RELOAD_OK: checkout source, fresh helpers, preserved edits/preferences, one handler, export')
+print('BLENDER_RELOAD_OK: checkout source, fresh helpers, preserved edits/preferences, one handler of each type, export')

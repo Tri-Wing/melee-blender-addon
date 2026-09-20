@@ -5,9 +5,9 @@ import tempfile
 import uuid
 import bpy
 from mathutils import Matrix
-from . import collision, jobjs, lighting, modeling, surface
+from . import animations, collision, jobjs, lighting, modeling, surface
 from .protocol import StageError, digest, load_session, read, run
-from .transforms import AXES, joint_matrices, joint_srt, mesh_pose
+from .transforms import AXES, deform_rest, joint_matrices, joint_srt, mesh_binding, mesh_pose
 
 
 def session(scene):
@@ -37,6 +37,19 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid]
     result = {'collections': [], 'objects': []}
+    session_actions = [action for action in bpy.data.actions
+                       if action.get('mme_session_id') == sid]
+    if session_actions:
+        result['actions'] = []
+    for action in session_actions:
+        if action.get('mme_role') != 'jobj-animation':
+            raise StageError(f'{action.name}: unsupported animation data is not allowed.')
+        curves = getattr(action, 'fcurves', ())
+        layers = getattr(action, 'layers', ())
+        if len(curves) or len(layers):
+            raise StageError(f'{action.name}: imported joint animations are read-only.')
+        result['actions'].append({'props': properties(action), 'name': action.name,
+            'fakeUser': action.use_fake_user})
     for c in collections:
         result['collections'].append({'props': properties(c),
             'parents': sorted(p.get('mme_id', p.name) for p in bpy.data.collections if c.name in p.children)
@@ -54,12 +67,41 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
             row['parentInverse'] = [list(r) for r in o.matrix_parent_inverse]
             if o.get('mme_id') not in editable_transform_ids:
                 row['matrix'] = [list(r) for r in o.matrix_basis]
-        if (o.modifiers or o.constraints or o.animation_data or (o.data and o.data.animation_data)
-                or (o.type == 'MESH' and o.data.shape_keys)):
-            raise StageError(f'{o.name}: modifiers, constraints, shape keys and animation are not supported.')
+        animation_data = o.animation_data
+        valid_animation = (o.get('mme_role') == 'jobj-armature' and animation_data is not None
+            and (animation_data.action is None or
+                 (animation_data.action.get('mme_role') == 'jobj-animation'
+                  and animation_data.action.get('mme_session_id') == sid
+                  and animation_data.action.get('mme_group_index') == o.get('mme_group_index')))
+            and not animation_data.nla_tracks and not animation_data.drivers)
+        if o.constraints or (animation_data and not valid_animation) \
+                or (o.data and o.data.animation_data) or (o.type == 'MESH' and o.data.shape_keys):
+            raise StageError(f'{o.name}: constraints, shape keys and animation are not supported.')
+        if valid_animation:
+            row['animation'] = animation_data.action.get('mme_id') if animation_data.action else None
+        if o.modifiers:
+            valid = (o.type == 'MESH' and o.get('mme_enveloped') and len(o.modifiers) == 1
+                and o.modifiers[0].type == 'ARMATURE'
+                and o.modifiers[0].object is not None
+                and o.modifiers[0].object.get('mme_role') == 'jobj-armature')
+            if not valid:
+                raise StageError(f'{o.name}: unsupported modifiers are not allowed.')
+            modifier = o.modifiers[0]
+            row['modifiers'] = [{'name': modifier.name, 'type': modifier.type,
+                'object': modifier.object.get('mme_id'),
+                'useVertexGroups': modifier.use_vertex_groups,
+                'useBoneEnvelopes': modifier.use_bone_envelopes,
+                'usePreserveVolume': modifier.use_deform_preserve_volume}]
+        if o.vertex_groups:
+            if o.type != 'MESH' or not o.get('mme_enveloped'):
+                raise StageError(f'{o.name}: vertex groups are only supported on imported envelope meshes.')
+            weights = {group.index: [] for group in o.vertex_groups}
+            for vertex in o.data.vertices:
+                for assignment in vertex.groups:
+                    weights[assignment.group].append([vertex.index, assignment.weight])
+            row['vertexGroups'] = [{'name': group.name, 'lockWeight': group.lock_weight,
+                'weights': weights[group.index]} for group in o.vertex_groups]
         if o.type == 'ARMATURE':
-            if any(bone.constraints for bone in o.pose.bones):
-                raise StageError(f'{o.name}: pose-bone constraints are not supported.')
             row['bones'] = []
             for bone in sorted(o.pose.bones, key=lambda item: item.get('mme_id', item.name)):
                 record = {'props': properties(bone), 'name': bone.name,
@@ -69,7 +111,18 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
                     'inheritScale': bone.bone.inherit_scale,
                     'useConnect': bone.bone.use_connect,
                     'useDeform': bone.bone.use_deform}
-                if bone.get('mme_id') not in editable_transform_ids:
+                if bone.constraints:
+                    valid = (bone.get('mme_role') == 'deform-jobj' and len(bone.constraints) == 1
+                        and bone.constraints[0].type == 'COPY_TRANSFORMS'
+                        and bone.constraints[0].target is o)
+                    if not valid:
+                        raise StageError(f'{o.name} / {bone.name}: unsupported pose-bone constraints are not allowed.')
+                    constraint = bone.constraints[0]
+                    record['constraints'] = [{'name': constraint.name, 'type': constraint.type,
+                        'target': constraint.target.get('mme_id'), 'subtarget': constraint.subtarget,
+                        'targetSpace': constraint.target_space, 'ownerSpace': constraint.owner_space,
+                        'influence': constraint.influence, 'mute': constraint.mute}]
+                if bone.get('mme_id') not in editable_transform_ids and not bone.get('mme_animated'):
                     record['matrix'] = [list(r) for r in bone.matrix_basis]
                 row['bones'].append(record)
         if o.type == 'MESH' and o.get('mme_id') in editable_ids:
@@ -134,11 +187,13 @@ def import_session(context, directory):
     source = read(directory / 'collision/collision.json')
     nodes, joints, world = joint_matrices(groups)
     sid = uuid.uuid4().hex
-    created_objects, created_collections, created_meshes, created_data, created_armatures = [], [], [], [], []
+    created_objects, created_collections, created_meshes, created_data, created_armatures, created_actions = [], [], [], [], [], []
     material = None
     source_materials = {}
     editable_jobjs = jobjs.stage_targets(stage)
     editable_jobj_ids = {info['id'] for info in editable_jobjs}
+    deform_rests = {key: deform_rest(joint) for key, joint in joints.items()
+                    if joint.get('inverseBindMatrix') is not None}
 
     def tag(item, role, key, group=-1):
         item['mme_role'], item['mme_session_id'], item['mme_id'] = role, sid, key
@@ -165,6 +220,7 @@ def import_session(context, directory):
         scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
         objects = {}
         bone_names = {}
+        deform_names = {}
 
         def joint_chain(key):
             chain = []
@@ -173,6 +229,7 @@ def import_session(context, directory):
                 key = nodes[key]['ownerId']
             return chain
 
+        animation_end = 0
         for entry, group in zip(stage['modelGroups'], groups):
             c = collection(f"Group {group['index']:03d}", models, group['id'], index=group['index'])
             group_joints = [node for node in group['nodes'] if node['id'] in joints]
@@ -197,8 +254,20 @@ def import_session(context, directory):
                     edit_bone = armature.edit_bones.new(name)
                     edit_bone.head = (0, 0, 0)
                     edit_bone.tail = (0, 0.25, 0)
+                    edit_bone.use_deform = False
                     edit_bones[node['id']] = edit_bone
                     bone_names[node['id']] = name
+                for node in group_joints:
+                    if node['id'] not in deform_rests:
+                        continue
+                    name = f"JOBJ {node['index']:03d} Deform"
+                    edit_bone = armature.edit_bones.new(name)
+                    edit_bone.head = (0, 0, 0)
+                    edit_bone.tail = (0, 0.25, 0)
+                    edit_bone.matrix = AXES @ deform_rests[node['id']] @ AXES.inverted()
+                    edit_bone.length = 0.25
+                    edit_bone.use_deform = True
+                    deform_names[node['id']] = name
                 for node in group_joints:
                     if node['ownerId'] in edit_bones:
                         edit_bones[node['id']].parent = edit_bones[node['ownerId']]
@@ -216,9 +285,25 @@ def import_session(context, directory):
                         if source_joint.get('readOnlyReason'):
                             item['mme_read_only_reason'] = source_joint['readOnlyReason']
                     pose_bone.rotation_mode = 'XYZ'
-                    pose_bone.bone.inherit_scale = 'ALIGNED'
+                    pose_bone.bone.inherit_scale = ('FULL' if source_joint['flags'] & 8 else 'ALIGNED')
                     pose_bone.matrix_basis = AXES @ joint_srt(source_joint) @ AXES.inverted()
+                for node in group_joints:
+                    if node['id'] not in deform_names:
+                        continue
+                    pose_bone = armature_obj.pose.bones[deform_names[node['id']]]
+                    for item in (pose_bone, pose_bone.bone):
+                        tag(item, 'deform-jobj', node['id'] + ':deform', group['index'])
+                        item['mme_source_jobj_id'] = node['id']
+                        item['mme_source_index'] = node['index']
+                    constraint = pose_bone.constraints.new('COPY_TRANSFORMS')
+                    constraint.name = 'Melee JOBJ Deform Binding'
+                    constraint.target = armature_obj
+                    constraint.subtarget = bone_names[node['id']]
+                    constraint.target_space = 'POSE'
+                    constraint.owner_space = 'POSE'
                 bpy.ops.object.mode_set(mode='OBJECT')
+                animation_end = max(animation_end, animations.create(armature_obj, group,
+                    entry['file'], stage['source']['sha256'], sid, created_actions))
             for node in group['nodes']:
                 if node['kind'] in ('group', 'sentinel-group') or node['id'] in joints:
                     continue
@@ -248,7 +333,11 @@ def import_session(context, directory):
                             obj['mme_jobj_chain'] = owner['mme_jobj_chain']
             for filename in group['meshes']:
                 payload = read((directory / entry['file']).parent / filename)
-                positions, _ = mesh_pose(payload, nodes, joints, world)
+                assignments = None
+                if payload.get('envelopes'):
+                    positions, assignments = mesh_binding(payload, nodes, joints, world, deform_rests)
+                else:
+                    positions, _ = mesh_pose(payload, nodes, joints, world)
                 mesh = bpy.data.meshes.new(f"Group {group['index']:03d} Mesh")
                 created_meshes.append(mesh)
                 indices = payload['triangleIndices']
@@ -279,6 +368,30 @@ def import_session(context, directory):
                 replacement.parent_bone = obj.parent_bone
                 replacement.matrix_parent_inverse = obj.matrix_parent_inverse.copy()
                 replacement.matrix_basis = obj.matrix_basis.copy()
+                if assignments is not None:
+                    # Skinned source positions must enter the Armature modifier
+                    # from a fixed bind-space object transform. Bone-parenting
+                    # the mesh would apply the animated owner once before the
+                    # modifier and then apply the skin matrices a second time.
+                    owner = nodes[payload['ownerId']]['ownerId']
+                    replacement.parent = armature_obj
+                    replacement.parent_type = 'OBJECT'
+                    replacement.parent_bone = ''
+                    replacement.matrix_parent_inverse = Matrix.Identity(4)
+                    replacement.matrix_basis = AXES @ world[owner] @ AXES.inverted()
+                    replacement['mme_enveloped'] = True
+                    groups_by_bone = {}
+                    for vertex_index, weights in enumerate(assignments):
+                        for bone, weight in weights:
+                            vertex_group = groups_by_bone.get(bone)
+                            if vertex_group is None:
+                                vertex_group = replacement.vertex_groups.new(name=deform_names[bone])
+                                groups_by_bone[bone] = vertex_group
+                            vertex_group.add([vertex_index], weight, 'REPLACE')
+                    modifier = replacement.modifiers.new('Melee JOBJ Envelope', 'ARMATURE')
+                    modifier.object = armature_obj
+                    modifier.use_vertex_groups = True
+                    modifier.use_bone_envelopes = False
                 if payload.get('readOnlyReason'):
                     replacement['mme_read_only_reason'] = payload['readOnlyReason']
                     replacement.name = f"Read-only Model - Group {group['index']:03d} POBJ {payload['pobjIndex']:03d}"
@@ -290,6 +403,11 @@ def import_session(context, directory):
         created_meshes.append(obj.data)
         scene.mme_session = str(directory)
         scene.mme_session_id = sid
+        if animation_end:
+            scene.frame_start = 1
+            scene.frame_end = animation_end
+            scene.frame_set(1)
+        animations.apply(scene)
         context.view_layer.update()
         editable = stage.get('editableMesh')
         scene['mme_editable_mesh'] = json.dumps(editable)
@@ -343,6 +461,8 @@ def import_session(context, directory):
         for armature in created_armatures:
             if armature.users == 0:
                 bpy.data.armatures.remove(armature)
+        for action in created_actions:
+            bpy.data.actions.remove(action)
         for source_material in source_materials.values():
             if source_material.users == 0:
                 bpy.data.materials.remove(source_material)

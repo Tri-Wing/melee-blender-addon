@@ -55,6 +55,80 @@ def joint_matrices(groups, local_matrices=None):
     return nodes, joints, world
 
 
+def inverse_bind(joints, key):
+    values = joints[key]['inverseBindMatrix']
+    if values is None:
+        raise StageError('Envelope preview requires an inverse-bind matrix.')
+    return Matrix([values[i:i+4] for i in range(0, 12, 4)] + [[0, 0, 0, 1]])
+
+
+def deform_rest(joint):
+    """Return the rigid Blender-compatible rest matrix for an HSD inverse bind."""
+    values = joint['inverseBindMatrix']
+    if values is None:
+        raise StageError('A deform bone requires an inverse-bind matrix.')
+    bind = Matrix([values[i:i+4] for i in range(0, 12, 4)] + [[0, 0, 0, 1]])
+    rest = bind.inverted()
+    location, rotation, _ = rest.decompose()
+    return Matrix.LocRotScale(location, rotation, None)
+
+
+def envelope_context(payload, nodes, joints, world):
+    owner = nodes[payload['ownerId']]['ownerId']
+    owner_world = world[owner]
+    right = None
+    if not joints[owner]['flags'] & 2:
+        skeleton = owner
+        while skeleton in joints and not joints[skeleton]['flags'] & 3:
+            skeleton = nodes[skeleton]['ownerId']
+        if skeleton not in joints:
+            raise StageError('Envelope owner has no skeleton ancestor.')
+        if skeleton == owner:
+            right = inverse_bind(joints, skeleton).inverted()
+        elif joints[skeleton]['flags'] & 2:
+            right = world[skeleton].inverted() @ owner_world
+        else:
+            right = (world[skeleton] @ inverse_bind(joints, skeleton)).inverted() @ owner_world
+    return owner_world, right
+
+
+def mesh_binding(payload, nodes, joints, world, rests):
+    """Prepare an enveloped POBJ for Blender vertex groups and an armature modifier."""
+    envelopes = payload.get('envelopes')
+    if not envelopes:
+        raise StageError('Mesh binding requires HSD envelope data.')
+    owner_world, right = envelope_context(payload, nodes, joints, world)
+    has_right = right is not None
+    right = right or Matrix.Identity(4)
+    owner_inverse = owner_world.inverted()
+    positions, assignments = [], []
+    epsilon = 1.1920929e-7
+    for position, envelope_index in zip(payload['positions'], payload['envelopeIndices']):
+        envelope = envelopes[envelope_index]
+        source = right @ vector(position)
+        if envelope[0]['weight'] >= 1 - epsilon:
+            bone = envelope[0]['jobjId']
+            # HSD omits inverse bind multiplication for root-space, single-bone
+            # vertices. Fold that exception into the stored vertex position.
+            source = (rests[bone] @ source if not has_right else
+                      rests[bone] @ inverse_bind(joints, bone) @ source)
+            weights = [(bone, 1.0)]
+        else:
+            weights = [(item['jobjId'], item['weight']) for item in envelope
+                       if item['weight'] > epsilon]
+            if not weights:
+                raise StageError('Envelope vertex has no positive joint weight.')
+            for bone, _ in weights:
+                residual = rests[bone] @ inverse_bind(joints, bone)
+                error = max(abs(residual[i][j] - (1 if i == j else 0))
+                            for i in range(4) for j in range(4))
+                if error > 5e-4:
+                    raise StageError(f'Blended envelope uses a scaled or sheared inverse bind that Blender cannot represent ({error:.6g}).')
+        positions.append(owner_inverse @ source)
+        assignments.append(weights)
+    return positions, assignments
+
+
 def mesh_pose(payload, nodes, joints, world):
     owner = nodes[payload['ownerId']]['ownerId']
     owner_world = world[owner]
@@ -64,34 +138,16 @@ def mesh_pose(payload, nodes, joints, world):
             raise StageError('Shared-joint mesh preview is not supported yet.')
         return [vector(p) for p in payload['positions']], owner_world
 
-    def bind(key):
-        values = joints[key]['inverseBindMatrix']
-        if values is None:
-            raise StageError('Envelope preview requires an inverse-bind matrix.')
-        return Matrix([values[i:i+4] for i in range(0, 12, 4)] + [[0, 0, 0, 1]])
-
-    right = None
-    if not joints[owner]['flags'] & 2:
-        skeleton = owner
-        while skeleton in joints and not joints[skeleton]['flags'] & 3:
-            skeleton = nodes[skeleton]['ownerId']
-        if skeleton not in joints:
-            raise StageError('Envelope owner has no skeleton ancestor.')
-        if skeleton == owner:
-            right = bind(skeleton).inverted()
-        elif joints[skeleton]['flags'] & 2:
-            right = world[skeleton].inverted() @ owner_world
-        else:
-            right = (world[skeleton] @ bind(skeleton)).inverted() @ owner_world
+    owner_world, right = envelope_context(payload, nodes, joints, world)
     matrices = []
     for envelope in envelopes:
         if envelope[0]['weight'] >= 1 - 1.1920929e-7:
             bone = envelope[0]['jobjId']
-            matrix = world[bone] @ bind(bone) if right is not None else world[bone]
+            matrix = world[bone] @ inverse_bind(joints, bone) if right is not None else world[bone]
         else:
             matrix = Matrix(((0,)*4,)*4)
             for weight in envelope:
-                matrix += (world[weight['jobjId']] @ bind(weight['jobjId'])) * weight['weight']
+                matrix += (world[weight['jobjId']] @ inverse_bind(joints, weight['jobjId'])) * weight['weight']
         matrices.append(matrix @ right if right is not None else matrix)
     # Bake the static deformation into the owner's local space; retain hierarchy.
     inverse = owner_world.inverted()
