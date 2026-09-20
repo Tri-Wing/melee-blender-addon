@@ -169,10 +169,11 @@ Scale curves. Edit those curves in the Dope Sheet or Graph Editor, or pose a bon
 and insert transform keys. It drives the source JOBJ bones, generated envelope
 bones, rigid children, and weighted meshes.
 Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
-TObj translation, scale, rotation, blend values, and texture image/palette swaps.
+TObj translation, scale, rotation, blend values, texture image/palette swaps, and
+konst/TEV0/TEV1 color registers used by supported custom TEV stages.
 Indexed textures are decoded for the image and palette combinations reached by
-the timeline. Animated TEV registers, pixel-engine reference values, and material
-animation editing/export are not implemented yet.
+the timeline. Animated pixel-engine reference values and material animation
+editing/export are not implemented yet.
 When an MOBJ selects vertex color as its RGB source, playback keeps the texture
 pass neutral and continues to use the mesh's vertex RGB instead of its unused
 MOBJ diffuse value.
@@ -446,7 +447,7 @@ Rigid and envelope-deformed meshes retain decoded normals. GX triangles whose wi
 normals are reversed for Blender display and restored to their original order
 on export. The material preview reads an exact normal attribute because Blender's
 native custom normals clamp values that cross a polygon's hemisphere. Animated
-texture registers and pixel-engine values, shape and light animation, billboard
+pixel-engine values, shape and light animation, billboard
 behavior, constraints, instanced drawing, and
 stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow

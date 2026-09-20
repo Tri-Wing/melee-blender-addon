@@ -386,12 +386,11 @@ the target and set `endFrame`/`loop` values summarize their combined slot.
 
 Blender combines joint and material data for a slot into one Stage Animation
 Action. The timeline currently evaluates MOBJ ambient/diffuse/specular/
-alpha and TObj translation/scale/rotation/blend against the imported preview
+alpha and TObj translation/scale/rotation/blend, konst, TEV0, and TEV1 registers against the imported preview
 shader. It resets animated values to their source material state when another
 slot omits that target. Vertex-color RGB sources remain driven by their mesh
-color attribute rather than the MOBJ's unused diffuse value. Image/palette swaps,
-texture registers, pixel-engine
-reference values, and animation export remain deferred. No-op DAT export retains
+color attribute rather than the MOBJ's unused diffuse value. Image/palette swaps
+also follow the timeline. Pixel-engine reference values and animation export remain deferred. No-op DAT export retains
 all original material animation descriptors and buffers byte-for-byte.
 
 

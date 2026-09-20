@@ -339,6 +339,20 @@ def _apply_material(material, target, source_frame, animation_slot):
             if offset:
                 offset.inputs[1].default_value = matrix[axis][3]
 
+    def set_tev(index, layer):
+        tev = layer.get('tev')
+        if not tev:
+            return
+        suffix = '' if index == 0 else f' {index + 1}'
+        for key, label in (('konst', 'Konst'), ('tev0', 'Register 0'), ('tev1', 'Register 1')):
+            value = tev[key]
+            color = nodes.get(f'Stage TEV {label}{suffix}')
+            alpha = nodes.get(f'Stage TEV {label} Alpha{suffix}')
+            if color:
+                color.outputs[0].default_value = (*value[:3], 1)
+            if alpha:
+                alpha.outputs[0].default_value = value[3]
+
     # Always restore source texture state before applying the selected slot.
     # This prevents values from a previous Action persisting when the new slot
     # omits a material or one of its texture tracks.
@@ -350,6 +364,7 @@ def _apply_material(material, target, source_frame, animation_slot):
             sampler.image = base
     for index, layer in enumerate(textures):
         set_matrix(index, layer)
+        set_tev(index, layer)
         for node in nodes:
             if (node.get('mme_texture_index') == index
                     and node.get('mme_texture_operation') == 3):
@@ -373,9 +388,17 @@ def _apply_material(material, target, source_frame, animation_slot):
             if channel == 'palette':
                 palette_index = int(_value(track['keys'], texture_frame))
                 continue
-            if channel == 'lodBias' or channel.startswith(('konst.', 'tev0.', 'tev1.')):
+            if channel == 'lodBias':
                 continue
             value = _value(track['keys'], texture_frame)
+            if channel.startswith(('konst.', 'tev0.', 'tev1.')):
+                field, component = channel.split('.')
+                tev = layer.get('tev')
+                if tev and component in 'rgba':
+                    # HSD writes these tracks through an unsigned byte cast.
+                    byte = max(0, min(255, int(255.0 * value)))
+                    tev[field]['rgba'.index(component)] = byte / 255.0
+                continue
             if channel == 'blend':
                 for node in nodes:
                     if (node.get('mme_texture_index') == index
@@ -393,6 +416,7 @@ def _apply_material(material, target, source_frame, animation_slot):
             if image is not None and index in samplers:
                 samplers[index].image = image
         set_matrix(index, layer)
+        set_tev(index, layer)
 
 
 def _apply_materials(scene, payload, action, source_frame):

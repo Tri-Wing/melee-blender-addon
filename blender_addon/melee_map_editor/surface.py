@@ -593,6 +593,29 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         if not tev:
             return encoded_texture
 
+        suffix = '' if index == 0 else f' {index + 1}'
+
+        def register(key, label):
+            color = nodes.new('ShaderNodeRGB')
+            color.name = f'Stage TEV {label}{suffix}'
+            color['mme_texture_index'] = index
+            color['mme_tev_register'] = key
+            color.outputs[0].default_value = (*tev[key][:3], 1)
+            channels = nodes.new('ShaderNodeSeparateColor')
+            channels.name = f'Stage TEV {label} Channels{suffix}'
+            channels.mode = 'RGB'
+            links.new(color.outputs[0], channels.inputs['Color'])
+            alpha = nodes.new('ShaderNodeValue')
+            alpha.name = f'Stage TEV {label} Alpha{suffix}'
+            alpha['mme_texture_index'] = index
+            alpha['mme_tev_register'] = key
+            alpha.outputs[0].default_value = tev[key][3]
+            return color.outputs[0], channels.outputs, alpha.outputs[0]
+
+        konst, konst_channels, konst_alpha = register('konst', 'Konst')
+        tev0, tev0_channels, tev0_alpha = register('tev0', 'Register 0')
+        tev1, tev1_channels, tev1_alpha = register('tev1', 'Register 1')
+
         def source(code):
             return {
                 8: encoded_texture,
@@ -600,18 +623,16 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
                 12: (1, 1, 1, 1),
                 13: (.5, .5, .5, 1),
                 15: (0, 0, 0, 1),
-                0x80: tev['konst'],
-                0x81: [tev['konst'][0]] * 3 + [1],
-                0x82: [tev['konst'][1]] * 3 + [1],
-                0x83: [tev['konst'][2]] * 3 + [1],
-                0x84: [tev['konst'][3]] * 3 + [1],
-                0x85: tev['tev0'],
-                0x86: [tev['tev0'][3]] * 3 + [1],
-                0x87: tev['tev1'],
-                0x88: [tev['tev1'][3]] * 3 + [1]
+                0x80: konst,
+                0x81: konst_channels['Red'],
+                0x82: konst_channels['Green'],
+                0x83: konst_channels['Blue'],
+                0x84: konst_alpha,
+                0x85: tev0,
+                0x86: tev0_alpha,
+                0x87: tev1,
+                0x88: tev1_alpha
             }.get(code, encoded_texture)
-
-        suffix = '' if index == 0 else f' {index + 1}'
 
         def operation(kind, left, right, name):
             result = nodes.new('ShaderNodeMixRGB')

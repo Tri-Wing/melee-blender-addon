@@ -139,4 +139,27 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     bpy.context.scene.frame_set(13)
     assert sampler.image.name == catalog[(1, 1)]['imageName']
 
-print('MATERIAL ANIMATIONS PASS: transforms, colors, alpha, image/palette swaps, slot reset, no-op preservation')
+    fresh = bpy.data.scenes.new('TEV register animation')
+    bpy.context.window.scene = fresh
+    directory = import_stage(temp, 'GrIz.dat')
+    group = read(directory / 'models/group-001/group.json')
+    animation = next(item for item in group['materialAnimations'] if item['slot'] == 0)
+    target = next(material for material in animation['materials']
+                  if any(track['channel'] == 'tev0.r'
+                         for texture in material['textures'] for track in texture['tracks']))
+    obj = next(obj for obj in bpy.context.scene.objects if obj.get('mme_id') == target['materialId'])
+    material = obj.active_material
+    register = material.node_tree.nodes['Stage TEV Register 0']
+    assert register.outputs[0].is_linked
+    armature = next(obj for obj in bpy.context.scene.objects
+                    if obj.get('mme_role') == 'jobj-armature' and obj.get('mme_group_index') == 1)
+    armature.animation_data.action = next(action for action in animations.actions(armature)
+                                          if action.get('mme_animation_slot') == 0)
+    bpy.context.scene.frame_set(1)
+    start = register.outputs[0].default_value[:3]
+    bpy.context.scene.frame_set(450)
+    middle = register.outputs[0].default_value[:3]
+    assert all(abs(a - b) < 1e-6 for a, b in zip(start, (1, 0, 1))), start
+    assert abs(middle[0] - 63 / 255) < 1e-6 and middle[1] == 0 and middle[2] == 1, middle
+
+print('MATERIAL ANIMATIONS PASS: transforms, colors, alpha, image/palette and TEV-register playback, slot reset, no-op preservation')

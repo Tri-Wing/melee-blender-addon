@@ -188,9 +188,13 @@ public static class SessionExtractor
                     textureImageAnimationPreview = materialAnimationsByGroup.Values.SelectMany(animations => animations)
                         .SelectMany(animation => animation.Materials).SelectMany(material => material.Textures)
                         .Any(texture => texture.Images.Length > 0),
+                    textureRegisterAnimationPreview = materialAnimationsByGroup.Values.SelectMany(animations => animations)
+                        .SelectMany(animation => animation.Materials).SelectMany(material => material.Textures)
+                        .SelectMany(texture => texture.Tracks)
+                        .Any(track => track.Channel.StartsWith("konst.") || track.Channel.StartsWith("tev0.")
+                            || track.Channel.StartsWith("tev1.")),
                     dynamicCollisionEdit = false, apply = true },
-                deferredCapabilities = new[] { "material-animation-export", "texture-register-animation-preview",
-                    "material-pixel-animation-preview", "shape-animations",
+                deferredCapabilities = new[] { "material-animation-export", "material-pixel-animation-preview", "shape-animations",
                     "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
