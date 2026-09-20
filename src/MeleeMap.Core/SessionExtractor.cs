@@ -41,8 +41,7 @@ public static class SessionExtractor
         var groups = identity.Nodes.Where(n => n.Kind is "group" or "sentinel-group").ToArray();
         var jointAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
             group => StageJointAnimations.Read(stage, identity, group.GroupIndex));
-        var materialAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
-            group => StageMaterialAnimations.Read(stage, identity, group.GroupIndex));
+        Dictionary<int, MaterialAnimationSet[]> materialAnimationsByGroup = [];
         var vertexIds = collision.Vertices.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var lineIds = collision.Lines.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var jointIds = collision.Joints.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
@@ -60,6 +59,8 @@ public static class SessionExtractor
         {
             File.WriteAllBytes(Path.Combine(temporary, "source.dat"), stage.Layout.Bytes);
             Directory.CreateDirectory(Path.Combine(temporary, "edits"));
+            materialAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
+                group => StageMaterialAnimations.Read(stage, identity, group.GroupIndex, temporary));
             foreach (var group in groups)
             {
                 string groupPath = $"models/group-{group.GroupIndex:D3}";
@@ -136,7 +137,8 @@ public static class SessionExtractor
             var previewMaterials = ModelMaterials.Select(stage.Layout, editableModels).Select(material => new
             {
                 material.Id, material.Name, material.MobjOffset, material.UsesUv,
-                preview = TexturePreview.Extract(stage.Layout, material, temporary)
+                preview = TexturePreview.Extract(stage.Layout, material, temporary),
+                animationImages = AnimationImages(material.Id), animationWarning = AnimationWarning(material.Id)
             }).ToArray();
             // Preview-only materials never enter the reusable export material catalog.
             var catalogIds = previewMaterials.Select(m => m.Id).ToHashSet();
@@ -161,7 +163,8 @@ public static class SessionExtractor
                             ? "Material editing is unavailable for this object because its source texture or render configuration is not supported for DAT export."
                             : "Material editing is unavailable for this object because its geometry and material layout cannot be safely exported.";
                 return new { material.Id, material.Name, material.UsesUv, materialReadOnlyReason,
-                    preview = TexturePreview.Extract(stage.Layout, material, temporary) };
+                    preview = TexturePreview.Extract(stage.Layout, material, temporary),
+                    animationImages = AnimationImages(material.Id), animationWarning = AnimationWarning(material.Id) };
             }).ToArray();
             var baselineFiles = Directory.GetFiles(temporary, "*", SearchOption.AllDirectories)
                 .Where(path => Path.GetFileName(path) != "source.dat")
@@ -182,9 +185,12 @@ public static class SessionExtractor
                         .SelectMany(animation => animation.Nodes).Any(node => node.Editable),
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
                     materialAnimationPreview = materialAnimationsByGroup.Values.Any(animations => animations.Length > 0),
+                    textureImageAnimationPreview = materialAnimationsByGroup.Values.SelectMany(animations => animations)
+                        .SelectMany(animation => animation.Materials).SelectMany(material => material.Textures)
+                        .Any(texture => texture.Images.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
-                deferredCapabilities = new[] { "material-animation-export", "texture-image-animation-preview",
-                    "texture-register-animation-preview", "material-pixel-animation-preview", "shape-animations",
+                deferredCapabilities = new[] { "material-animation-export", "texture-register-animation-preview",
+                    "material-pixel-animation-preview", "shape-animations",
                     "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
@@ -217,6 +223,21 @@ public static class SessionExtractor
         }
         string? Link(int index) => index < 0 ? null : lineIds[index];
         Vector3Data Vec(int offset) => new(reader.Float(offset), reader.Float(offset + 4), reader.Float(offset + 8));
+        MaterialAnimationImage[] AnimationImages(string materialId) => materialAnimationsByGroup.Values
+            .SelectMany(sets => sets)
+            .SelectMany(set => set.Materials.Where(material => material.MaterialId == materialId)
+                .SelectMany(material => material.Textures.SelectMany(texture => texture.Images.Select(image =>
+                    new MaterialAnimationImage(set.Slot, texture.TextureIndex, image.ImageIndex,
+                        image.PaletteIndex, image.File, image.Width, image.Height)))))
+            .Distinct().ToArray();
+        string? AnimationWarning(string materialId)
+        {
+            string[] messages = materialAnimationsByGroup.Values.SelectMany(sets => sets)
+                .SelectMany(set => set.Materials).Where(material => material.MaterialId == materialId)
+                .SelectMany(material => material.Textures).Select(texture => texture.ImageWarning)
+                .Where(message => !string.IsNullOrEmpty(message)).Distinct().Cast<string>().ToArray();
+            return messages.Length == 0 ? null : string.Join(" ", messages);
+        }
         void Write(string relative, object data)
         {
             string path = Path.Combine(temporary, relative); Directory.CreateDirectory(Path.GetDirectoryName(path)!);

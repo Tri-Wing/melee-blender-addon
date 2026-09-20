@@ -169,9 +169,10 @@ Scale curves. Edit those curves in the Dope Sheet or Graph Editor, or pose a bon
 and insert transform keys. It drives the source JOBJ bones, generated envelope
 bones, rigid children, and weighted meshes.
 Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
-TObj translation, scale, rotation, and blend values. Texture image/palette swaps,
-animated TEV registers, pixel-engine reference values, and material animation
-editing/export are not implemented yet.
+TObj translation, scale, rotation, blend values, and texture image/palette swaps.
+Indexed textures are decoded for the image and palette combinations reached by
+the timeline. Animated TEV registers, pixel-engine reference values, and material
+animation editing/export are not implemented yet.
 When an MOBJ selects vertex color as its RGB source, playback keeps the texture
 pass neutral and continues to use the mesh's vertex RGB instead of its unused
 MOBJ diffuse value.
@@ -220,9 +221,8 @@ Outliner or viewport, then use **Edit Selected Model**. Read-only meshes have a
 Meshes named **Vertex Editable Model** have animated materials: move vertices
 using Blender's native tools, but keep topology, UVs and material assignments
 unchanged. Their original normals, materials, textures and animation data are
-preserved on export. Blender previews their base material colors and supported
-base textures without playing material or texture animation. Additional texture
-layers and game shader effects are not reproduced. The sidebar displays
+preserved on export. Blender previews supported material and texture animation,
+including image and palette swaps. Additional game shader effects are not reproduced. The sidebar displays
 this restriction and disables material assignment. Re-import after reloading
 the add-on to enable these newly supported meshes.
 
@@ -445,9 +445,9 @@ Affine parent matrices retain shear without Blender's local TRS decomposition.
 Rigid and envelope-deformed meshes retain decoded normals. GX triangles whose winding opposes those
 normals are reversed for Blender display and restored to their original order
 on export. The material preview reads an exact normal attribute because Blender's
-native custom normals clamp values that cross a polygon's hemisphere. Texture
-image/palette swaps, animated texture registers and pixel-engine values, shape
-and light animation, billboard behavior, constraints, instanced drawing, and
+native custom normals clamp values that cross a polygon's hemisphere. Animated
+texture registers and pixel-engine values, shape and light animation, billboard
+behavior, constraints, instanced drawing, and
 stage-code pose updates are not simulated. Source-hidden
 geometry is visible for inspection. Supported rigid targets allow
 geometry export; unsupported preview meshes remain read-only.

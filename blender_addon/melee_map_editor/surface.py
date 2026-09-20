@@ -30,6 +30,22 @@ def create_materials(stage, directory=None, light_objects=None):
         material['mme_model_uses_uv'] = entry['usesUv']
         material['mme_animation_preview'] = json.dumps(entry.get('preview') or {})
         configure_preview(material, entry.get('preview'), directory, stage, light_objects)
+        animation_images = []
+        if directory is not None:
+            session = Path(directory).resolve()
+            baseline = {item['file'] for item in stage['baselineFiles']}
+            for source in entry.get('animationImages', []):
+                path = (session / source['file']).resolve()
+                if not path.is_relative_to(session) or source['file'] not in baseline:
+                    raise StageError('Animated texture preview file is outside the protected session baseline.')
+                image = bpy.data.images.load(str(path), check_existing=True)
+                image.colorspace_settings.name = 'sRGB'
+                image.alpha_mode = 'STRAIGHT'
+                image.pack()
+                animation_images.append({**source, 'imageName': image.name})
+        material['mme_animation_images'] = json.dumps(animation_images)
+        if entry.get('animationWarning'):
+            material['mme_animation_warning'] = entry['animationWarning']
         if entry['id'] in definitions:
             material_properties.initialize(material, entry, definitions[entry['id']], directory, stage)
         result[entry['id']] = material
@@ -498,6 +514,8 @@ def configure_preview(material, preview, directory, stage, light_objects=None):
         sampler = nodes.new('ShaderNodeTexImage')
         sampler.name = 'Stage Texture' if index == 0 else f'Stage Texture {index + 1}'
         sampler.image = image
+        sampler['mme_texture_index'] = index
+        sampler['mme_base_image'] = image.name
         sampler.interpolation = 'Linear'
         sampler.extension = 'EXTEND'
         coordinate_type = layer.get('coordinateType', 0)

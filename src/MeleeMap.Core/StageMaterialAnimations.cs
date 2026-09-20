@@ -1,13 +1,19 @@
 using HSDRaw.Common.Animation;
 using HSDRaw.Common;
 using HSDRaw.Melee.Gr;
+using HSDRaw.Tools;
 using static MeleeMap.Core.ArchiveLayout;
 
 namespace MeleeMap.Core;
 
 public sealed record MaterialAnimationTrack(string Channel, JointAnimationKey[] Keys);
+public sealed record TextureAnimationFrame(int ImageIndex, int PaletteIndex, string File,
+    int Width, int Height);
+public sealed record MaterialAnimationImage(int Slot, int TextureIndex, int ImageIndex, int PaletteIndex,
+    string File, int Width, int Height);
 public sealed record TextureAnimationTracks(int TextureIndex, int TextureMapId,
-    uint Flags, float EndFrame, bool Loop, MaterialAnimationTrack[] Tracks);
+    uint Flags, float EndFrame, bool Loop, MaterialAnimationTrack[] Tracks,
+    TextureAnimationFrame[] Images, string? ImageWarning);
 public sealed record MaterialAnimationTarget(string MaterialId, uint Flags,
     float EndFrame, bool Loop, float MaterialEndFrame, bool MaterialLoop,
     MaterialAnimationTrack[] Tracks,
@@ -64,7 +70,7 @@ public static class StageMaterialAnimations
     };
 
     public static MaterialAnimationSet[] Read(StageArchive stage,
-        ModelIdentitySnapshot identity, int groupIndex)
+        ModelIdentitySnapshot identity, int groupIndex, string? previewDirectory = null)
     {
         var head = stage.File["map_head"]?.Data as SBM_Map_Head;
         Require(head != null, "MATANIM_GROUP", "Stage model groups are unavailable for material animation extraction.");
@@ -136,10 +142,13 @@ public static class StageMaterialAnimations
                         var textureTracks = Decode(texture.AnimationObject, descriptor =>
                             TextureChannels.GetValueOrDefault(descriptor.TexTrackType));
                         var aobj = texture.AnimationObject;
-                        return new TextureAnimationTracks(TextureIndex(dobj, (int)texture.GXTexMapID),
+                        float endFrame = EndFrame(aobj, textureTracks);
+                        var binding = TextureBinding(dobj, (int)texture.GXTexMapID);
+                        var images = AnimationImages(texture, binding.Offset, textureTracks, endFrame);
+                        return new TextureAnimationTracks(binding.Index,
                             (int)texture.GXTexMapID, aobj == null ? 0 : unchecked((uint)aobj.Flags),
-                            EndFrame(aobj, textureTracks), groupFlag != 0 || aobj?.Flags.HasFlag(AOBJ_Flags.ANIM_LOOP) == true,
-                            textureTracks);
+                            endFrame, groupFlag != 0 || aobj?.Flags.HasFlag(AOBJ_Flags.ANIM_LOOP) == true,
+                            textureTracks, images.Frames, images.Warning);
                     }).Where(texture => texture.Tracks.Length > 0).ToArray() ?? [];
                     if (tracks.Length == 0 && textures.Length == 0) continue;
                     var materialAobj = animation.AnimationObject;
@@ -157,16 +166,78 @@ public static class StageMaterialAnimations
         }
         return result.ToArray();
 
-        int TextureIndex(ModelIdentityNode dobj, int mapId)
+        (int Index, int? Offset) TextureBinding(ModelIdentityNode dobj, int mapId)
         {
             int? mobj = reader.Pointer(dobj.SourceOffset + 8);
             int? texture = mobj.HasValue ? reader.Pointer(mobj.Value + 8) : null;
             for (int index = 0; texture.HasValue && index < 8; index++)
             {
-                if (reader.Int(texture.Value + 8) == mapId) return index;
+                if (reader.Int(texture.Value + 8) == mapId) return (index, texture.Value);
                 texture = reader.Pointer(texture.Value + 4);
             }
-            return -1;
+            return (-1, null);
+        }
+
+        (TextureAnimationFrame[] Frames, string? Warning) AnimationImages(HSD_TexAnim texture,
+            int? baseTexture, MaterialAnimationTrack[] tracks, float endFrame)
+        {
+            if (previewDirectory == null || !tracks.Any(track => track.Channel is "image" or "palette"))
+                return ([], null);
+            try
+            {
+                Require(baseTexture.HasValue, "MATANIM_TEXTURE", "Animated texture map is absent from its material.");
+                int descriptor = stage.File.GetOffsetFromStruct(texture._s) - 32;
+                Require(descriptor >= 0, "MATANIM_TEXTURE", "Animated texture descriptor has no source offset.");
+                int imageCount = reader.Short(descriptor + 0x14);
+                int paletteCount = reader.Short(descriptor + 0x16);
+                Require(imageCount >= 0 && paletteCount >= 0,
+                    "MATANIM_TEXTURE", "Animated texture bank has a negative entry count.");
+                int imageTable = reader.Array(descriptor + 0x0C, imageCount, 4);
+                int paletteTable = reader.Array(descriptor + 0x10, paletteCount, 4);
+                int[] images = Enumerable.Range(0, imageCount)
+                    .Select(index => reader.Pointer(imageTable + index * 4)
+                        ?? throw new StageException("MATANIM_TEXTURE", "Animated image bank contains a null entry."))
+                    .ToArray();
+                int[] palettes = Enumerable.Range(0, paletteCount)
+                    .Select(index => reader.Pointer(paletteTable + index * 4)
+                        ?? throw new StageException("MATANIM_TEXTURE", "Animated palette bank contains a null entry."))
+                    .ToArray();
+                var descriptors = texture.AnimationObject?.FObjDesc?.List ?? [];
+                var imageDescriptor = descriptors.FirstOrDefault(item => item.TexTrackType == TexTrackType.HSD_A_T_TIMG);
+                var paletteDescriptor = descriptors.FirstOrDefault(item => item.TexTrackType == TexTrackType.HSD_A_T_TCLT);
+                var imagePlayer = imageDescriptor == null ? null : new FOBJ_Player(imageDescriptor);
+                var palettePlayer = paletteDescriptor == null ? null : new FOBJ_Player(paletteDescriptor);
+                int frames = Math.Max(0, checked((int)Math.Ceiling(endFrame)));
+                Require(frames <= 100000, "MATANIM_TEXTURE", "Animated texture duration is too large to preview safely.");
+                var states = new HashSet<(int Image, int Palette)>();
+                for (int frame = 0; frame <= frames; frame++)
+                {
+                    int image = imagePlayer == null ? -1 : (int)imagePlayer.GetValue(frame);
+                    int palette = palettePlayer == null ? -1 : (int)palettePlayer.GetValue(frame);
+                    Require(image >= -1 && image < imageCount && palette >= -1 && palette < paletteCount,
+                        "MATANIM_TEXTURE", "Animated texture track selects an entry outside its image or palette bank.");
+                    states.Add((image, palette));
+                }
+                int baseImage = reader.Pointer(baseTexture!.Value + 0x4C)
+                    ?? throw new StageException("MATANIM_TEXTURE", "Animated texture has no base image.");
+                int? basePalette = reader.Pointer(baseTexture.Value + 0x50);
+                var result = new List<TextureAnimationFrame>();
+                foreach (var state in states.OrderBy(state => state.Image).ThenBy(state => state.Palette))
+                {
+                    int image = state.Image < 0 ? baseImage : images[state.Image];
+                    int? palette = state.Palette < 0 ? basePalette : palettes[state.Palette];
+                    var decoded = TexturePreview.ExtractAnimationFrame(stage.Layout, image, palette,
+                        previewDirectory, state.Image, state.Palette);
+                    result.Add(new(decoded.ImageIndex, decoded.PaletteIndex, decoded.File,
+                        decoded.Width, decoded.Height));
+                }
+                return (result.ToArray(), null);
+            }
+            catch (Exception exception) when (exception is StageException or IndexOutOfRangeException
+                or ArgumentException or OverflowException)
+            {
+                return ([], $"Animated texture preview unavailable: {exception.Message}");
+            }
         }
     }
 

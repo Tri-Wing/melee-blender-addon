@@ -15,6 +15,8 @@ public sealed record PreviewTexture(string File, int Width, int Height, int Wrap
     int RepeatS, int RepeatT, float[] Scale, float[] Rotation, float[] Translation,
     int ColorOperation = 5, float ColorBlend = 1, int TexCoord = 0, int LightmapFlags = 0,
     int CoordinateType = 0, PreviewTev? Tev = null);
+public sealed record PreviewTextureFrame(int ImageIndex, int PaletteIndex, string File,
+    int Width, int Height);
 
 /// <summary>Read-only, bounded texture decoding for Blender previews; never used as DAT export input.</summary>
 public static class TexturePreview
@@ -60,51 +62,8 @@ public static class TexturePreview
             PreviewTexture Decode(int t, int texCoord)
             {
                 int image = r.Pointer(t + 0x4C) ?? throw new StageException("TEXTURE_PREVIEW", "Texture has no image descriptor.");
-                int width = r.UShort(image + 4), height = r.UShort(image + 6), format = r.Int(image + 8);
-                var (blockWidth, blockHeight, blockBytes) = format switch
-                {
-                    0 or 8 or 14 => (8, 8, 32),
-                    1 or 2 or 9 => (8, 4, 32),
-                    3 or 4 or 5 or 10 => (4, 4, 32),
-                    6 => (4, 4, 64),
-                    _ => throw new StageException("TEXTURE_PREVIEW", $"Unsupported texture format {format}.")
-                };
-                Require(width is > 0 and <= 2048 && height is > 0 and <= 2048, "TEXTURE_PREVIEW", "Preview dimensions must be between 1 and 2048.");
-                int paddedWidth = (width + blockWidth - 1) / blockWidth * blockWidth;
-                int paddedHeight = (height + blockHeight - 1) / blockHeight * blockHeight;
-                int length = paddedWidth / blockWidth * (paddedHeight / blockHeight) * blockBytes;
-                byte[] Data(int field, int size)
-                {
-                    int pointer = r.Pointer(field) ?? throw new StageException("TEXTURE_PREVIEW", "Missing image or palette buffer.");
-                    r.Check(pointer, size);
-                    int boundary = archive.Pointers.Values.Concat(archive.Roots.Select(root => root.Offset))
-                        .Append(archive.DataSize).Where(offset => offset > pointer).Min();
-                    Require(pointer + size <= boundary, "TEXTURE_PREVIEW", "Image or palette buffer is truncated.");
-                    return archive.Bytes.AsSpan(32 + pointer, size).ToArray();
-                }
-                var encoded = Data(image, length);
-                int paletteFormat = 0, count = 0; byte[] palette = [];
-                if (format is 8 or 9 or 10)
-                {
-                    int tlut = r.Pointer(t + 0x50) ?? throw new StageException("TEXTURE_PREVIEW", "Indexed texture has no palette.");
-                    paletteFormat = r.Int(tlut + 4); count = r.UShort(tlut + 12);
-                    Require(paletteFormat is >= 0 and <= 2 && count > 0 && count <= (format == 8 ? 16 : format == 9 ? 256 : 16384),
-                        "TEXTURE_PREVIEW", "Unsupported texture palette.");
-                    palette = Data(tlut, count * 2);
-                }
-                // Decode full tiled dimensions, then crop padded edges. HSDRaw returns BGRA bytes.
-                byte[] bgra = GXImageConverter.DecodeTPL((GXTexFmt)format, paddedWidth, paddedHeight, encoded,
-                    (GXTlutFmt)paletteFormat, count, palette);
-                Require(bgra.Length == paddedWidth * paddedHeight * 4, "TEXTURE_PREVIEW", "Texture decoder returned an incomplete image.");
-                // HSDRaw's RGB565 palette decoder left-shifts channels without bit
-                // replication. Expand those five/six-bit values to the full range.
-                if (format is 8 or 9 or 10 && paletteFormat == 1)
-                    for (int i = 0; i < bgra.Length; i += 4)
-                    {
-                        bgra[i] |= (byte)(bgra[i] >> 5);
-                        bgra[i + 1] |= (byte)(bgra[i + 1] >> 6);
-                        bgra[i + 2] |= (byte)(bgra[i + 2] >> 5);
-                    }
+                int? tlut = r.Pointer(t + 0x50);
+                var decoded = DecodeImage(archive, image, tlut, directory);
                 float[] Vec(int at) => [r.Float(at), r.Float(at + 4), r.Float(at + 8)];
                 var scale = Vec(t + 0x1C); var rotation = Vec(t + 0x10); var translation = Vec(t + 0x28);
                 int wrapS = r.Int(t + 0x34), wrapT = r.Int(t + 0x38), repeatS = r.Byte(t + 0x3C), repeatT = r.Byte(t + 0x3D);
@@ -113,9 +72,6 @@ public static class TexturePreview
                 Require(wrapS is >= 0 and <= 2 && wrapT is >= 0 and <= 2 && repeatS > 0 && repeatT > 0
                     && colorOperation is >= 0 and <= 8 && float.IsFinite(blend)
                     && scale.Concat(rotation).Concat(translation).All(float.IsFinite), "TEXTURE_PREVIEW", "Unsupported texture transform or color operation.");
-                string file = $"models/textures/{image:x8}-{r.Pointer(t + 0x50).GetValueOrDefault():x8}.tga";
-                string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
                 PreviewTev? tev = null;
                 int? tevOffset = r.Pointer(t + 0x58);
                 if (tevOffset.HasValue && (unchecked((uint)r.Int(tevOffset.Value + 0x1C)) & 0x40000000) != 0)
@@ -135,12 +91,76 @@ public static class TexturePreview
                             Color(tevOffset.Value + 0x18));
                     }
                 }
-                return new(file, width, height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation,
+                return new(decoded.File, decoded.Width, decoded.Height, wrapS, wrapT, repeatS, repeatT, scale, rotation, translation,
                     colorOperation, Math.Clamp(blend, 0, 1), texCoord, flags & 0x1F0, flags & 15, tev);
             }
         }
         catch (Exception e) when (e is StageException or IndexOutOfRangeException or ArgumentException)
         { return Preview(null, $"Texture preview unavailable: {e.Message}"); }
+    }
+
+    public static PreviewTextureFrame ExtractAnimationFrame(ArchiveLayout archive, int imageOffset,
+        int? paletteOffset, string directory, int imageIndex, int paletteIndex)
+    {
+        var decoded = DecodeImage(archive, imageOffset, paletteOffset, directory);
+        return new(imageIndex, paletteIndex, decoded.File, decoded.Width, decoded.Height);
+    }
+
+    private sealed record DecodedImage(string File, int Width, int Height);
+
+    private static DecodedImage DecodeImage(ArchiveLayout archive, int image, int? tlut, string directory)
+    {
+        var r = new ArchiveDataReader(archive);
+        r.Check(image, 12);
+        int width = r.UShort(image + 4), height = r.UShort(image + 6), format = r.Int(image + 8);
+        var (blockWidth, blockHeight, blockBytes) = format switch
+        {
+            0 or 8 or 14 => (8, 8, 32),
+            1 or 2 or 9 => (8, 4, 32),
+            3 or 4 or 5 or 10 => (4, 4, 32),
+            6 => (4, 4, 64),
+            _ => throw new StageException("TEXTURE_PREVIEW", $"Unsupported texture format {format}.")
+        };
+        Require(width is > 0 and <= 2048 && height is > 0 and <= 2048,
+            "TEXTURE_PREVIEW", "Preview dimensions must be between 1 and 2048.");
+        int paddedWidth = (width + blockWidth - 1) / blockWidth * blockWidth;
+        int paddedHeight = (height + blockHeight - 1) / blockHeight * blockHeight;
+        int length = paddedWidth / blockWidth * (paddedHeight / blockHeight) * blockBytes;
+        byte[] Data(int field, int size)
+        {
+            int pointer = r.Pointer(field) ?? throw new StageException("TEXTURE_PREVIEW", "Missing image or palette buffer.");
+            r.Check(pointer, size);
+            int boundary = archive.Pointers.Values.Concat(archive.Roots.Select(root => root.Offset))
+                .Append(archive.DataSize).Where(offset => offset > pointer).Min();
+            Require(pointer + size <= boundary, "TEXTURE_PREVIEW", "Image or palette buffer is truncated.");
+            return archive.Bytes.AsSpan(32 + pointer, size).ToArray();
+        }
+        var encoded = Data(image, length);
+        int paletteFormat = 0, count = 0; byte[] palette = [];
+        if (format is 8 or 9 or 10)
+        {
+            Require(tlut.HasValue, "TEXTURE_PREVIEW", "Indexed texture has no palette.");
+            paletteFormat = r.Int(tlut!.Value + 4); count = r.UShort(tlut.Value + 12);
+            Require(paletteFormat is >= 0 and <= 2 && count > 0
+                && count <= (format == 8 ? 16 : format == 9 ? 256 : 16384),
+                "TEXTURE_PREVIEW", "Unsupported texture palette.");
+            palette = Data(tlut.Value, count * 2);
+        }
+        byte[] bgra = GXImageConverter.DecodeTPL((GXTexFmt)format, paddedWidth, paddedHeight, encoded,
+            (GXTlutFmt)paletteFormat, count, palette);
+        Require(bgra.Length == paddedWidth * paddedHeight * 4,
+            "TEXTURE_PREVIEW", "Texture decoder returned an incomplete image.");
+        if (format is 8 or 9 or 10 && paletteFormat == 1)
+            for (int i = 0; i < bgra.Length; i += 4)
+            {
+                bgra[i] |= (byte)(bgra[i] >> 5);
+                bgra[i + 1] |= (byte)(bgra[i + 1] >> 6);
+                bgra[i + 2] |= (byte)(bgra[i + 2] >> 5);
+            }
+        string file = $"models/textures/{image:x8}-{tlut.GetValueOrDefault():x8}.tga";
+        string path = Path.Combine(directory, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (!File.Exists(path)) File.WriteAllBytes(path, Tga(width, height, paddedWidth, bgra));
+        return new(file, width, height);
     }
 
     public static byte[] Tga(int width, int height, int rowWidth, byte[] bgra)

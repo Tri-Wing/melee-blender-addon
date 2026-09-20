@@ -269,7 +269,7 @@ def _set_rgb(socket, value):
     socket.default_value = (*(_linear(component) for component in value[:3]), 1)
 
 
-def _apply_material(material, target, source_frame):
+def _apply_material(material, target, source_frame, animation_slot):
     from . import surface
     preview = copy.deepcopy(json.loads(material.get('mme_animation_preview', '{}')))
     if not preview or not material.node_tree:
@@ -326,6 +326,7 @@ def _apply_material(material, target, source_frame):
         alpha_node.outputs[0].default_value = max(0.0, min(1.0, alpha))
 
     textures = preview.get('textures') or ([preview['texture']] if preview.get('texture') else [])
+    animation_images = json.loads(material.get('mme_animation_images', '[]'))
 
     def set_matrix(index, layer):
         matrix = surface.preview_matrix(layer)
@@ -341,6 +342,12 @@ def _apply_material(material, target, source_frame):
     # Always restore source texture state before applying the selected slot.
     # This prevents values from a previous Action persisting when the new slot
     # omits a material or one of its texture tracks.
+    samplers = {node.get('mme_texture_index'): node for node in nodes
+                if node.type == 'TEX_IMAGE' and node.get('mme_texture_index') is not None}
+    for sampler in samplers.values():
+        base = bpy.data.images.get(sampler.get('mme_base_image', ''))
+        if base is not None:
+            sampler.image = base
     for index, layer in enumerate(textures):
         set_matrix(index, layer)
         for node in nodes:
@@ -357,9 +364,16 @@ def _apply_material(material, target, source_frame):
         if texture_animation['loop'] and texture_end > 0:
             texture_frame %= texture_end
         layer = textures[index]
+        image_index = palette_index = -1
         for track in texture_animation['tracks']:
             channel = track['channel']
-            if channel in ('image', 'palette', 'lodBias') or channel.startswith(('konst.', 'tev0.', 'tev1.')):
+            if channel == 'image':
+                image_index = int(_value(track['keys'], texture_frame))
+                continue
+            if channel == 'palette':
+                palette_index = int(_value(track['keys'], texture_frame))
+                continue
+            if channel == 'lodBias' or channel.startswith(('konst.', 'tev0.', 'tev1.')):
                 continue
             value = _value(track['keys'], texture_frame)
             if channel == 'blend':
@@ -370,6 +384,14 @@ def _apply_material(material, target, source_frame):
                 continue
             field, axis = channel.split('.')
             layer[field]['xyz'.index(axis)] = value
+        if image_index >= 0 or palette_index >= 0:
+            frame = next((entry for entry in animation_images
+                          if entry['slot'] == animation_slot and entry['textureIndex'] == index
+                          and entry['imageIndex'] == image_index
+                          and entry['paletteIndex'] == palette_index), None)
+            image = bpy.data.images.get(frame['imageName']) if frame else None
+            if image is not None and index in samplers:
+                samplers[index].image = image
         set_matrix(index, layer)
 
 
@@ -389,7 +411,7 @@ def _apply_materials(scene, payload, action, source_frame):
             continue
         target = targets.get(material_id, {
             'endFrame': 0, 'loop': False, 'tracks': [], 'textures': []})
-        _apply_material(material, target, source_frame)
+        _apply_material(material, target, source_frame, slot)
 
 
 def _apply_armature(scene, armature):

@@ -58,4 +58,33 @@ public class StageMaterialAnimationTests
             });
         });
     }
+
+    [CorpusFact]
+    public void ExtractsReachableImageAndPaletteCombinations()
+    {
+        string source = Path.Combine(CorpusTests.CorpusDirectory, "GrPs.dat");
+        if (!File.Exists(source)) return;
+        string directory = Path.Combine(Path.GetTempPath(), "meleemap-texture-animation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stage = new StageArchive(source);
+            var identity = ModelIdentity.Capture(stage.Layout, new());
+            var textures = Enumerable.Range(0, 64)
+                .SelectMany(group => StageMaterialAnimations.Read(stage, identity, group, directory))
+                .SelectMany(set => set.Materials).SelectMany(material => material.Textures).ToArray();
+            var palette = textures.FirstOrDefault(texture =>
+                texture.Tracks.Any(track => track.Channel == "palette")
+                && texture.Images.Select(image => (image.ImageIndex, image.PaletteIndex))
+                    .SequenceEqual([(0, 0), (1, 1)]));
+            Assert.NotNull(palette);
+            Assert.Null(palette!.ImageWarning);
+            Assert.All(palette.Images, image =>
+            {
+                Assert.True(image.Width > 0 && image.Height > 0);
+                Assert.True(File.Exists(Path.Combine(directory, image.File)));
+            });
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
 }

@@ -1,4 +1,5 @@
 """Read-only HSD material and texture animation playback."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -49,6 +50,27 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     scene.apply(bpy.context.scene, CLI, 'dotnet', temp / 'grgb-noop.dat')
     assert (temp / 'grgb-noop.dat').read_bytes() == (CORPUS / 'GrGb.dat').read_bytes()
 
+    group = read(directory / 'models/group-001/group.json')
+    animation = next(item for item in group['materialAnimations'] if item['slot'] == 0)
+    target = next(material for material in animation['materials']
+                  if any(track['channel'] == 'image'
+                         for texture in material['textures'] for track in texture['tracks']))
+    texture_animation = next(texture for texture in target['textures']
+                             if any(track['channel'] == 'image' for track in texture['tracks']))
+    assert [(image['imageIndex'], image['paletteIndex']) for image in texture_animation['images']] == [
+        (0, -1), (1, -1), (2, -1)]
+    obj = next(obj for obj in bpy.context.scene.objects if obj.get('mme_id') == target['materialId'])
+    sampler = obj.active_material.node_tree.nodes['Stage Texture']
+    armature = next(obj for obj in bpy.context.scene.objects
+                    if obj.get('mme_role') == 'jobj-armature' and obj.get('mme_group_index') == 1)
+    armature.animation_data.action = next(action for action in animations.actions(armature)
+                                          if action.get('mme_animation_slot') == 0)
+    names = []
+    for frame in (1, 41, 44):
+        bpy.context.scene.frame_set(frame)
+        names.append(sampler.image.name)
+    assert len(set(names)) == 3, names
+
     fresh = bpy.data.scenes.new('Material alpha animation')
     bpy.context.window.scene = fresh
     directory = import_stage(temp, 'GrNLa.dat')
@@ -90,4 +112,31 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     restored = tint.inputs[1].default_value[0]
     assert abs(restored - bright) < 1e-6, (bright, restored)
 
-print('MATERIAL ANIMATIONS PASS: slots, looping texture transforms, diffuse, alpha, slot reset, no-op preservation')
+    fresh = bpy.data.scenes.new('Texture palette animation')
+    bpy.context.window.scene = fresh
+    directory = import_stage(temp, 'GrPs.dat')
+    group = read(directory / 'models/group-001/group.json')
+    animation = next(item for item in group['materialAnimations'] if item['slot'] == 0)
+    target = next(material for material in animation['materials']
+                  if any(track['channel'] == 'palette'
+                         for texture in material['textures'] for track in texture['tracks']))
+    texture_animation = next(texture for texture in target['textures']
+                             if any(track['channel'] == 'palette' for track in texture['tracks']))
+    assert {(image['imageIndex'], image['paletteIndex']) for image in texture_animation['images']} == {
+        (0, 0), (1, 1)}
+    obj = next(obj for obj in bpy.context.scene.objects if obj.get('mme_id') == target['materialId'])
+    material = obj.active_material
+    catalog = {(entry['imageIndex'], entry['paletteIndex']): entry
+               for entry in json.loads(material['mme_animation_images'])
+               if entry['slot'] == 0 and entry['textureIndex'] == texture_animation['textureIndex']}
+    sampler = material.node_tree.nodes['Stage Texture']
+    armature = next(obj for obj in bpy.context.scene.objects
+                    if obj.get('mme_role') == 'jobj-armature' and obj.get('mme_group_index') == 1)
+    armature.animation_data.action = next(action for action in animations.actions(armature)
+                                          if action.get('mme_animation_slot') == 0)
+    bpy.context.scene.frame_set(1)
+    assert sampler.image.name == catalog[(0, 0)]['imageName']
+    bpy.context.scene.frame_set(13)
+    assert sampler.image.name == catalog[(1, 1)]['imageName']
+
+print('MATERIAL ANIMATIONS PASS: transforms, colors, alpha, image/palette swaps, slot reset, no-op preservation')
