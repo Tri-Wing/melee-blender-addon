@@ -44,12 +44,8 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     for action in session_actions:
         if action.get('mme_role') != 'jobj-animation':
             raise StageError(f'{action.name}: unsupported animation data is not allowed.')
-        curves = getattr(action, 'fcurves', ())
-        layers = getattr(action, 'layers', ())
-        if len(curves) or len(layers):
-            raise StageError(f'{action.name}: imported joint animations are read-only.')
         result['actions'].append({'props': properties(action), 'name': action.name,
-            'fakeUser': action.use_fake_user})
+            'fakeUser': action.use_fake_user, 'curves': animations.structure(scene, action)})
     for c in collections:
         result['collections'].append({'props': properties(c),
             'parents': sorted(p.get('mme_id', p.name) for p in bpy.data.collections if c.name in p.children)
@@ -77,8 +73,6 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
         if o.constraints or (animation_data and not valid_animation) \
                 or (o.data and o.data.animation_data) or (o.type == 'MESH' and o.data.shape_keys):
             raise StageError(f'{o.name}: constraints, shape keys and animation are not supported.')
-        if valid_animation:
-            row['animation'] = animation_data.action.get('mme_id') if animation_data.action else None
         if o.modifiers:
             valid = (o.type == 'MESH' and o.get('mme_enveloped') and len(o.modifiers) == 1
                 and o.modifiers[0].type == 'ARMATURE'
@@ -509,6 +503,7 @@ def prepare(scene):
     lighting.edits(scene, stage)
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobjs.edits(scene, stage, groups)
+    animations.edits(scene, stage, groups)
     return directory, edits if dirty else None
 
 
@@ -521,11 +516,14 @@ def apply(scene, cli, dotnet, output):
     light_edits = lighting.edits(scene, stage)
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobj_edits = jobjs.edits(scene, stage, groups)
+    animation_edits = animations.edits(scene, stage, groups)
     payloads = {}
     if light_edits is not None:
         payloads[directory / 'edits/lights.json'] = light_edits
     if jobj_edits is not None:
         payloads[directory / 'edits/jobjs.json'] = jobj_edits
+    if animation_edits is not None:
+        payloads[directory / 'edits/animations.json'] = animation_edits
     if material_edits is not None:
         payloads[directory / 'edits/materials.json'] = material_edits
     if edits is not None:

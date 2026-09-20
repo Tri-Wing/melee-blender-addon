@@ -77,7 +77,8 @@ POBJs. All ten groups and all model identities remain present. Other archives ca
 still contain unsupported encodings, reported in `deferredMeshes`; consult
 `allModelGeometry` instead of assuming coverage. Materials/textures/animation
 data remain explicit in the session. Blender imports envelope weights and JOBJ
-animation playback read-only; weight and animation editing are not exported. Supported rigid models can
+animation playback. Supported existing JOBJ transform tracks are editable and
+exportable; envelope-weight editing is not exported. Supported rigid models can
 be edited through the model replacement path.
 
 ## Collision baseline
@@ -316,27 +317,60 @@ weights. Enveloped mesh objects retain their fixed bind-pose transform instead
 of remaining bone-parented; otherwise the animated owner transform would enter
 the Armature modifier's skin input a second time.
 
-### Read-only JOBJ animation playback
+### JOBJ animation playback and transform-track edits
 
 Each group stores a `jointAnimations` array keyed by its original model-group
 animation `slot`. A set records its maximum `endFrame`, effective loop flag,
 the source model-group `groupFlag` byte, and animated
 nodes. Nodes use stable JOBJ IDs and contain transform tracks named
 `rotation.x/y/z`, `translation.x/y/z`, or `scale.x/y/z`. Every decoded key retains
-its floating-point `frame`, `value`, `tangent`, and HSD interpolation opcode.
+its floating-point `frame`, `value`, `tangent`, and HSD interpolation opcode. A
+node's `editable` property is true when all of its source descriptors are supported
+transform channels and its timing and base scale can be safely round-tripped.
 
 Melee sets `AOBJ_LOOP` at runtime when `SBM_Map_GOBJ.AnimationFlags[slot]` is
 nonzero. A node's exported `loop` therefore combines that runtime rule with its
 serialized AOBJ loop bit; `flags` still retains the unmodified AOBJ flags.
 
-Blender creates one read-only Action for each set and keeps the slot identity in
-Action metadata. A timeline handler evaluates the decoded HSD constant, linear,
-Hermite, zero-tangent, and slope operations directly, starting from each JOBJ's
-source SRT for channels absent from the animation. Blender frame 1 maps to HSD
-frame 0. Looping wraps at `endFrame`, using the zero rewind frame initialized by
-the engine. The selected Action is preview state and is part of the protected scene
-inventory; no animation edit file is emitted. DAT export therefore preserves the
-source animation structures byte-for-byte.
+Blender creates one Action for each set and keeps the slot identity in Action
+metadata. Editable nodes use native bone Location, Rotation, and Scale F-curves;
+the timeline handler continues to evaluate decoded HSD constant, linear, Hermite,
+zero-tangent, and slope operations for unsupported nodes. Both paths start from
+each JOBJ's source SRT for absent channels. Blender frame 1 maps to HSD frame 0.
+Looping wraps at `endFrame`, using the zero rewind frame initialized by the engine.
+
+When native curves change, Blender emits `edits/animations.json`:
+
+```json
+{
+  "protocolVersion": 2,
+  "coordinateSpace": "game-jobj-animation",
+  "nodes": [
+    {
+      "groupIndex": 2,
+      "slot": 0,
+      "jobjId": "<source JOBJ UUID>",
+      "tracks": [
+        {
+          "channel": "translation.x",
+          "keys": [
+            { "frame": 0, "value": 0, "tangent": 0, "interpolation": "HSD_A_OP_LIN" },
+            { "frame": 30, "value": 10, "tangent": 0, "interpolation": "HSD_A_OP_LIN" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Targets must appear in the manifest's `editableJointAnimations` list. Each track
+uses a unique supported transform channel, begins at frame zero, and has strictly
+increasing whole-number frames within the existing node duration. Blender samples
+all nine transform channels at every whole source frame and reduces collinear
+samples before writing linear HSD keys. The writer appends replacement FOBJ buffers
+and descriptors, redirects the existing AOBJ, and preserves duration and loop flags.
+Unchanged sessions preserve the source animation structures byte-for-byte.
 
 ### Read-only material animation playback
 
@@ -350,8 +384,8 @@ interpolation representation as JOBJ animation. `materialEndFrame` and
 `materialLoop` keep the MOBJ AOBJ timing separate from each nested texture AOBJ;
 the target and set `endFrame`/`loop` values summarize their combined slot.
 
-Blender combines joint and material data for a slot into one read-only Stage
-Animation Action. The timeline currently evaluates MOBJ ambient/diffuse/specular/
+Blender combines joint and material data for a slot into one Stage Animation
+Action. The timeline currently evaluates MOBJ ambient/diffuse/specular/
 alpha and TObj translation/scale/rotation/blend against the imported preview
 shader. It resets animated values to their source material state when another
 slot omits that target. Image/palette swaps, texture registers, pixel-engine

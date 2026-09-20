@@ -2,9 +2,10 @@
 
 Development target: **Blender 4.5.0 on Linux**, with .NET 8 for the development
 backend. This milestone imports stage models and edits existing static collision,
-supported rigid geometry/material properties, lights, and static JOBJ transforms.
-It also imports JOBJ and material animation slots as read-only Blender Actions
-and plays their original HSD curves on the armatures and preview materials.
+supported rigid geometry/material properties, lights, static JOBJ transforms, and
+existing JOBJ transform animations. It imports animation slots as Blender Actions,
+uses native editable bone curves for supported JOBJ tracks, and plays supported
+material animation channels on preview materials.
 The user has confirmed collision editing, model vertex movement, joined cubes,
 and corrected face culling in game. Multi-target export has also been confirmed in game. Appearance-preserving
 vertex editing has also been confirmed in game. New-geometry material/UV export
@@ -144,7 +145,7 @@ by generated deform bones. The mesh object retains its fixed bind-pose transform
 the armature supplies all animated motion so the owner JOBJ is not applied twice.
 Their geometry and weights remain read-only.
 
-## Preview stage animations
+## Edit and preview stage animations
 
 Each model-group joint or material animation slot imports as a Blender Action named
 `Group NNN Stage Animation NNN`. Joint and material data sharing a source slot
@@ -155,8 +156,10 @@ group has multiple slots. You can also choose an imported Action in Blender's
 Action Editor.
 
 Playback evaluates the decoded HSD constant, linear, Hermite, and slope keys
-directly rather than approximating them with baked Blender curves. It drives the
-source JOBJ bones, generated envelope bones, rigid children, and weighted meshes.
+and bakes editable JOBJ motion into native Blender bone Location, Rotation, and
+Scale curves. Edit those curves in the Dope Sheet or Graph Editor, or pose a bone
+and insert transform keys. It drives the source JOBJ bones, generated envelope
+bones, rigid children, and weighted meshes.
 Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
 TObj translation, scale, rotation, and blend values. Texture image/palette swaps,
 animated TEV registers, pixel-engine reference values, and material animation
@@ -165,10 +168,14 @@ Looping follows both serialized AOBJ flags and the model-group animation flag
 byte that Melee applies at runtime; the latter is used by animations such as
 GrNLa Group 003. The preview wraps when the HSD end frame is reached, matching
 `HSD_AObjInterpretAnim`.
-Actions and their selected slots survive `.blend` save/load. The animation data
-is read-only in this milestone: timeline playback is preview state, and export
-preserves the original DAT animation bytes. Re-import the stage after updating
-the add-on because older scenes do not contain these Actions.
+Actions and their selected slots survive `.blend` save/load. Export samples edited
+JOBJ curves at each whole source frame, converts them back to game-local JOBJ SRT,
+and writes HSD linear transform tracks. The existing animation duration and loop
+behavior remain fixed. This first editing slice only supports nodes whose existing
+FOBJ descriptors are all recognized transform channels; it does not add animation
+to a previously static JOBJ. Unedited animation data remains byte-identical, and
+material animation remains preview-only. Re-import the stage after updating the
+add-on because older scenes do not contain these native editable curves.
 
 ## Collision surfaces
 

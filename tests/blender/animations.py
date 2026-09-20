@@ -1,5 +1,6 @@
 """Run with Blender: --background --factory-startup --python-exit-code 1 --python tests/blender/animations.py"""
 import copy
+import json
 import math
 import os
 from pathlib import Path
@@ -158,6 +159,48 @@ with tempfile.TemporaryDirectory(prefix='mme-animation-blender-') as temp:
     scene.apply(current, CLI, 'dotnet', temp / 'unchanged.dat')
     assert (temp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrGb.dat').read_bytes()
 
+    # Native bone F-curves are editable. Change one imported location key,
+    # export it, then re-extract the DAT and compare the encoded HSD track.
+    stage = read(directory / 'stage.json')
+    groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
+    candidates = [(obj, action) for obj in current.objects if obj.type == 'ARMATURE'
+                  for action in animations.actions(obj)
+                  if json.loads(action.get('mme_fcurve_jobj_ids', '[]'))]
+    edit_armature, edit_action = min(candidates, key=lambda item: item[1]['mme_end_frame'])
+    edit_armature.animation_data.action = edit_action
+    edit_id = json.loads(edit_action['mme_fcurve_jobj_ids'])[0]
+    edit_bone = next(bone for bone in edit_armature.pose.bones if bone.get('mme_id') == edit_id)
+    edit_curve = next(curve for curve in animations.fcurves(edit_action)
+                      if curve.data_path == edit_bone.path_from_id('location') and curve.array_index == 0)
+    outside = edit_curve.keyframe_points.insert(edit_action['mme_end_frame'] + 2,
+                                                edit_curve.keyframe_points[-1].co.y)
+    rejects(lambda: animations.edits(current, stage, groups), 'existing animation duration')
+    edit_curve.keyframe_points.remove(outside)
+    edit_curve.keyframe_points[-1].co.y += 1.25
+    edit_curve.update()
+    serialized = animations.edits(current, stage, groups)
+    assert serialized and len(serialized['nodes']) == 1
+    modified = temp / 'animation-edited.dat'
+    result = scene.apply(current, CLI, 'dotnet', modified)
+    assert result['animationChanged'] and modified.read_bytes() != (CORPUS / 'GrGb.dat').read_bytes()
+    exported_session = temp / 'animation-edited-session'
+    run(CLI, 'dotnet', 'extract', modified, '--session', exported_session)
+    requested = next(node for node in serialized['nodes']
+                     if node['groupIndex'] == edit_armature['mme_group_index']
+                     and node['slot'] == edit_action['mme_animation_slot'] and node['jobjId'] == edit_id)
+    exported_group = read(exported_session / f"models/group-{requested['groupIndex']:03d}/group.json")
+    exported_set = next(item for item in exported_group['jointAnimations']
+                        if item['slot'] == requested['slot'])
+    source_group = groups[requested['groupIndex']]
+    source_index = next(item['index'] for item in source_group['nodes']
+                        if item['id'] == requested['jobjId'])
+    exported_id = next(item['id'] for item in exported_group['nodes']
+                       if item['kind'].endswith('jobj') and item['index'] == source_index)
+    exported_node = next(item for item in exported_set['nodes'] if item['jobjId'] == exported_id)
+    requested_tx = next(track for track in requested['tracks'] if track['channel'] == 'translation.x')
+    exported_tx = next(track for track in exported_node['tracks'] if track['channel'] == 'translation.x')
+    assert abs(requested_tx['keys'][-1]['value'] - exported_tx['keys'][-1]['value']) < .002
+
     # GrNLa Group 003 has no serialized AOBJ loop bit. Its map-group flag byte
     # makes slot 0 loop at runtime, which the preview must reproduce.
     loop_directory = temp / 'loop-session'
@@ -187,4 +230,4 @@ with tempfile.TemporaryDirectory(prefix='mme-animation-blender-') as temp:
     assert difference(matrices[0], matrices[2]) < 1e-5
     assert difference(matrices[1], matrices[3]) < 1e-5
 
-print(f'BLENDER_ANIMATIONS_OK: Actions, HSD curves, runtime loop flags, seagull skinning ({worst_skin_error:.6g}), switching, guards, no-op export')
+print(f'BLENDER_ANIMATIONS_OK: native editable Actions, DAT curve export, HSD playback, runtime loops, seagull skinning ({worst_skin_error:.6g}), switching, guards, no-op export')

@@ -1,12 +1,13 @@
-"""Read-only HSD joint and material animation playback."""
+"""Editable JOBJ animation and read-only material animation playback."""
 import copy
 import json
 import math
 from pathlib import Path
 
 import bpy
+from mathutils import Euler, Matrix, Vector
 
-from .protocol import read
+from .protocol import StageError, digest, read
 from .transforms import AXES, joint_srt
 
 
@@ -45,8 +46,63 @@ def active_action(armature):
     return data.action if data and _is_action(data.action, armature) else None
 
 
+def fcurves(action):
+    """Return F-curves from legacy or layered Blender Actions."""
+    if hasattr(action, 'fcurves'):
+        return list(action.fcurves)
+    return [curve for layer in action.layers for strip in layer.strips
+            if hasattr(strip, 'channelbags') for bag in strip.channelbags
+            for curve in bag.fcurves]
+
+
+def _curve(action, path, index):
+    return next((curve for curve in fcurves(action)
+                 if curve.data_path == path and curve.array_index == index), None)
+
+
+def fingerprint(action, curves=None):
+    payload = []
+    for curve in sorted(fcurves(action) if curves is None else curves,
+                        key=lambda item: (item.data_path, item.array_index)):
+        payload.append([curve.data_path, curve.array_index, curve.extrapolation,
+            [[*point.co, point.interpolation, *point.handle_left, *point.handle_right,
+              point.handle_left_type, point.handle_right_type]
+             for point in curve.keyframe_points],
+            [[modifier.type, modifier.mute] for modifier in curve.modifiers]])
+    return digest(payload)
+
+
+def _node_fingerprint(action, bone):
+    paths = {bone.path_from_id(field) for field in ('location', 'rotation_euler', 'scale')}
+    return fingerprint(action, [curve for curve in fcurves(action) if curve.data_path in paths])
+
+
+def structure(scene, action):
+    """Validate and fingerprint protected F-curve targets without protecting values."""
+    ids = set(json.loads(action.get('mme_fcurve_jobj_ids', '[]')))
+    if not ids:
+        if fcurves(action):
+            raise StageError(f'{action.name}: this animation slot has no editable JOBJ channels.')
+        return []
+    armature = next((obj for obj in scene.objects
+                     if obj.type == 'ARMATURE' and _is_action(action, obj)), None)
+    if armature is None:
+        raise StageError(f'{action.name}: owning JOBJ armature is missing.')
+    bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
+    allowed = {(bones[key].path_from_id(field), axis)
+               for key in ids if key in bones
+               for field in ('location', 'rotation_euler', 'scale') for axis in range(3)}
+    actual = {(curve.data_path, curve.array_index) for curve in fcurves(action)}
+    if len(bones.keys() & ids) != len(ids) or actual != allowed:
+        raise StageError(f'{action.name}: animation channel targets changed. Restore the imported transform channels.')
+    if any(len(curve.modifiers) > 1 or any(modifier.type != 'CYCLES' for modifier in curve.modifiers)
+           for curve in fcurves(action)):
+        raise StageError(f'{action.name}: only the imported loop modifiers are supported for DAT export.')
+    return sorted([path, index] for path, index in actual)
+
+
 def create(armature, group, source_file, source_hash, session_id, created):
-    """Create one lightweight Blender Action for every source animation slot."""
+    """Create one Blender Action for every source animation slot."""
     joint_sets = group.get('jointAnimations', [])
     material_sets = group.get('materialAnimations', [])
     slots = {}
@@ -76,10 +132,77 @@ def create(armature, group, source_file, source_hash, session_id, created):
         action['mme_animation_slot'] = slot
         action['mme_end_frame'] = animation['endFrame']
         action['mme_loop'] = animation['loop']
+        joint_animation = next((item for item in joint_sets if item['slot'] == slot), None)
+        editable_ids = []
+        if joint_animation:
+            armature.animation_data_create()
+            armature.animation_data.action = action
+            joints = {joint['id']: joint for joint in group['joints']}
+            bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
+            for node in joint_animation['nodes']:
+                if node.get('editable') and _bake_node(action, bones[node['jobjId']],
+                                                       joints[node['jobjId']], node):
+                    editable_ids.append(node['jobjId'])
+        action['mme_fcurve_jobj_ids'] = json.dumps(editable_ids)
+        action['mme_curve_baselines'] = json.dumps({jobj_id: _node_fingerprint(action, bones[jobj_id])
+                                                   for jobj_id in editable_ids})
+        action['mme_curve_baseline'] = fingerprint(action)
     armature['mme_animation_count'] = len(made)
     armature.animation_data_create()
     armature.animation_data.action = made[0]
     return max(math.ceil(action.get('mme_end_frame', 0)) + 1 for action in made)
+
+
+def _bake_node(action, bone, joint, node):
+    end = float(node['endFrame'])
+    if abs(end - round(end)) > 1e-5 or end < 1:
+        return False
+    values_by_field = {field: [[] for _ in range(3)]
+                       for field in ('location', 'rotation_euler', 'scale')}
+    previous_euler = None
+    for source_frame in range(round(end) + 1):
+        node_frame = source_frame % end if node['loop'] and end > 0 else source_frame
+        values = {name: [joint[name][axis] for axis in 'xyz']
+                  for name in ('rotation', 'scale', 'translation')}
+        for track in node['tracks']:
+            field, axis = track['channel'].split('.')
+            _set_component(values[field], axis, _value(track['keys'], node_frame))
+        if min(abs(component) for component in values['scale']) < 1e-6 \
+                or any(component < 0 for component in values['scale']):
+            return False
+        source = {name: dict(zip('xyz', value)) for name, value in values.items()}
+        matrix = AXES @ joint_srt(source) @ AXES.inverted()
+        location, rotation, scale = matrix.decompose()
+        euler = rotation.to_euler('XYZ', previous_euler)
+        previous_euler = euler.copy()
+        for axis in range(3):
+            values_by_field['location'][axis].append(location[axis])
+            values_by_field['rotation_euler'][axis].append(euler[axis])
+            values_by_field['scale'][axis].append(scale[axis])
+    for field in ('location', 'rotation_euler', 'scale'):
+        setattr(bone, field, type(getattr(bone, field))(
+            values_by_field[field][axis][0] for axis in range(3)))
+        bone.keyframe_insert(data_path=field, frame=1, group=bone.name)
+    for field in ('location', 'rotation_euler', 'scale'):
+        path = bone.path_from_id(field)
+        for axis in range(3):
+            curve = _curve(action, path, axis)
+            if curve is None:
+                raise StageError(f'{action.name}: Blender did not create the expected bone F-curve.')
+            reduced = _compress(values_by_field[field][axis], tolerance=1e-4)
+            points = curve.keyframe_points
+            points.add(len(reduced) - 1)
+            for point, (source_frame, value) in zip(points, reduced):
+                point.co = (source_frame + 1, value)
+            for point in points:
+                point.interpolation = 'LINEAR'
+            curve.extrapolation = 'CONSTANT'
+            if node['loop']:
+                modifier = curve.modifiers.new('CYCLES')
+                modifier.mode_before = 'REPEAT'
+                modifier.mode_after = 'REPEAT'
+            curve.update()
+    return True
 
 
 def _value(keys, frame):
@@ -283,9 +406,10 @@ def _apply_armature(scene, armature):
     joints = {joint['id']: joint for joint in payload['joints']}
     bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
     animated_nodes = {node['jobjId']: node for node in animation['nodes']} if animation else {}
+    fcurve_ids = set(json.loads(action.get('mme_fcurve_jobj_ids', '[]'))) if action else set()
     for jobj_id, joint in joints.items():
         bone = bones.get(jobj_id)
-        if bone is None or not bone.get('mme_animated'):
+        if bone is None or not bone.get('mme_animated') or jobj_id in fcurve_ids:
             continue
         values = {name: [joint[name][axis] for axis in 'xyz']
                   for name in ('rotation', 'scale', 'translation')}
@@ -315,6 +439,112 @@ def apply(scene):
             _apply_armature(scene, armature)
 
 
+def edits(scene, stage, groups):
+    """Serialize changed native bone F-curves as sampled game-local HSD tracks."""
+    declared = {(item['groupIndex'], item['slot'], item['jobjId'])
+                for item in stage.get('editableJointAnimations', [])}
+    result = []
+    axes_inverse = AXES.inverted()
+    groups_by_index = {group['index']: group for group in groups}
+    for armature in (obj for obj in scene.objects
+                     if obj.type == 'ARMATURE' and obj.get('mme_role') == 'jobj-armature'
+                     and obj.get('mme_session_id') == scene.mme_session_id):
+        group = groups_by_index[armature['mme_group_index']]
+        joints = {joint['id']: joint for joint in group['joints']}
+        bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
+        for action in actions(armature):
+            structure(scene, action)
+            dirty = fingerprint(action) != action.get('mme_curve_baseline', fingerprint(action))
+            action['mme_dirty'] = dirty
+            if not dirty:
+                continue
+            slot = action['mme_animation_slot']
+            source_set = next((item for item in group.get('jointAnimations', [])
+                               if item['slot'] == slot), None)
+            if source_set is None:
+                raise StageError(f'{action.name}: this slot has no editable JOBJ animation.')
+            source_nodes = {node['jobjId']: node for node in source_set['nodes']}
+            baselines = json.loads(action.get('mme_curve_baselines', '{}'))
+            for jobj_id in json.loads(action.get('mme_fcurve_jobj_ids', '[]')):
+                if _node_fingerprint(action, bones[jobj_id]) == baselines.get(jobj_id):
+                    continue
+                if (group['index'], slot, jobj_id) not in declared:
+                    raise StageError(f'{action.name}: animation target is not declared by this session.')
+                node = source_nodes[jobj_id]
+                end = float(node['endFrame'])
+                if abs(end - round(end)) > 1e-5 or end < 1:
+                    raise StageError(f'{action.name}: editable animation duration must be a positive whole number.')
+                bone = bones[jobj_id]
+                curves = {field: [_curve(action, bone.path_from_id(field), axis)
+                                  for axis in range(3)]
+                          for field in ('location', 'rotation_euler', 'scale')}
+                if any(point.co.x < 1 - 1e-4 or point.co.x > end + 1 + 1e-4
+                       for field_curves in curves.values() for curve in field_curves
+                       for point in curve.keyframe_points):
+                    raise StageError(f'{action.name} / {bone.name}: keys must stay within the existing animation duration.')
+                samples = {name: [[] for _ in range(3)]
+                           for name in ('rotation', 'scale', 'translation')}
+                previous_euler = None
+                for source_frame in range(round(end) + 1):
+                    frame = source_frame + 1
+                    location = Vector(curves['location'][axis].evaluate(frame) for axis in range(3))
+                    rotation = Euler(tuple(curves['rotation_euler'][axis].evaluate(frame)
+                                           for axis in range(3)), 'XYZ')
+                    scale = Vector(curves['scale'][axis].evaluate(frame) for axis in range(3))
+                    if min(abs(value) for value in scale) < 1e-6 or any(value < 0 for value in scale):
+                        raise StageError(f'{action.name} / {bone.name}: animated scale must stay positive and nonzero.')
+                    local = axes_inverse @ Matrix.LocRotScale(location, rotation, scale) @ AXES
+                    source_scale = Vector(local.to_3x3().col[axis].length for axis in range(3))
+                    rotation_matrix = local.to_3x3()
+                    for axis in range(3):
+                        rotation_matrix.col[axis] /= source_scale[axis]
+                    if max(abs(rotation_matrix.col[a].dot(rotation_matrix.col[b]))
+                           for a, b in ((0, 1), (0, 2), (1, 2))) > 1e-4 \
+                            or abs(rotation_matrix.determinant() - 1) > 1e-4:
+                        raise StageError(f'{action.name} / {bone.name}: animated transform contains shear or reflection.')
+                    source_rotation = rotation_matrix.to_euler('XYZ', previous_euler)
+                    previous_euler = source_rotation.copy()
+                    for axis in range(3):
+                        samples['translation'][axis].append(local.translation[axis])
+                        samples['rotation'][axis].append(source_rotation[axis])
+                        samples['scale'][axis].append(source_scale[axis])
+                tracks = []
+                for field in ('rotation', 'translation', 'scale'):
+                    for axis, name in enumerate('xyz'):
+                        keys = [{'frame': frame, 'value': value, 'tangent': 0,
+                                 'interpolation': 'HSD_A_OP_LIN'}
+                                for frame, value in _compress(samples[field][axis])]
+                        tracks.append({'channel': f'{field}.{name}', 'keys': keys})
+                result.append({'groupIndex': group['index'], 'slot': slot,
+                               'jobjId': jobj_id, 'tracks': tracks})
+    return {'protocolVersion': 2, 'coordinateSpace': 'game-jobj-animation',
+            'nodes': result} if result else None
+
+
+def _compress(values, tolerance=1e-6):
+    """Reduce sampled values to piecewise-linear keys within a vertical error."""
+    points = [(frame, value) for frame, value in enumerate(values)]
+    if len(points) <= 2:
+        return points
+    keep = {0, len(points) - 1}
+    pending = [(0, len(points) - 1)]
+    while pending:
+        start, end = pending.pop()
+        left, right = points[start], points[end]
+        worst_error = -1
+        worst = None
+        for index in range(start + 1, end):
+            amount = (points[index][0] - left[0]) / (right[0] - left[0])
+            expected = left[1] + (right[1] - left[1]) * amount
+            error = abs(points[index][1] - expected)
+            if error > worst_error:
+                worst_error, worst = error, index
+        if worst is not None and worst_error > tolerance:
+            keep.add(worst)
+            pending.extend(((start, worst), (worst, end)))
+    return [points[index] for index in sorted(keep)]
+
+
 def cycle(context, direction):
     candidates = [obj for obj in context.selected_objects
                   if obj.type == 'ARMATURE' and actions(obj)]
@@ -329,6 +559,7 @@ def cycle(context, direction):
     index = available.index(current) if current in available else 0
     armature.animation_data_create()
     armature.animation_data.action = available[(index + direction) % len(available)]
+    context.view_layer.update()
     _applied.pop(armature.as_pointer(), None)
     apply(context.scene)
     return armature

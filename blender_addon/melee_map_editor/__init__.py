@@ -447,7 +447,12 @@ class MME_PT_stage(bpy.types.Panel):
             row = layout.row(align=True)
             row.operator('mme.cycle_animation', text='Previous').direction = -1
             row.operator('mme.cycle_animation', text='Next').direction = 1
-            layout.label(text='Use the timeline to preview. Animation is read-only.')
+            editable_actions = sum(bool(json.loads(action.get('mme_fcurve_jobj_ids', '[]')))
+                                   for obj in animated_armatures for action in animations.actions(obj))
+            if editable_actions:
+                layout.label(text=f'{editable_actions} Actions have editable JOBJ curves.')
+                layout.label(text='Edit bone Loc/Rot/Scale keys in Dope Sheet or Graph Editor.')
+            layout.label(text='Material animation remains preview-only.')
         layout.operator('mme.toggle_models')
         layout.operator('mme.edit_collision')
         layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')

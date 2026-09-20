@@ -1,4 +1,5 @@
 using HSDRaw.Common.Animation;
+using HSDRaw.Common;
 using HSDRaw.Melee.Gr;
 using HSDRaw.Tools;
 using static MeleeMap.Core.ArchiveLayout;
@@ -8,7 +9,7 @@ namespace MeleeMap.Core;
 public sealed record JointAnimationKey(float Frame, float Value, float Tangent, string Interpolation);
 public sealed record JointAnimationTrack(string Channel, JointAnimationKey[] Keys);
 public sealed record JointAnimationNode(string JobjId, uint Flags, float EndFrame,
-    bool Loop, JointAnimationTrack[] Tracks);
+    bool Loop, JointAnimationTrack[] Tracks, bool Editable);
 public sealed record JointAnimationSet(int Slot, byte GroupFlag, float EndFrame, bool Loop,
     JointAnimationNode[] Nodes);
 
@@ -41,24 +42,47 @@ public static class StageJointAnimations
         if (animations == null) return [];
         var joints = identity.Nodes.Where(node => node.GroupIndex == groupIndex
             && node.Kind.EndsWith("jobj")).OrderBy(node => node.Index).ToArray();
+        var reader = new ArchiveDataReader(stage.Layout);
         var result = new List<JointAnimationSet>();
         for (int slot = 0; slot < animations.Length; slot++)
         {
             var root = animations[slot];
             if (root == null) continue;
             byte groupFlag = group.AnimationFlags?[slot] ?? 0;
-            var animationNodes = root.TreeList;
-            // HSD permits a shorter animation tree; players apply its nodes to
-            // the matching JOBJ preorder prefix and leave later joints at base SRT.
-            Require(animationNodes.Count <= joints.Length, "ANIM_TOPOLOGY",
-                $"Group {groupIndex:D3} animation {slot:D3} has {animationNodes.Count} nodes for {joints.Length} JOBJs.");
             var nodes = new List<JointAnimationNode>();
-            for (int i = 0; i < animationNodes.Count; i++)
+            int jointIndex = 0;
+            Visit(group.RootNode, root);
+            Require(jointIndex == joints.Length, "ANIM_TOPOLOGY",
+                $"Group {groupIndex:D3} animation {slot:D3} visited {jointIndex} of {joints.Length} JOBJs.");
+            if (nodes.Count > 0)
+                result.Add(new(slot, groupFlag, nodes.Max(node => Math.Max(node.EndFrame,
+                    node.Tracks.SelectMany(track => track.Keys).Max(key => key.Frame))), nodes.Any(node => node.Loop),
+                    nodes.ToArray()));
+
+            void Visit(HSD_JOBJ? jobj, HSD_AnimJoint? animationNode)
             {
-                var animation = animationNodes[i].AOBJ;
-                if (animation?.FObjDesc == null) continue;
+                if (jobj == null) return;
+                Require(jointIndex < joints.Length, "ANIM_TOPOLOGY",
+                    $"Group {groupIndex:D3} animation {slot:D3} exceeds the model JOBJ hierarchy.");
+                var joint = joints[jointIndex++];
+                var animation = animationNode?.AOBJ;
+                if (animation?.FObjDesc != null) ReadNode(joint, animation);
+                if (jobj.Flags.HasFlag(JOBJ_FLAG.INSTANCE)) return;
+                var child = jobj.Child;
+                var childAnimation = animationNode?.Child;
+                while (child != null)
+                {
+                    Visit(child, childAnimation);
+                    child = child.Next;
+                    childAnimation = childAnimation?.Next;
+                }
+            }
+
+            void ReadNode(ModelIdentityNode joint, HSD_AOBJ animation)
+            {
                 var tracks = new List<JointAnimationTrack>();
-                foreach (var descriptor in animation.FObjDesc.List)
+                var descriptors = animation.FObjDesc.List;
+                foreach (var descriptor in descriptors)
                 {
                     if (!Channels.TryGetValue(descriptor.JointTrackType, out string? channel))
                         continue;
@@ -66,15 +90,15 @@ public static class StageJointAnimations
                         key.Frame, key.Value, key.Tan, key.InterpolationType.ToString())).ToArray();
                     if (keys.Length > 0) tracks.Add(new(channel, keys));
                 }
-                if (tracks.Count == 0) continue;
+                if (tracks.Count == 0) return;
                 uint flags = unchecked((uint)animation.Flags);
-                nodes.Add(new(joints[i].Id, flags, animation.EndFrame,
-                    groupFlag != 0 || animation.Flags.HasFlag(AOBJ_Flags.ANIM_LOOP), tracks.ToArray()));
+                bool editable = joint.Kind == "jobj" && descriptors.All(descriptor =>
+                    Channels.ContainsKey(descriptor.JointTrackType))
+                    && animation.EndFrame >= 1 && MathF.Abs(animation.EndFrame - MathF.Round(animation.EndFrame)) < 1e-5f
+                    && Enumerable.Range(0, 3).All(axis => reader.Float(joint.SourceOffset + 0x20 + axis * 4) > 1e-6f);
+                nodes.Add(new(joint.Id, flags, animation.EndFrame,
+                    groupFlag != 0 || animation.Flags.HasFlag(AOBJ_Flags.ANIM_LOOP), tracks.ToArray(), editable));
             }
-            if (nodes.Count > 0)
-                result.Add(new(slot, groupFlag, nodes.Max(node => Math.Max(node.EndFrame,
-                    node.Tracks.SelectMany(track => track.Keys).Max(key => key.Frame))), nodes.Any(node => node.Loop),
-                    nodes.ToArray()));
         }
         return result.ToArray();
     }

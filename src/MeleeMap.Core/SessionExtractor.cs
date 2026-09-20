@@ -37,6 +37,8 @@ public static class SessionExtractor
         Require(meshes.Count > 0, "EXTRACT_NO_MODEL_TARGET", "No supported model target found; session extraction has not been published.");
         var selected = meshes[0].Node;
         var groups = identity.Nodes.Where(n => n.Kind is "group" or "sentinel-group").ToArray();
+        var jointAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
+            group => StageJointAnimations.Read(stage, identity, group.GroupIndex));
         var materialAnimationsByGroup = groups.ToDictionary(group => group.GroupIndex,
             group => StageMaterialAnimations.Read(stage, identity, group.GroupIndex));
         var vertexIds = collision.Vertices.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
@@ -60,7 +62,7 @@ public static class SessionExtractor
             {
                 string groupPath = $"models/group-{group.GroupIndex:D3}";
                 var nodes = identity.Nodes.Where(n => n.GroupIndex == group.GroupIndex).ToArray();
-                var jointAnimations = StageJointAnimations.Read(stage, identity, group.GroupIndex);
+                var jointAnimations = jointAnimationsByGroup[group.GroupIndex];
                 var materialAnimations = materialAnimationsByGroup[group.GroupIndex];
                 Write($"{groupPath}/group.json", new
                 {
@@ -174,14 +176,21 @@ public static class SessionExtractor
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0,
                     modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
+                    jobjAnimationEdit = jointAnimationsByGroup.Values.SelectMany(animations => animations)
+                        .SelectMany(animation => animation.Nodes).Any(node => node.Editable),
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
                     materialAnimationPreview = materialAnimationsByGroup.Values.Any(animations => animations.Length > 0),
                     dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "material-animation-export", "texture-image-animation-preview",
                     "texture-register-animation-preview", "material-pixel-animation-preview", "shape-animations",
-                    "animation-export", "dynamic-collision-editing", "stage-parameters" },
+                    "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
+                editableJointAnimations = jointAnimationsByGroup.SelectMany(pair => pair.Value.SelectMany(animation =>
+                    animation.Nodes.Where(node => node.Editable).Select(node => new
+                    {
+                        groupIndex = pair.Key, animation.Slot, jobjId = node.JobjId
+                    }))),
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,

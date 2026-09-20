@@ -54,9 +54,10 @@ and properties, provides split/extend/connect/reverse tools with native deletion
 and exports through the CLI. All structurally supported rigid meshes support vertex
 edits that preserve source appearance, plus topology edits with reusable stage materials and
 Blender UV maps (or grey export), including multiple targets per export. Supported
-stage materials now include packed texture previews and UV Editor images. JOBJ and
+stage materials now include packed texture previews and UV Editor images. JOBJ
+transform animations import as native editable bone curves and export back to DAT;
 supported material/texture-transform animations play from the Blender timeline as
-read-only source slots. Dynamic collision editing, full
+preview-only source slots. Dynamic collision editing, full
 GX/reference validation, and self-contained
 distribution are still pending. Passing the
 current validator is not an in-game compatibility test.

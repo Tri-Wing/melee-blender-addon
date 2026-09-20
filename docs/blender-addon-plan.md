@@ -1,6 +1,6 @@
 # Melee Map Editor Blender Add-on Implementation Plan
 
-Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, static JOBJ SRT editing, envelope binding, and read-only JOBJ/material animation playback are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static JOBJ edits use native Pose Mode transforms while hierarchy changes and animated or constrained nodes remain protected.
+Status: The headless foundation, collision editing, multi-mesh geometry and material editing, material/texture/light preview, static material and LOBJ export, static JOBJ SRT editing, envelope binding, editable JOBJ transform animation export, and material animation preview are implemented; see [the add-on guide](blender-addon.md). Model groups import as Blender armatures, JOBJs import as source-identified bones, and supported static and animated JOBJ edits use native Blender transforms while hierarchy changes and constrained nodes remain protected.
 
 ## 1. Summary
 
@@ -371,8 +371,9 @@ DOBJ/POBJ identity around the imported meshes. Rigid models are bone-parented to
 their owning JOBJ. Preserve transforms and identity boundaries rather than
 flattening the whole stage into one mesh. Enveloped meshes use decoded HSD
 weights, generated deform bones, and Blender Armature modifiers while remaining
-geometry-edit protected. Joint-animation slots import as read-only Blender
-Actions and evaluate the original HSD interpolation on timeline changes.
+geometry-edit protected. Joint-animation slots import as Blender Actions. Supported
+JOBJ transform tracks use editable native bone F-curves and export to replacement
+HSD FOBJ tracks; unsupported animation nodes continue to use read-only playback.
 
 For the POC:
 

@@ -8,7 +8,7 @@ namespace MeleeMap.Core;
 
 public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices,
     int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false,
-    bool LightChanged = false, bool JobjChanged = false);
+    bool LightChanged = false, bool JobjChanged = false, bool AnimationChanged = false);
 
 public static class SessionApplier
 {
@@ -77,8 +77,10 @@ public static class SessionApplier
         string materialPath = Path.Combine(directory, "edits/materials.json");
         string lightPath = Path.Combine(directory, "edits/lights.json");
         string jobjPath = Path.Combine(directory, "edits/jobjs.json");
+        string animationPath = Path.Combine(directory, "edits/animations.json");
         foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
-            Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath || edit == jobjPath,
+            Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath
+                || edit == jobjPath || edit == animationPath,
                 "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
@@ -157,6 +159,19 @@ public static class SessionApplier
             jobjWrite = JobjEditing.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline, edits!, declared);
             bytes = jobjWrite.Bytes;
         }
+        JointAnimationWrite? animationWrite = null;
+        if (File.Exists(animationPath))
+        {
+            var declared = m.TryGetProperty("editableJointAnimations", out var list)
+                ? list.EnumerateArray().Select(entry => JointAnimationEditing.TargetKey(
+                    entry.GetProperty("groupIndex").GetInt32(), entry.GetProperty("slot").GetInt32(),
+                    entry.GetProperty("jobjId").GetString()!)).ToArray() : [];
+            var edits = JsonSerializer.Deserialize<JointAnimationEdits>(File.ReadAllText(animationPath), Json);
+            Require(edits != null, "ANIMATION_EDIT_FORMAT", "Empty JOBJ animation edit document.");
+            animationWrite = JointAnimationEditing.Write(source.Layout, new ArchiveLayout(bytes),
+                modelBaseline, edits!, declared);
+            bytes = animationWrite.Bytes;
+        }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -178,14 +193,16 @@ public static class SessionApplier
             if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, modelBaseline, materialWrite);
             if (lightWrite != null) StageLightEditing.Verify(reloaded.Layout, lightWrite);
             if (jobjWrite != null) JobjEditing.Verify(reloaded.Layout, modelBaseline, jobjWrite);
-            if (!changed && !modelChanged && materialWrite == null && lightWrite == null && jobjWrite == null)
+            if (animationWrite != null) JointAnimationEditing.Verify(reloaded.Layout, modelBaseline, animationWrite);
+            if (!changed && !modelChanged && materialWrite == null && lightWrite == null
+                && jobjWrite == null && animationWrite == null)
                 Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
         return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length,
             modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null,
-            materialWrite != null, lightWrite != null, jobjWrite != null);
+            materialWrite != null, lightWrite != null, jobjWrite != null, animationWrite != null);
 
         string Contained(string relative)
         {
