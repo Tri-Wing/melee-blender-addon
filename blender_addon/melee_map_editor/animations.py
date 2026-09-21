@@ -1,5 +1,4 @@
 """Editable JOBJ animation and read-only material animation playback."""
-import copy
 import json
 import math
 from pathlib import Path
@@ -13,10 +12,20 @@ from .transforms import AXES, joint_srt
 
 _group_cache = {}
 _applied = {}
+_armature_cache = {}
+_material_cache = {}
 
 
 def clear_cache():
     _group_cache.clear()
+    _applied.clear()
+    _armature_cache.clear()
+    _material_cache.clear()
+
+
+def invalidate_material(material):
+    """Discard preview bindings after a material node tree is rebuilt."""
+    _material_cache.pop(material.as_pointer(), None)
     _applied.clear()
 
 
@@ -265,15 +274,126 @@ def _linear(value):
     return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
 
 
-def _set_rgb(socket, value):
-    socket.default_value = (*(_linear(component) for component in value[:3]), 1)
+def _material_runtime(material):
+    """Cache immutable source state and direct Blender socket bindings."""
+    preview_text = material.get('mme_animation_preview', '{}')
+    images_text = material.get('mme_animation_images', '[]')
+    if not material.node_tree:
+        return None
+    nodes = material.node_tree.nodes
+    surface_node = nodes.get('Stage Surface')
+    signature = (preview_text, images_text, material.node_tree.as_pointer(),
+                 surface_node.as_pointer() if surface_node else 0, len(nodes))
+    key = material.as_pointer()
+    cached = _material_cache.get(key)
+    if cached and cached['signature'] == signature:
+        return cached
+    preview = json.loads(preview_text)
+    if not preview:
+        return None
+    textures = preview.get('textures') or ([preview['texture']] if preview.get('texture') else [])
+    ambient = nodes.get('Stage Material Ambient')
+    specular = nodes.get('Stage Specular Color')
+    lighting = nodes.get('Stage Diffuse Lighting')
+    color_modulation = nodes.get('Stage Color Modulation')
+    extension = nodes.get('Stage Extension Base')
+    color_sockets = {
+        'ambient': [ambient.outputs[0]] if ambient else [],
+        'specular': [specular.inputs[1]] if specular else [],
+        'diffuse': []
+    }
+    if lighting and not lighting.inputs[1].is_linked:
+        color_sockets['diffuse'].append(lighting.inputs[1])
+    if surface_node and not surface_node.inputs['Color'].is_linked:
+        color_sockets['diffuse'].append(surface_node.inputs['Color'])
+    if color_modulation and not color_modulation.inputs[1].is_linked:
+        color_sockets['diffuse'].append(color_modulation.inputs[1])
+    color_sockets['diffuse'].extend(node.inputs[1] for node in nodes
+        if node.name.startswith('Stage Diffuse Tint') and not node.inputs[1].is_linked)
+    if extension:
+        color_sockets['diffuse'].append(extension.outputs[0])
+    samplers = {node.get('mme_texture_index'): node for node in nodes
+                if node.type == 'TEX_IMAGE' and node.get('mme_texture_index') is not None}
+    controls = []
+    for index, layer in enumerate(textures):
+        suffix = '' if index == 0 else f' {index + 1}'
+        sampler = samplers.get(index)
+        controls.append({
+            'matrix': [(nodes.get(f'Stage Texture Matrix {name}{suffix}'),
+                        nodes.get(f'Stage Texture Offset {name}{suffix}')) for name in ('U', 'V')],
+            'blends': [node.inputs[0] for node in nodes
+                       if node.get('mme_texture_index') == index
+                       and node.get('mme_texture_operation') == 3],
+            'sampler': sampler,
+            'base_image': bpy.data.images.get(sampler.get('mme_base_image', '')) if sampler else None,
+            'tev': {key: (nodes.get(f'Stage TEV {label}{suffix}'),
+                          nodes.get(f'Stage TEV {label} Alpha{suffix}'))
+                    for key, label in (('konst', 'Konst'), ('tev0', 'Register 0'),
+                                       ('tev1', 'Register 1'))}
+        })
+    image_catalog = {(entry['slot'], entry['textureIndex'], entry['imageIndex'], entry['paletteIndex']):
+                     bpy.data.images.get(entry['imageName'])
+                     for entry in json.loads(images_text)}
+    cached = {
+        'signature': signature, 'preview': preview, 'textures': textures,
+        'color_sockets': color_sockets,
+        'alpha': nodes.get('Stage Material Alpha'),
+        'controls': controls, 'images': image_catalog,
+        'state': {}, 'slot': object()
+    }
+    _material_cache[key] = cached
+    return cached
+
+
+def _assign(runtime, key, socket, value):
+    if socket is None:
+        return
+    value = tuple(value) if isinstance(value, (tuple, list, Vector)) else value
+    if runtime['state'].get(key) == value:
+        return
+    socket.default_value = value
+    runtime['state'][key] = value
+
+
+def _assign_color(runtime, field, value):
+    encoded = (*(_linear(component) for component in value[:3]), 1)
+    for index, socket in enumerate(runtime['color_sockets'][field]):
+        _assign(runtime, ('color', field, index), socket, encoded)
+
+
+def _assign_matrix(runtime, index, layer):
+    from . import surface
+    matrix = surface.preview_matrix(layer)
+    for axis, (row, offset) in enumerate(runtime['controls'][index]['matrix']):
+        _assign(runtime, ('matrix', index, axis), row.inputs[1] if row else None,
+                tuple(matrix[axis][component] for component in range(3)))
+        _assign(runtime, ('offset', index, axis), offset.inputs[1] if offset else None,
+                matrix[axis][3])
+
+
+def _assign_tev(runtime, index, tev):
+    if not tev:
+        return
+    for key, (color, alpha) in runtime['controls'][index]['tev'].items():
+        value = tev[key]
+        _assign(runtime, ('tev-color', index, key), color.outputs[0] if color else None,
+                (*value[:3], 1))
+        _assign(runtime, ('tev-alpha', index, key), alpha.outputs[0] if alpha else None,
+                value[3])
+
+
+def _assign_image(runtime, index, image):
+    sampler = runtime['controls'][index]['sampler']
+    if sampler is not None and sampler.image != image and image is not None:
+        sampler.image = image
 
 
 def _apply_material(material, target, source_frame, animation_slot):
-    from . import surface
-    preview = copy.deepcopy(json.loads(material.get('mme_animation_preview', '{}')))
-    if not preview or not material.node_tree:
+    runtime = _material_runtime(material)
+    if runtime is None:
         return
+    preview, textures = runtime['preview'], runtime['textures']
+    reset = runtime['slot'] != animation_slot
     frame = source_frame
     end = max(0.0, float(target.get('materialEndFrame', target['endFrame'])))
     if target.get('materialLoop', target['loop']) and end > 0:
@@ -283,183 +403,159 @@ def _apply_material(material, target, source_frame, animation_slot):
         'diffuse': list((preview.get('color') or [1, 1, 1, 1])[:3]),
         'specular': list((preview.get('specularColor') or [0, 0, 0, 1])[:3])
     }
-    # HSD's vertex-color source bypasses MOBJ diffuse RGB. Keep the texture
-    # pass neutral while material animation updates transforms and alpha.
     if preview.get('useVertexColor'):
         colors['diffuse'] = [1, 1, 1]
     alpha = (preview.get('alpha') or {}).get('material', 1)
+    animated_colors = set()
+    animated_alpha = False
     for track in target['tracks']:
         value = _value(track['keys'], frame)
         field, component = (track['channel'].split('.', 1) + [None])[:2]
         if field in colors and component in 'rgb':
             colors[field]['rgb'.index(component)] = value
+            animated_colors.add(field)
         elif field == 'alpha':
-            # HSD stores the animated material channel as transparency.
             alpha = 1 - value
-    nodes = material.node_tree.nodes
-    ambient = nodes.get('Stage Material Ambient')
-    if ambient:
-        _set_rgb(ambient.outputs[0], colors['ambient'])
-    specular = nodes.get('Stage Specular Color')
-    if specular:
-        _set_rgb(specular.inputs[1], colors['specular'])
-    diffuse_targets = []
-    lighting = nodes.get('Stage Diffuse Lighting')
-    if lighting and not lighting.inputs[1].is_linked:
-        diffuse_targets.append(lighting.inputs[1])
-    stage_surface = nodes.get('Stage Surface')
-    if stage_surface and not stage_surface.inputs['Color'].is_linked:
-        diffuse_targets.append(stage_surface.inputs['Color'])
-    color_modulation = nodes.get('Stage Color Modulation')
-    if color_modulation and not color_modulation.inputs[1].is_linked:
-        diffuse_targets.append(color_modulation.inputs[1])
-    for node in nodes:
-        if node.name.startswith('Stage Diffuse Tint') and not node.inputs[1].is_linked:
-            diffuse_targets.append(node.inputs[1])
-    extension = nodes.get('Stage Extension Base')
-    if extension:
-        _set_rgb(extension.outputs[0], colors['diffuse'])
-    for socket in diffuse_targets:
-        _set_rgb(socket, colors['diffuse'])
-    alpha_node = nodes.get('Stage Material Alpha')
-    if alpha_node:
-        alpha_node.outputs[0].default_value = max(0.0, min(1.0, alpha))
+            animated_alpha = True
+    for field, value in colors.items():
+        if reset or field in animated_colors:
+            _assign_color(runtime, field, value)
+    if reset or animated_alpha:
+        alpha_node = runtime['alpha']
+        _assign(runtime, ('alpha',), alpha_node.outputs[0] if alpha_node else None,
+                max(0.0, min(1.0, alpha)))
 
-    textures = preview.get('textures') or ([preview['texture']] if preview.get('texture') else [])
-    animation_images = json.loads(material.get('mme_animation_images', '[]'))
-
-    def set_matrix(index, layer):
-        matrix = surface.preview_matrix(layer)
-        suffix = '' if index == 0 else f' {index + 1}'
-        for axis, name in enumerate(('U', 'V')):
-            row = nodes.get(f'Stage Texture Matrix {name}{suffix}')
-            offset = nodes.get(f'Stage Texture Offset {name}{suffix}')
-            if row:
-                row.inputs[1].default_value = tuple(matrix[axis][component] for component in range(3))
-            if offset:
-                offset.inputs[1].default_value = matrix[axis][3]
-
-    def set_tev(index, layer):
-        tev = layer.get('tev')
-        if not tev:
-            return
-        suffix = '' if index == 0 else f' {index + 1}'
-        for key, label in (('konst', 'Konst'), ('tev0', 'Register 0'), ('tev1', 'Register 1')):
-            value = tev[key]
-            color = nodes.get(f'Stage TEV {label}{suffix}')
-            alpha = nodes.get(f'Stage TEV {label} Alpha{suffix}')
-            if color:
-                color.outputs[0].default_value = (*value[:3], 1)
-            if alpha:
-                alpha.outputs[0].default_value = value[3]
-
-    # Always restore source texture state before applying the selected slot.
-    # This prevents values from a previous Action persisting when the new slot
-    # omits a material or one of its texture tracks.
-    samplers = {node.get('mme_texture_index'): node for node in nodes
-                if node.type == 'TEX_IMAGE' and node.get('mme_texture_index') is not None}
-    for sampler in samplers.values():
-        base = bpy.data.images.get(sampler.get('mme_base_image', ''))
-        if base is not None:
-            sampler.image = base
-    for index, layer in enumerate(textures):
-        set_matrix(index, layer)
-        set_tev(index, layer)
-        for node in nodes:
-            if (node.get('mme_texture_index') == index
-                    and node.get('mme_texture_operation') == 3):
-                node.inputs[0].default_value = max(0.0, min(1.0, layer.get('colorBlend', 1)))
-
+    texture_targets = {}
     for texture_animation in target['textures']:
         index = texture_animation['textureIndex']
-        if index < 0 or index >= len(textures):
-            continue
-        texture_frame = source_frame
-        texture_end = max(0.0, float(texture_animation['endFrame']))
-        if texture_animation['loop'] and texture_end > 0:
-            texture_frame %= texture_end
-        layer = textures[index]
-        image_index = palette_index = -1
-        for track in texture_animation['tracks']:
-            channel = track['channel']
-            if channel == 'image':
-                image_index = int(_value(track['keys'], texture_frame))
-                continue
-            if channel == 'palette':
-                palette_index = int(_value(track['keys'], texture_frame))
-                continue
-            if channel == 'lodBias':
-                continue
-            value = _value(track['keys'], texture_frame)
-            if channel.startswith(('konst.', 'tev0.', 'tev1.')):
-                field, component = channel.split('.')
-                tev = layer.get('tev')
-                if tev and component in 'rgba':
-                    # HSD writes these tracks through an unsigned byte cast.
-                    byte = max(0, min(255, int(255.0 * value)))
-                    tev[field]['rgba'.index(component)] = byte / 255.0
-                continue
-            if channel == 'blend':
-                for node in nodes:
-                    if (node.get('mme_texture_index') == index
-                            and node.get('mme_texture_operation') == 3):
-                        node.inputs[0].default_value = max(0.0, min(1.0, value))
-                continue
-            field, axis = channel.split('.')
-            layer[field]['xyz'.index(axis)] = value
-        if image_index >= 0 or palette_index >= 0:
-            frame = next((entry for entry in animation_images
-                          if entry['slot'] == animation_slot and entry['textureIndex'] == index
-                          and entry['imageIndex'] == image_index
-                          and entry['paletteIndex'] == palette_index), None)
-            image = bpy.data.images.get(frame['imageName']) if frame else None
-            if image is not None and index in samplers:
-                samplers[index].image = image
-        set_matrix(index, layer)
-        set_tev(index, layer)
+        if 0 <= index < len(textures):
+            texture_targets.setdefault(index, []).append(texture_animation)
+    for index, base in enumerate(textures):
+        texture_animations = texture_targets.get(index, [])
+        channels = {track['channel'] for texture_animation in texture_animations
+                    for track in texture_animation['tracks']}
+        needs_matrix = reset or bool(channels & {
+            'translation.x', 'translation.y', 'scale.x', 'scale.y',
+            'rotation.x', 'rotation.y', 'rotation.z'})
+        needs_blend = reset or 'blend' in channels
+        needs_tev = reset or any(channel.startswith(('konst.', 'tev0.', 'tev1.')) for channel in channels)
+        needs_image = reset or bool(channels & {'image', 'palette'})
+        layer = None
+        tev = None
+        selected_image = runtime['controls'][index]['base_image'] if reset else None
+        blend = base.get('colorBlend', 1)
+        if needs_matrix:
+            layer = dict(base)
+            for field in ('translation', 'scale', 'rotation'):
+                layer[field] = list(base[field])
+        if needs_tev and base.get('tev'):
+            tev = {key: list(base['tev'][key]) for key in ('konst', 'tev0', 'tev1')}
+        for texture_animation in texture_animations:
+            texture_frame = source_frame
+            texture_end = max(0.0, float(texture_animation['endFrame']))
+            if texture_animation['loop'] and texture_end > 0:
+                texture_frame %= texture_end
+            image_index = palette_index = -1
+            for track in texture_animation['tracks']:
+                channel = track['channel']
+                if channel == 'lodBias':
+                    continue
+                value = _value(track['keys'], texture_frame)
+                if channel == 'image':
+                    image_index = int(value)
+                elif channel == 'palette':
+                    palette_index = int(value)
+                elif channel == 'blend':
+                    blend = value
+                elif channel.startswith(('konst.', 'tev0.', 'tev1.')):
+                    field, component = channel.split('.')
+                    if tev and component in 'rgba':
+                        byte = max(0, min(255, int(255.0 * value)))
+                        tev[field]['rgba'.index(component)] = byte / 255.0
+                else:
+                    field, axis = channel.split('.')
+                    layer[field]['xyz'.index(axis)] = value
+            if image_index >= 0 or palette_index >= 0:
+                selected_image = runtime['images'].get(
+                    (animation_slot, index, image_index, palette_index), selected_image)
+        if needs_matrix:
+            _assign_matrix(runtime, index, layer)
+        if needs_blend:
+            value = max(0.0, min(1.0, blend))
+            for control_index, socket in enumerate(runtime['controls'][index]['blends']):
+                _assign(runtime, ('blend', index, control_index), socket, value)
+        if needs_tev:
+            _assign_tev(runtime, index, tev or base.get('tev'))
+        if needs_image:
+            _assign_image(runtime, index, selected_image)
+    runtime['slot'] = animation_slot
 
 
-def _apply_materials(scene, payload, action, source_frame):
+def _apply_materials(runtime, action, source_frame):
     slot = action.get('mme_animation_slot') if action else None
-    animation = next((item for item in payload.get('materialAnimations', [])
-                      if item['slot'] == slot), None)
-    targets = {item['materialId']: item for item in animation['materials']} if animation else {}
-    animated_ids = {target['materialId'] for animation_set in payload.get('materialAnimations', [])
-                    for target in animation_set['materials']}
-    materials = {slot.material for obj in scene.objects
-                 if obj.get('mme_session_id') == scene.mme_session_id
-                 for slot in getattr(obj, 'material_slots', []) if slot.material}
-    for material in materials:
-        material_id = material.get('mme_model_material_id') or material.get('mme_preview_model_id')
-        if material_id not in animated_ids:
-            continue
-        target = targets.get(material_id, {
-            'endFrame': 0, 'loop': False, 'tracks': [], 'textures': []})
-        _apply_material(material, target, source_frame, slot)
+    targets = runtime['material_targets'].get(slot, {})
+    empty = {'endFrame': 0, 'loop': False, 'tracks': [], 'textures': []}
+    for material_id, materials in runtime['materials'].items():
+        target = targets.get(material_id, empty)
+        for material in materials:
+            _apply_material(material, target, source_frame, slot)
+
+
+def _armature_runtime(scene, armature, payload):
+    key = armature.as_pointer()
+    signature = (scene.mme_session_id, armature.data.as_pointer(), len(armature.pose.bones), id(payload))
+    cached = _armature_cache.get(key)
+    if cached and cached['signature'] == signature:
+        return cached
+    joints = {joint['id']: joint for joint in payload['joints']}
+    bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
+    animated_bones = [(jobj_id, joint, bones.get(jobj_id)) for jobj_id, joint in joints.items()
+                      if bones.get(jobj_id) is not None and bones[jobj_id].get('mme_animated')]
+    joint_nodes = {animation['slot']: {node['jobjId']: node for node in animation['nodes']}
+                   for animation in payload.get('jointAnimations', [])}
+    material_targets = {animation['slot']: {target['materialId']: target
+                                            for target in animation['materials']}
+                        for animation in payload.get('materialAnimations', [])}
+    animated_ids = {material_id for targets in material_targets.values() for material_id in targets}
+    materials = {}
+    if animated_ids:
+        used = {slot.material for obj in scene.objects
+                if obj.get('mme_session_id') == scene.mme_session_id
+                for slot in getattr(obj, 'material_slots', []) if slot.material}
+        for material in used:
+            material_id = material.get('mme_model_material_id') or material.get('mme_preview_model_id')
+            if material_id in animated_ids:
+                materials.setdefault(material_id, []).append(material)
+    cached = {
+        'signature': signature, 'animated_bones': animated_bones,
+        'joint_nodes': joint_nodes, 'material_targets': material_targets,
+        'materials': materials, 'fcurve_ids': {}
+    }
+    _armature_cache[key] = cached
+    return cached
 
 
 def _apply_armature(scene, armature):
-    payload = _group(scene, armature)
     action = active_action(armature)
     source_frame = max(0.0, scene.frame_current_final - 1.0)
-    animation = None
-    if action is not None:
-        slot = action['mme_animation_slot']
-        animation = next((item for item in payload.get('jointAnimations', [])
-                          if item['slot'] == slot), None)
-    key = (action.as_pointer() if action else 0, source_frame)
+    slot = action.get('mme_animation_slot') if action else None
+    key = (action.as_pointer() if action else 0, slot, source_frame)
     if _applied.get(armature.as_pointer()) == key:
         return
     # Mark the state before touching matrices because those changes schedule a
     # depsgraph callback, which should see this application as already current.
     _applied[armature.as_pointer()] = key
-    joints = {joint['id']: joint for joint in payload['joints']}
-    bones = {bone.get('mme_id'): bone for bone in armature.pose.bones}
-    animated_nodes = {node['jobjId']: node for node in animation['nodes']} if animation else {}
-    fcurve_ids = set(json.loads(action.get('mme_fcurve_jobj_ids', '[]'))) if action else set()
-    for jobj_id, joint in joints.items():
-        bone = bones.get(jobj_id)
-        if bone is None or not bone.get('mme_animated') or jobj_id in fcurve_ids:
+    payload = _group(scene, armature)
+    runtime = _armature_runtime(scene, armature, payload)
+    animated_nodes = runtime['joint_nodes'].get(slot, {})
+    curve_text = action.get('mme_fcurve_jobj_ids', '[]') if action else '[]'
+    curve_key = (action.as_pointer() if action else 0, curve_text)
+    fcurve_ids = runtime['fcurve_ids'].get(curve_key)
+    if fcurve_ids is None:
+        fcurve_ids = set(json.loads(curve_text))
+        runtime['fcurve_ids'][curve_key] = fcurve_ids
+    for jobj_id, joint, bone in runtime['animated_bones']:
+        if jobj_id in fcurve_ids:
             continue
         values = {name: [joint[name][axis] for axis in 'xyz']
                   for name in ('rotation', 'scale', 'translation')}
@@ -476,7 +572,7 @@ def _apply_armature(scene, armature):
                 _set_component(values[field], axis, _value(track['keys'], node_frame))
         source = {name: dict(zip('xyz', value)) for name, value in values.items()}
         bone.matrix_basis = AXES @ joint_srt(source) @ AXES.inverted()
-    _apply_materials(scene, payload, action, source_frame)
+    _apply_materials(runtime, action, source_frame)
 
 
 def apply(scene):

@@ -184,6 +184,8 @@ def update(material, context):
             'baselineFiles': json.loads(material['mme_material_preview_files']),
             'lighting': json.loads(material.get('mme_material_lighting', '{}'))}
         light_objects = lighting.object_map(preview_stage, material.get('mme_model_material_source'))
+        from . import animations
+        animations.invalidate_material(material)
         surface.configure_preview(material, preview, Path(material['mme_material_directory']),
                                   preview_stage, light_objects)
         if color_layer and material.mme_use_vertex_color:
