@@ -142,7 +142,9 @@ public class ApplyTests
     {
         using var session = new Session();
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory, "stage.json")));
-        string target = manifest.RootElement.GetProperty("modelAdditionTargets")[0].GetProperty("id").GetString()!;
+        var targetDefinition = manifest.RootElement.GetProperty("modelAdditionTargets")[0];
+        string target = targetDefinition.GetProperty("id").GetString()!;
+        string placement = targetDefinition.GetProperty("placement").GetString()!;
         string materialId = Guid.NewGuid().ToString("N");
         var part = new ModelAdditionPart(Guid.NewGuid().ToString("N"), materialId,
             [new(0, 0, 0), new(1, 0, 0), new(0, 1, 0)], [0, 1, 2],
@@ -150,7 +152,7 @@ public class ApplyTests
         var material = new ModelAdditionMaterial(materialId, "Constant", new ColorData(1, 1, 1, 1),
             null, "repeat", "repeat", "linear", "linear", ModelAdditionEditing.MaterialPreset);
         var edits = new ModelAdditionEdits(SessionExtractor.ProtocolVersion, ModelAddition.SchemaVersion,
-            "game-joint-local", [new(Guid.NewGuid().ToString("N"), "Test", target, [part])], [material], []);
+            "game-joint-local", [new(Guid.NewGuid().ToString("N"), "Test", placement, target, [part])], [material], []);
         File.WriteAllText(Path.Combine(session.Directory, "edits/additions.json"), JsonSerializer.Serialize(edits));
         var collisionEdits = session.Edits();
         collisionEdits.Vertices[0] = collisionEdits.Vertices[0] with

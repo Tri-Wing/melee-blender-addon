@@ -6,15 +6,21 @@ import uuid
 from pathlib import Path
 
 import bpy
-from mathutils import Vector
+import bmesh
+from mathutils import Matrix
 
 from .protocol import StageError
 from .transforms import AXES
+from . import lighting, surface
 
 
 ROLE = 'model-addition'
+DOBJ_ROLE = 'model-addition-dobj'
+JOBJ_ROLE = 'model-addition-jobj'
 COLLECTION_ROLE = 'model-additions'
-PRESET = 'opaque-texture-focused-v1'
+UNLIT_PRESET = 'opaque-texture-focused-v1'
+DIFFUSE_PRESET = 'opaque-diffuse-texture-v2'
+_TARGET_ITEMS_CACHE = {}
 
 
 def stage_targets(stage):
@@ -26,49 +32,184 @@ def objects(scene):
             and obj.get('mme_session_id') == scene.mme_session_id]
 
 
+def is_pending(item):
+    return item.get('mme_role') in {ROLE, DOBJ_ROLE, JOBJ_ROLE}
+
+
 def target_items(_operator, context):
     try:
-        stage = json.loads((Path(bpy.path.abspath(context.scene.mme_session)) / 'stage.json').read_text())
-        return [(item['id'], item.get('name', item['id']), item.get('readOnlyReason', ''))
-                for item in stage_targets(stage)]
+        manifest = Path(bpy.path.abspath(context.scene.mme_session)) / 'stage.json'
+        stage = json.loads(manifest.read_text())
+        cache_key = (str(manifest.resolve()), stage.get('source', {}).get('sha256'),
+                     stage.get('modelAdditionSchemaVersion'))
+        if cache_key in _TARGET_ITEMS_CACHE:
+            return _TARGET_ITEMS_CACHE[cache_key]
+        descriptions = {
+            'existing-jobj': 'Append geometry to this existing JOBJ using the unlit opaque preset.',
+            'new-jobj-chain': 'Create a separately lit JOBJ beneath this model-group root.'}
+        prefixes = {'existing-jobj': 'Existing JOBJ', 'new-jobj-chain': 'New JOBJ Chain'}
+        targets = sorted(stage_targets(stage), key=lambda item:
+                         (item.get('placement') != 'new-jobj-chain', item.get('name', '')))
+        # Blender's dynamic EnumProperty retains pointers to callback strings.
+        # Keep the complete tuple alive for the lifetime of this loaded module.
+        items = tuple((item['id'], f"{prefixes.get(item.get('placement'), 'Placement')} — "
+                       f"{item.get('name', item['id'])}",
+                       descriptions.get(item.get('placement'), item.get('readOnlyReason', '')))
+                      for item in targets)
+        _TARGET_ITEMS_CACHE[cache_key] = items
+        return items
     except (OSError, ValueError, KeyError):
         return []
 
 
-def _collection(scene):
+def _collection(scene, target):
     matches = [collection for collection in bpy.data.collections
-               if collection.get('mme_role') == COLLECTION_ROLE
-               and collection.get('mme_session_id') == scene.mme_session_id]
+               if collection.get('mme_role') == 'group'
+               and collection.get('mme_session_id') == scene.mme_session_id
+               and collection.get('mme_group_index') == target['groupIndex']]
     if len(matches) > 1:
-        raise StageError('The Added Models collection is duplicated.')
-    if matches:
-        return matches[0]
-    parent = next((collection for collection in bpy.data.collections
-                   if collection.get('mme_role') == 'stage'
-                   and collection.get('mme_session_id') == scene.mme_session_id), scene.collection)
-    collection = bpy.data.collections.new('Added Models')
-    parent.children.link(collection)
-    collection['mme_role'] = COLLECTION_ROLE
-    collection['mme_session_id'] = scene.mme_session_id
-    collection['mme_id'] = 'model-additions'
-    return collection
+        raise StageError('The selected model-group collection is duplicated.')
+    if not matches:
+        raise StageError('The selected model-group collection is missing.')
+    return matches[0]
+
+
+def _target_binding(scene, target):
+    anchor_id = target.get('anchorJobjId')
+    matches = [(obj, bone) for obj in scene.objects if obj.type == 'ARMATURE'
+               for bone in obj.pose.bones if bone.get('mme_id') == anchor_id]
+    if len(matches) != 1:
+        raise StageError('The selected model-addition attachment is missing or duplicated.')
+    return matches[0]
+
+
+def _display_jobj_index(scene, target):
+    if target['placement'] == 'existing-jobj':
+        return target['jobjIndex']
+    source_indices = [bone.get('mme_source_index') for obj in scene.objects
+                      if obj.type == 'ARMATURE'
+                      and obj.get('mme_group_index') == target['groupIndex']
+                      for bone in obj.pose.bones
+                      if isinstance(bone.get('mme_source_index'), int)]
+    return max(source_indices) + 1 if source_indices else 0
+
+
+def _slot_id(addition_id, kind, slot):
+    return hashlib.sha256(
+        f'mme-model-addition-v2:{addition_id}:{kind}:{slot}'.encode()).hexdigest()[:32]
+
+
+def _bone_parent(obj, armature, bone):
+    obj.parent = armature
+    obj.parent_type = 'BONE'
+    obj.parent_bone = bone.name
+    obj.matrix_parent_inverse = Matrix.Translation((0, -0.25, 0))
+    obj.matrix_basis = Matrix.Identity(4)
+
+
+def _new_jobj_bone(context, armature, parent_bone, index, addition_id, target, stage):
+    selected = list(context.selected_objects)
+    active = context.view_layer.objects.active
+    if context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.select_all(action='DESELECT')
+    armature.select_set(True)
+    context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    bone = armature.data.edit_bones.new(f'JOBJ {index:03d}')
+    bone.head = (0, 0, 0)
+    bone.tail = (0, 0.25, 0)
+    bone.parent = armature.data.edit_bones[parent_bone.name]
+    bone.use_connect = False
+    name = bone.name
+    bpy.ops.object.mode_set(mode='OBJECT')
+    pose_bone = armature.pose.bones[name]
+    for item in (pose_bone, pose_bone.bone):
+        item['mme_role'] = JOBJ_ROLE
+        item['mme_session_id'] = context.scene.mme_session_id
+        item['mme_id'] = addition_id
+        item['mme_addition_id'] = addition_id
+        item['mme_target_jobj_id'] = target['id']
+        item['mme_group_index'] = target['groupIndex']
+        item['mme_owner_id'] = target['anchorJobjId']
+        item['mme_source_index'] = index
+        item['mme_source_hash'] = stage['source']['sha256']
+    pose_bone.rotation_mode = 'XYZ'
+    pose_bone.matrix_basis = Matrix.Identity(4)
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in selected:
+        if obj.name in context.scene.objects:
+            obj.select_set(True)
+    if active and active.name in context.scene.objects:
+        context.view_layer.objects.active = active
+    return pose_bone
+
+
+def _remove_jobj_bones(context, addition_ids):
+    targets = [(obj, bone.name) for obj in context.scene.objects if obj.type == 'ARMATURE'
+               for bone in obj.pose.bones if bone.get('mme_role') == JOBJ_ROLE
+               and bone.get('mme_id') in addition_ids]
+    if not targets:
+        return
+    if context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    for armature, names in ((armature, [name for owner, name in targets if owner == armature])
+                            for armature in {owner for owner, _name in targets}):
+        bpy.ops.object.select_all(action='DESELECT')
+        armature.select_set(True)
+        context.view_layer.objects.active = armature
+        bpy.ops.object.mode_set(mode='EDIT')
+        for name in names:
+            bone = armature.data.edit_bones.get(name)
+            if bone is not None:
+                armature.data.edit_bones.remove(bone)
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+
+def _part_mesh(source, slot, name):
+    result = source.copy()
+    result.name = name
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(result)
+        discarded = [face for face in bm.faces if face.material_index != slot]
+        if discarded:
+            bmesh.ops.delete(bm, geom=discarded, context='FACES')
+        loose = [vertex for vertex in bm.verts if not vertex.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context='VERTS')
+        bm.to_mesh(result)
+    finally:
+        bm.free()
+    material = source.materials[slot]
+    result.materials.clear()
+    result.materials.append(material)
+    for polygon in result.polygons:
+        polygon.material_index = 0
+    result.update()
+    return result
 
 
 def register_selected(context, target_id):
     scene = context.scene
     stage = json.loads((Path(bpy.path.abspath(scene.mme_session)) / 'stage.json').read_text())
+    if stage.get('modelAdditionSchemaVersion') != 2:
+        raise StageError('New-JOBJ model addition requires a fresh stage import with the current backend.')
     targets = {item['id']: item for item in stage_targets(stage)}
     if target_id not in targets:
         raise StageError('Choose a structurally eligible model-addition attachment from this session.')
+    target = targets[target_id]
     selected = [obj for obj in context.selected_objects if obj.type == 'MESH'
                 and obj.get('mme_role') != ROLE]
     if not selected:
         raise StageError('Select at least one external mesh object.')
-    collection = _collection(scene)
+    collection = _collection(scene, target)
+    armature, bone = _target_binding(scene, target)
     created = []
     created_meshes = []
     created_materials = []
     created_images = []
+    created_bones = []
     image_copies = {}
     depsgraph = context.evaluated_depsgraph_get()
     try:
@@ -111,34 +252,82 @@ def register_selected(context, target_id):
                             image_copies[key] = image_copy
                         node.image = image_copies[key]
                 mesh.materials[index] = material_copy
-            copy = bpy.data.objects.new(f'Added Model - {source.name}', mesh)
-            collection.objects.link(copy)
-            copy.matrix_world = source.matrix_world.copy()
-            copy['mme_role'] = ROLE
-            copy['mme_session_id'] = scene.mme_session_id
-            copy['mme_id'] = uuid.uuid4().hex
-            copy['mme_target_jobj_id'] = target_id
-            copy['mme_source_name'] = source.name
-            copy['mme_material_ids'] = json.dumps([uuid.uuid4().hex for _ in mesh.materials])
-            copy['mme_part_ids'] = json.dumps([uuid.uuid4().hex for _ in mesh.materials])
-            copy['mme_image_ids'] = json.dumps([uuid.uuid4().hex for _ in mesh.materials])
+            used_slots = sorted({polygon.material_index for polygon in mesh.polygons})
+            if any(slot >= len(mesh.materials) or mesh.materials[slot] is None for slot in used_slots):
+                raise StageError(f'{source.name}: every face must use a material slot with a material.')
+            addition_id = uuid.uuid4().hex
+            jobj_index = _display_jobj_index(scene, target)
+            jobj = None
+            if target['placement'] == 'new-jobj-chain':
+                jobj = _new_jobj_bone(context, armature, bone, jobj_index,
+                                       addition_id, target, stage)
+                created_bones.append(addition_id)
             for material in mesh.materials:
-                _configure_material_preview(material) if material else None
-            created.append(copy)
+                _configure_material_preview(material, target, stage) if material else None
+            existing_dobjs = sum(obj.get('mme_role') == 'dobj'
+                                 and obj.get('mme_owner_id') == target['anchorJobjId']
+                                 for obj in scene.objects) if target['placement'] == 'existing-jobj' else 0
+            pending_dobjs = sum(obj.get('mme_role') == DOBJ_ROLE
+                                and obj.get('mme_target_jobj_id') == target_id
+                                for obj in scene.objects) if target['placement'] == 'existing-jobj' else 0
+            for partition, slot in enumerate(used_slots):
+                dobj_index = existing_dobjs + pending_dobjs + partition \
+                    if target['placement'] == 'existing-jobj' else partition
+                dobj = bpy.data.objects.new(f'DOBJ {dobj_index:03d}', None)
+                created.append(dobj)
+                collection.objects.link(dobj)
+                dobj['mme_role'] = DOBJ_ROLE
+                dobj['mme_session_id'] = scene.mme_session_id
+                dobj['mme_id'] = uuid.uuid4().hex
+                dobj['mme_addition_id'] = addition_id
+                dobj['mme_target_jobj_id'] = target_id
+                dobj['mme_group_index'] = target['groupIndex']
+                dobj['mme_owner_id'] = jobj['mme_id'] if jobj else target['anchorJobjId']
+                dobj['mme_source_index'] = dobj_index
+                dobj['mme_source_hash'] = stage['source']['sha256']
+                if jobj:
+                    _bone_parent(dobj, armature, jobj)
+                else:
+                    _bone_parent(dobj, armature, bone)
+                part_mesh = _part_mesh(mesh, slot,
+                    f"Group {target['groupIndex']:03d} Mesh")
+                created_meshes.append(part_mesh)
+                pobj = bpy.data.objects.new(
+                    f"Editable Model - Group {target['groupIndex']:03d} JOBJ {jobj_index:03d} "
+                    f"DOBJ {dobj_index:03d} POBJ 000", part_mesh)
+                created.append(pobj)
+                collection.objects.link(pobj)
+                pobj['mme_role'] = ROLE
+                pobj['mme_session_id'] = scene.mme_session_id
+                pobj['mme_id'] = uuid.uuid4().hex
+                pobj['mme_group_index'] = target['groupIndex']
+                pobj['mme_owner_id'] = dobj['mme_id']
+                pobj['mme_source_index'] = 0
+                pobj['mme_source_hash'] = stage['source']['sha256']
+                pobj.parent = dobj
+                pobj.matrix_world = source.matrix_world.copy()
+            bpy.data.meshes.remove(mesh)
+            created_meshes.remove(mesh)
         for image in tuple(created_images):
             if image.users == 0:
                 bpy.data.images.remove(image)
                 created_images.remove(image)
+        for material in tuple(created_materials):
+            if material.users == 0:
+                bpy.data.materials.remove(material)
+                created_materials.remove(material)
         for source in selected:
             bpy.data.objects.remove(source, do_unlink=True)
         bpy.ops.object.select_all(action='DESELECT')
-        for copy in created:
-            copy.select_set(True)
-        context.view_layer.objects.active = created[-1]
-        return created
+        registered = [obj for obj in created if obj.get('mme_role') == ROLE]
+        for obj in registered:
+            obj.select_set(True)
+        context.view_layer.objects.active = registered[-1]
+        return registered
     except Exception:
         for copy in created:
             bpy.data.objects.remove(copy, do_unlink=True)
+        _remove_jobj_bones(context, set(created_bones))
         for mesh in created_meshes:
             if mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
@@ -148,42 +337,52 @@ def register_selected(context, target_id):
         for image in created_images:
             if image.users == 0:
                 bpy.data.images.remove(image)
-        if not collection.objects and not collection.children:
-            bpy.data.collections.remove(collection)
         raise
 
 
 def remove_selected(context):
-    selected = [obj for obj in context.selected_objects if obj.get('mme_role') == ROLE
+    selected = [obj for obj in context.selected_objects if is_pending(obj)
                 and obj.get('mme_session_id') == context.scene.mme_session_id]
     if not selected:
-        raise StageError('Select one or more registered Added Models to remove.')
+        raise StageError('Select one or more pending imported models to remove.')
+    addition_ids = set()
     for obj in selected:
-        mesh = obj.data
-        materials = [material for material in mesh.materials if material]
-        images = {node.image for material in materials if material.use_nodes and material.node_tree
-                  for node in material.node_tree.nodes
-                  if node.bl_idname == 'ShaderNodeTexImage' and node.image is not None}
+        if obj.get('mme_role') == ROLE and obj.parent:
+            addition_ids.add(obj.parent.get('mme_addition_id'))
+        else:
+            addition_ids.add(obj.get('mme_addition_id') or obj.get('mme_id'))
+    addition_ids.discard(None)
+    pending = [obj for obj in bpy.data.objects
+               if obj.get('mme_session_id') == context.scene.mme_session_id
+               and is_pending(obj)
+               and ((obj.get('mme_role') == ROLE and obj.parent
+                     and obj.parent.get('mme_addition_id') in addition_ids)
+                    or obj.get('mme_addition_id') in addition_ids
+                    or obj.get('mme_id') in addition_ids)]
+    meshes = [obj.data for obj in pending if obj.type == 'MESH']
+    materials = {material for mesh in meshes for material in mesh.materials if material}
+    images = {node.image for material in materials if material.use_nodes and material.node_tree
+              for node in material.node_tree.nodes
+              if node.bl_idname == 'ShaderNodeTexImage' and node.image is not None}
+    for obj in sorted(pending, key=lambda item: item.get('mme_role') != ROLE):
         bpy.data.objects.remove(obj, do_unlink=True)
+    _remove_jobj_bones(context, addition_ids)
+    for mesh in meshes:
         if mesh.users == 0:
             bpy.data.meshes.remove(mesh)
-        for material in materials:
-            if material.users == 0:
-                bpy.data.materials.remove(material)
-        for image in images:
-            if image.users == 0:
-                bpy.data.images.remove(image)
+    for material in materials:
+        if material.users == 0:
+            bpy.data.materials.remove(material)
+    for image in images:
+        if image.users == 0:
+            bpy.data.images.remove(image)
     if not objects(context.scene):
         context.scene.pop('mme_addition_report', None)
-    return len(selected)
+    return len(addition_ids)
 
 
-def _target_matrix(scene, target_id):
-    matches = [(obj, bone) for obj in scene.objects if obj.type == 'ARMATURE'
-               for bone in obj.pose.bones if bone.get('mme_id') == target_id]
-    if len(matches) != 1:
-        raise StageError('The selected model-addition attachment is missing or duplicated.')
-    armature, bone = matches[0]
+def _target_matrix(scene, target):
+    armature, bone = _target_binding(scene, target)
     return armature.matrix_world @ bone.matrix
 
 
@@ -264,24 +463,55 @@ def _material(material, inspect_only=False):
         if preview:
             raise StageError(f'{material.name}: the registered preview uses an unsupported shader.')
         raise StageError(f'{material.name}: only Principled BSDF base color is supported.')
-    base = shader.inputs.get('Color' if preview else 'Base Color')
-    if base is None:
-        raise StageError(f'{material.name}: supported shader has no color input.')
-    try:
-        warnings = json.loads(material.get('mme_model_addition_warnings', '[]')) if preview else []
-    except (TypeError, ValueError):
-        raise StageError(f'{material.name}: stored conversion warnings are corrupt.')
-    if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
-        raise StageError(f'{material.name}: stored conversion warnings are corrupt.')
-    if not base.is_linked:
-        value = tuple(base.default_value)
-        return value, None, None, 'repeat', 'repeat', 'linear', 'linear', warnings
     if preview:
-        if len(base.links) != 1 or base.links[0].from_node.bl_idname != 'ShaderNodeTexImage' \
+        if shader.name not in {'Stage Surface', 'Added Model Opaque Surface'}:
+            raise StageError(f'{material.name}: registered preview surface is missing; re-register the model.')
+        try:
+            settings = json.loads(material.get('mme_model_addition_settings', ''))
+        except (TypeError, ValueError):
+            raise StageError(f'{material.name}: stored conversion settings are corrupt; re-register the model.')
+        if not isinstance(settings, dict) or settings.get('placement') not in {
+                'existing-jobj', 'new-jobj-chain'}:
+            raise StageError(f'{material.name}: stored conversion settings are corrupt; re-register the model.')
+        placement = settings['placement']
+        if material.get('mme_model_addition_preview') != placement:
+            raise StageError(f'{material.name}: registered preview mode is corrupt; re-register the model.')
+        warnings = settings.get('warnings')
+        color = settings.get('color')
+        if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings) \
+                or not isinstance(color, list) or len(color) != 4 \
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in color):
+            raise StageError(f'{material.name}: stored conversion settings are corrupt; re-register the model.')
+        if not settings.get('textured'):
+            if placement == 'new-jobj-chain':
+                diffuse = material.node_tree.nodes.get('Stage Diffuse Lighting')
+                if diffuse is None or not shader.inputs['Color'].is_linked \
+                        or shader.inputs['Color'].links[0].from_node != diffuse \
+                        or diffuse.inputs[1].is_linked:
+                    raise StageError(f'{material.name}: registered diffuse preview was modified; re-register the model.')
+            elif shader.inputs['Color'].is_linked:
+                raise StageError(f'{material.name}: registered unlit preview was modified; re-register the model.')
+            return tuple(color), None, None, 'repeat', 'repeat', 'linear', 'linear', warnings
+        texture = material.node_tree.nodes.get('Added Model Base Color')
+        if texture is None or texture.bl_idname != 'ShaderNodeTexImage':
+            raise StageError(f'{material.name}: registered base-color texture is missing; re-register the model.')
+        base = shader.inputs['Color']
+        if placement == 'new-jobj-chain':
+            diffuse = material.node_tree.nodes.get('Stage Diffuse Lighting')
+            if diffuse is None or not base.is_linked or base.links[0].from_node != diffuse:
+                raise StageError(f'{material.name}: registered diffuse preview was modified; re-register the model.')
+            base = diffuse.inputs[1]
+        if len(base.links) != 1 or base.links[0].from_node != texture \
                 or base.links[0].from_socket.name != 'Color':
-            raise StageError(f'{material.name}: registered preview must use one direct Image Texture.')
-        texture = base.links[0].from_node
+            raise StageError(f'{material.name}: registered base-color preview was modified; re-register the model.')
     else:
+        base = shader.inputs.get('Base Color')
+        if base is None:
+            raise StageError(f'{material.name}: supported shader has no Base Color input.')
+        warnings = []
+        if not base.is_linked:
+            value = tuple(base.default_value)
+            return value, None, None, 'repeat', 'repeat', 'linear', 'linear', warnings
         texture = _base_color_texture(material, base, warnings)
     image = texture.image
     if image is None or image.source not in {'FILE', 'GENERATED'}:
@@ -315,18 +545,52 @@ def _material(material, inspect_only=False):
         warnings.append(f'{material.name}: metallic, roughness, normal and other shader inputs are omitted.')
     wrap = 'repeat' if extension == 'REPEAT' else 'clamp'
     filtering = 'nearest' if interpolation == 'Closest' else 'linear'
-    return (1, 1, 1, 1), image, uv_name, wrap, wrap, filtering, filtering, warnings
+    return tuple(color) if preview else (1, 1, 1, 1), image, uv_name, wrap, wrap, filtering, filtering, warnings
 
 
-def _configure_material_preview(material):
+def _configure_material_preview(material, target, stage):
     """Replace an imported shader with the exact opaque addition-preset preview."""
     color, image, uv_name, wrap_s, wrap_t, min_filter, mag_filter, warnings = \
         _material(material, inspect_only=True)
     if wrap_s != wrap_t or min_filter != mag_filter:
         raise StageError(f'{material.name}: addition preview requires matching texture axes and filters.')
-    material['mme_model_addition_preview'] = True
-    material['mme_model_addition_warnings'] = json.dumps(warnings)
+    placement = target['placement']
+    material['mme_model_addition_preview'] = placement
+    material['mme_model_addition_settings'] = json.dumps({
+        'color': list(color), 'textured': image is not None, 'uvName': uv_name,
+        'wrapS': wrap_s, 'wrapT': wrap_t, 'minFilter': min_filter,
+        'magFilter': mag_filter, 'warnings': warnings, 'placement': placement})
     material.diffuse_color = color
+    material.use_nodes = True
+    if placement == 'new-jobj-chain':
+        def ambient(value):
+            channel = max(0, min(255, math.floor(value * 255 + 0.5)))
+            return (channel // 2) / 255
+        preview = {'color': list(color), 'ambientColor': [ambient(color[0]),
+            ambient(color[1]), ambient(color[2]), 1], 'diffuseLighting': True,
+            'specularLighting': False}
+        source_hash = stage.get('source', {}).get('sha256')
+        surface.configure_preview(material, preview, None, stage,
+                                  lighting.object_map(stage, source_hash))
+        nodes = material.node_tree.nodes
+        if image is None:
+            return
+        texture = nodes.new('ShaderNodeTexImage')
+        texture.name = 'Added Model Base Color'
+        texture.image = image
+        texture.projection = 'FLAT'
+        texture.extension = 'REPEAT' if wrap_s == 'repeat' else 'EXTEND'
+        texture.interpolation = 'Closest' if mag_filter == 'nearest' else 'Linear'
+        diffuse = nodes.get('Stage Diffuse Lighting')
+        if diffuse is None:
+            raise StageError(f'{material.name}: stage diffuse preview could not be created.')
+        material.node_tree.links.new(texture.outputs['Color'], diffuse.inputs[1])
+        if uv_name:
+            uv = nodes.new('ShaderNodeUVMap')
+            uv.name = 'Added Model UV'
+            uv.uv_map = uv_name
+            material.node_tree.links.new(uv.outputs['UV'], texture.inputs['Vector'])
+        return
     nodes = material.node_tree.nodes
     nodes.clear()
     output = nodes.new('ShaderNodeOutputMaterial')
@@ -392,8 +656,11 @@ def edits(scene, stage):
         return None, {}
     if not stage.get('capabilities', {}).get('modelAddition'):
         raise StageError('This session backend does not support model additions. Re-import with a matching backend.')
-    targets = {item['id'] for item in stage_targets(stage)}
+    if stage.get('modelAdditionSchemaVersion') != 2:
+        raise StageError('Pending imported models use an older schema; re-import the stage and register them again.')
+    targets = {item['id']: item for item in stage_targets(stage)}
     material_records, image_records, addition_records, assets = [], [], [], {}
+    additions_by_id = {}
     warnings = []
     identifiers = set()
 
@@ -409,22 +676,51 @@ def edits(scene, stage):
         return value or fallback
 
     for obj in additions:
-        use_id(obj.get('mme_id'), obj.name)
-        target_id = obj.get('mme_target_jobj_id')
+        dobj = obj.parent
+        if dobj is None or dobj.get('mme_role') != DOBJ_ROLE \
+                or dobj.get('mme_session_id') != scene.mme_session_id \
+                or obj.get('mme_owner_id') != dobj.get('mme_id'):
+            raise StageError(f'{obj.name}: DOBJ parent is missing or changed; re-register the model.')
+        addition_id = dobj.get('mme_addition_id')
+        target_id = dobj.get('mme_target_jobj_id')
         if target_id not in targets:
             raise StageError(f'{obj.name}: model-addition attachment is no longer available.')
+        target = targets[target_id]
+        placement = target['placement']
+        if obj.get('mme_group_index') != target['groupIndex'] \
+                or dobj.get('mme_group_index') != target['groupIndex'] \
+                or obj.get('mme_source_hash') != stage['source']['sha256'] \
+                or dobj.get('mme_source_hash') != stage['source']['sha256']:
+            raise StageError(f'{obj.name}: model-group identity is corrupt; re-register the model.')
+        parent_bone = (dobj.parent.pose.bones.get(dobj.parent_bone)
+                       if dobj.parent and dobj.parent.type == 'ARMATURE'
+                       and dobj.parent_type == 'BONE' else None)
+        if placement == 'new-jobj-chain':
+            jobj = parent_bone
+            if jobj is None or jobj.get('mme_role') != JOBJ_ROLE \
+                    or jobj.get('mme_id') != addition_id \
+                    or jobj.get('mme_target_jobj_id') != target_id \
+                    or dobj.get('mme_owner_id') != addition_id \
+                    or jobj.parent is None or jobj.parent.get('mme_id') != target['anchorJobjId']:
+                raise StageError(f'{obj.name}: generated JOBJ hierarchy is missing or changed.')
+        elif dobj.get('mme_owner_id') != target['anchorJobjId'] \
+                or parent_bone is None or parent_bone.get('mme_id') != target['anchorJobjId']:
+            raise StageError(f'{obj.name}: existing JOBJ ownership is missing or changed.')
+        if addition_id not in additions_by_id:
+            use_id(addition_id, f'{obj.name} JOBJ addition')
+            additions_by_id[addition_id] = {'id': addition_id,
+                'name': display_name(obj.name, 'Editable Model'),
+                'placement': placement, 'targetJobjId': target_id, 'parts': []}
+            addition_records.append(additions_by_id[addition_id])
+        elif additions_by_id[addition_id]['targetJobjId'] != target_id:
+            raise StageError(f'{obj.name}: DOBJ branches disagree on their JOBJ target.')
         if obj.type != 'MESH' or obj.constraints or obj.modifiers or obj.data.shape_keys or obj.animation_data:
             raise StageError(f'{obj.name}: registered additions must remain static meshes without modifiers, constraints, shape keys or animation.')
         mesh = obj.data
         mesh.calc_loop_triangles()
         if not mesh.loop_triangles:
             raise StageError(f'{obj.name}: addition has no triangles.')
-        material_ids = json.loads(obj.get('mme_material_ids', '[]'))
-        part_ids = json.loads(obj.get('mme_part_ids', '[]'))
-        image_ids = json.loads(obj.get('mme_image_ids', '[]'))
-        if not (len(material_ids) == len(part_ids) == len(image_ids) == len(mesh.materials)):
-            raise StageError(f'{obj.name}: stored addition material identities are corrupt.')
-        target_inverse = _target_matrix(scene, target_id).inverted_safe()
+        target_inverse = _target_matrix(scene, target).inverted_safe()
         local_to_target = target_inverse @ obj.matrix_world
         if abs(local_to_target.to_3x3().determinant()) < 1e-12:
             raise StageError(f'{obj.name}: addition transform has a zero scale axis.')
@@ -435,17 +731,20 @@ def edits(scene, stage):
             point = to_game @ (local_to_target @ vertex.co)
             positions.append(dict(zip(('x', 'y', 'z'), point)))
         reverse = local_to_target.to_3x3().determinant() < 0
-        parts = []
         used_slots = sorted({triangle.material_index for triangle in mesh.loop_triangles})
+        if used_slots != [0] or len(mesh.materials) != 1:
+            raise StageError(f'{obj.name}: each imported POBJ must retain its single material partition.')
         for slot in used_slots:
             if slot >= len(mesh.materials) or mesh.materials[slot] is None:
                 raise StageError(f'{obj.name}: every face must use a material slot with a material.')
             material = mesh.materials[slot]
-            use_id(material_ids[slot], f'{obj.name} material slot {slot}')
-            use_id(part_ids[slot], f'{obj.name} geometry part {slot}')
+            part_id = obj.get('mme_id')
+            material_id = _slot_id(part_id, 'material', slot)
+            use_id(part_id, f'{obj.name} POBJ')
+            use_id(material_id, f'{obj.name} material slot {slot}')
             color, image, uv_name, wrap_s, wrap_t, min_filter, mag_filter, losses = _material(material)
             warnings.extend(losses)
-            image_id = image_ids[slot] if image else None
+            image_id = _slot_id(obj['mme_id'], 'image', slot) if image else None
             if image:
                 use_id(image_id, f'{obj.name} image slot {slot}')
                 width, height, pixels = _rgba(image)
@@ -458,10 +757,11 @@ def edits(scene, stage):
                     'sha256': hashlib.sha256(pixels).hexdigest()})
             elif color[3] < 1:
                 warnings.append(f'{material.name}: material alpha is ignored by the opaque preset.')
-            material_records.append({'id': material_ids[slot], 'name': display_name(material.name, 'Material'),
+            material_records.append({'id': material_id, 'name': display_name(material.name, 'Material'),
                 'baseColor': dict(zip(('r', 'g', 'b', 'a'), color)), 'imageId': image_id,
                 'wrapS': wrap_s, 'wrapT': wrap_t, 'minFilter': min_filter,
-                'magFilter': mag_filter, 'preset': PRESET})
+                'magFilter': mag_filter, 'preset': DIFFUSE_PRESET
+                if placement == 'new-jobj-chain' else UNLIT_PRESET})
             uv_layer = None
             if image:
                 uv_layer = mesh.uv_layers.get(uv_name) if uv_name else mesh.uv_layers.active
@@ -481,12 +781,9 @@ def edits(scene, stage):
                     if uvs is not None:
                         uv = uv_layer.data[loop_index].uv
                         uvs.append({'x': uv.x, 'y': 1 - uv.y})
-            parts.append({'id': part_ids[slot], 'materialId': material_ids[slot],
+            additions_by_id[addition_id]['parts'].append({'id': part_id, 'materialId': material_id,
                 'positions': positions, 'triangleIndices': indices,
                 'cornerNormals': normals, 'texCoords0': uvs})
-        addition_records.append({'id': obj['mme_id'],
-            'name': display_name(obj.get('mme_source_name', obj.name), 'Added Model'),
-            'targetJobjId': target_id, 'parts': parts})
     scene['mme_addition_report'] = json.dumps({'objects': len(addition_records),
         'parts': sum(len(item['parts']) for item in addition_records),
         'triangles': sum(len(part['triangleIndices']) // 3 for item in addition_records
@@ -496,6 +793,6 @@ def edits(scene, stage):
         'images': len(image_records), 'textureBytes': sum(len(value) for value in assets.values()),
         'imageDimensions': [f"{image['width']}×{image['height']}" for image in image_records],
         'warnings': sorted(set(warnings))})
-    return {'protocolVersion': 2, 'modelAdditionSchemaVersion': 1,
+    return {'protocolVersion': 2, 'modelAdditionSchemaVersion': 2,
         'coordinateSpace': 'game-joint-local', 'additions': addition_records,
         'materials': material_records, 'images': image_records}, assets

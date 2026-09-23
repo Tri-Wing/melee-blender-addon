@@ -47,13 +47,17 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-boat-') as temporary:
             expected_pixels[target:target + 4] = bytes(
                 round(max(0, min(1, source_values[source + channel])) * 255)
                 if channel < source_image.channels else 255 for channel in range(4))
-    registered = model_additions.register_selected(bpy.context, stage['modelAdditionTargets'][0]['id'])
+    target = next(item for item in stage['modelAdditionTargets']
+                  if item['placement'] == 'new-jobj-chain')
+    registered = model_additions.register_selected(bpy.context, target['id'])
     registered_images = [node.image for obj in registered for material in obj.data.materials
                          if material and material.use_nodes for node in material.node_tree.nodes
                          if node.bl_idname == 'ShaderNodeTexImage' and node.image]
     assert registered_images and all(image.packed_file for image in registered_images)
     payload, assets = model_additions.edits(bpy.context.scene, stage)
     assert len(payload['additions']) == len(imported)
+    assert all(item['placement'] == 'new-jobj-chain' for item in payload['additions'])
+    assert all(item['preset'] == 'opaque-diffuse-texture-v2' for item in payload['materials'])
     assert len(payload['images']) == 1 and assets
     assert next(iter(assets.values())) == expected_pixels
     bpy.ops.wm.save_as_mainfile(filepath=str(temporary / 'boat.blend'))

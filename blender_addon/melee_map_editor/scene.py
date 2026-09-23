@@ -40,7 +40,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     # Preview cameras are disposable editor aids. Moving, renaming, or deleting
     # one must never turn into a DAT edit or fail protected-scene validation.
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid
-               and o.get('mme_role') not in ('preview-camera', model_additions.ROLE)]
+               and o.get('mme_role') != 'preview-camera' and not model_additions.is_pending(o)]
     result = {'collections': [], 'objects': []}
     session_actions = [action for action in bpy.data.actions
                        if action.get('mme_session_id') == sid]
@@ -56,7 +56,8 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
             'parents': sorted(p.get('mme_id', p.name) for p in bpy.data.collections if c.name in p.children)
                        + (['SCENE'] if c.name in scene.collection.children else []),
             'objects': sorted(o.get('mme_id', o.name) for o in c.objects
-                              if o.get('mme_role') not in ('preview-camera', model_additions.ROLE)),
+                              if o.get('mme_role') != 'preview-camera'
+                              and not model_additions.is_pending(o)),
             'children': sorted(x.get('mme_id', x.name) for x in c.children
                                if x.get('mme_role') != model_additions.COLLECTION_ROLE)})
     for o in objects:
@@ -104,7 +105,9 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
                 'weights': weights[group.index]} for group in o.vertex_groups]
         if o.type == 'ARMATURE':
             row['bones'] = []
-            for bone in sorted(o.pose.bones, key=lambda item: item.get('mme_id', item.name)):
+            for bone in sorted((item for item in o.pose.bones
+                                if not model_additions.is_pending(item)),
+                               key=lambda item: item.get('mme_id', item.name)):
                 record = {'props': properties(bone), 'name': bone.name,
                     'parent': bone.parent.get('mme_id', bone.parent.name) if bone.parent else None,
                     'rotationMode': bone.rotation_mode,

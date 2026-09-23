@@ -34,9 +34,12 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-dae-') as temporary:
     bpy.ops.wm.collada_import(filepath=str(BOAT))
     imported = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
     assert imported
-    model_additions.register_selected(bpy.context, stage['modelAdditionTargets'][0]['id'])
+    target = next(item for item in stage['modelAdditionTargets']
+                  if item['placement'] == 'new-jobj-chain')
+    model_additions.register_selected(bpy.context, target['id'])
     payload, assets = model_additions.edits(bpy.context.scene, stage)
     assert payload and len(payload['images']) == 1 and assets
+    assert payload['materials'][0]['preset'] == 'opaque-diffuse-texture-v2'
     result = scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'boat-dae.dat')
     assert result['modelChanged'] and result['modelTriangles'] > 0
 

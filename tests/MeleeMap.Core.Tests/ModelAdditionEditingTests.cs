@@ -208,6 +208,41 @@ public class ModelAdditionEditingTests
         Assert.Empty(new StageArchive("large-added.dat", write.Bytes).Validate());
     }
 
+    [PrimaryFixtureFact]
+    public void CreatesIndependentLitJobjChainUnderModelGroupRoot()
+    {
+        using var fixture = new Fixture();
+        var target = fixture.NewChainTarget;
+        var material = Material(Id(), null) with
+        {
+            BaseColor = new(0.25f, 0.5f, 0.75f, 1),
+            Preset = ModelAdditionEditing.DiffuseMaterialPreset
+        };
+        var edits = Batch(target.Id, [Part(Id(), material.Id, null)], [material], [],
+            ModelAddition.NewJobjChainPlacement);
+        var batch = ModelAdditionEditing.Validate(fixture.Directory, fixture.Source,
+            fixture.Identity, edits, [target.Id]);
+
+        var write = ModelAdditionArchiveWriter.Write(fixture.Source.Layout, fixture.Identity, batch);
+        var output = new StageArchive("new-jobj-added.dat", write.Bytes);
+        var catalog = ModelIdentityCatalog.Restore(fixture.Identity.Nodes);
+        var extended = ModelIdentity.Capture(output.Layout, catalog);
+        var jobj = Assert.Single(write.Jobjs);
+        var chunk = Assert.Single(write.Chunks);
+        var addedJobj = extended.Nodes.Single(node => node.Kind == "jobj"
+            && node.SourceOffset == jobj.JobjOffset);
+
+        Assert.Empty(output.Validate());
+        Assert.Equal(fixture.Identity.Nodes.Count + 3, extended.Nodes.Count);
+        Assert.Equal(target.AnchorJobjId, jobj.AnchorJobjId);
+        Assert.Equal(target.AnchorJobjId, addedJobj.OwnerId);
+        Assert.Equal(addedJobj.Id, extended.Nodes.Single(node => node.Kind == "dobj"
+            && node.SourceOffset == chunk.DobjOffset).OwnerId);
+        Assert.Equal(ModelAddition.NewJobjChainPlacement, chunk.Placement);
+        Assert.Equal(ModelAdditionEditing.DiffuseMaterialPreset,
+            Assert.Single(write.Materials).Preset);
+    }
+
     [GrGdFixtureFact]
     public void SelectsAndWritesProgrammaticAttachmentForGrGd()
     {
@@ -224,13 +259,14 @@ public class ModelAdditionEditingTests
 
         Assert.Empty(output.Validate());
         Assert.Equal(fixture.Identity.Nodes.Count + 2, extended.Nodes.Count);
-        Assert.Equal(fixture.Target.Id, Assert.Single(write.Chunks).TargetJobjId);
+        Assert.Equal(fixture.Target.Id, Assert.Single(write.Chunks).TargetId);
     }
 
     private static ModelAdditionEdits Batch(string target, ModelAdditionPart[] parts,
-        ModelAdditionMaterial[] materials, ModelAdditionImage[] images) => new(
+        ModelAdditionMaterial[] materials, ModelAdditionImage[] images,
+        string placement = ModelAddition.ExistingJobjPlacement) => new(
         SessionExtractor.ProtocolVersion, ModelAddition.SchemaVersion, "game-joint-local",
-        [new(Id(), "Test addition", target, parts)], materials, images);
+        [new(Id(), "Test addition", placement, target, parts)], materials, images);
 
     private static ModelAdditionPart Part(string id, string material, Vector2Data[]? uvs) => new(
         id, material, [new(0, 0, 0), new(1, 0, 0), new(0, 1, 0)], [0, 1, 2],
@@ -258,6 +294,7 @@ public class ModelAdditionEditingTests
         public StageArchive Source { get; }
         public ModelIdentitySnapshot Identity { get; }
         public ModelAdditionTarget Target { get; }
+        public ModelAdditionTarget NewChainTarget { get; }
 
         public Fixture(string filename = "GrNLa.dat")
         {
@@ -265,10 +302,13 @@ public class ModelAdditionEditingTests
             Source = new StageArchive(Path.Combine(CorpusTests.CorpusDirectory, filename));
             var catalog = new ModelIdentityCatalog();
             Identity = ModelIdentity.Capture(Source.Layout, catalog);
-            var targets = ModelAddition.Select(Source, Identity);
+            var targets = ModelAddition.Select(Source, Identity, out var reasons);
             Assert.NotEmpty(targets);
-            Target = targets.FirstOrDefault(target => !target.HiddenAtRest
-                && !target.ExistingMaterialAnimation) ?? targets[0];
+            Target = targets.FirstOrDefault(target => target.Placement == ModelAddition.ExistingJobjPlacement
+                && !target.HiddenAtRest && !target.ExistingMaterialAnimation)
+                ?? targets.First(target => target.Placement == ModelAddition.ExistingJobjPlacement);
+            NewChainTarget = targets.FirstOrDefault(target => target.Placement == ModelAddition.NewJobjChainPlacement)
+                ?? throw new InvalidOperationException(string.Join(" | ", reasons.Values.Distinct()));
             System.IO.Directory.CreateDirectory(Path.Combine(Directory, "edits"));
         }
 

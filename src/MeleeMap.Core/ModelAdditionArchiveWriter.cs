@@ -7,14 +7,18 @@ using static MeleeMap.Core.ArchiveLayout;
 namespace MeleeMap.Core;
 
 public sealed record ModelAdditionChunkWrite(string AdditionId, string PartId, int ChunkIndex,
-    string TargetJobjId, int DobjOffset, int PobjOffset, int MaterialOffset,
+    string TargetId, string Placement, int DobjOffset, int PobjOffset, int MaterialOffset,
     int TriangleCount, MeshData Mesh);
+public sealed record ModelAdditionJobjWrite(string AdditionId, string TargetId,
+    string AnchorJobjId, int JobjOffset, int FirstDobjOffset);
 public sealed record ModelAdditionMaterialWrite(string MaterialId, int MobjOffset, int ColorOffset,
     int? TobjOffset, int? LodOffset, int? ImageDescriptorOffset,
-    int WrapS, int WrapT, int MinFilter, int MagFilter, byte Red, byte Green, byte Blue);
+    int WrapS, int WrapT, int MinFilter, int MagFilter, byte Red, byte Green, byte Blue,
+    string Preset);
 public sealed record ModelAdditionImageWrite(string ImageId, int DescriptorOffset, int DataOffset,
     int EncodedLength, int Width, int Height, byte[] Pixels);
 public sealed record ModelAdditionWrite(byte[] Bytes, ModelAdditionChunkWrite[] Chunks,
+    ModelAdditionJobjWrite[] Jobjs,
     ModelAdditionMaterialWrite[] Materials, ModelAdditionImageWrite[] Images,
     int[] PatchedSourceFields);
 
@@ -26,12 +30,16 @@ public static class ModelAdditionArchiveWriter
 {
     public const int MaxTrianglesPerChunk = 14_000;
     private const int RenderConstant = 1;
+    private const int RenderDiffuse = 1 << 2;
     private const int RenderTex0 = 1 << 4;
+    private const int JobjLighting = 1 << 7;
+    private const int JobjOpaque = 1 << 18;
+    private const int JobjRootOpaque = 1 << 28;
     private const int TobjLightmapDiffuse = 1 << 4;
     private const int TobjColormapModulate = 4 << 16;
 
     private readonly record struct ImageKey(int Width, int Height, string Sha256);
-    private readonly record struct MaterialKey(byte R, byte G, byte B,
+    private readonly record struct MaterialKey(byte R, byte G, byte B, string Preset,
         int ImageDescriptor, int WrapS, int WrapT, int MinFilter, int MagFilter);
     private sealed record BuiltImage(int Descriptor, int Data, byte[] Encoded,
         ValidatedModelAdditionImage Source);
@@ -97,16 +105,20 @@ public static class ModelAdditionArchiveWriter
         {
             BuiltImage? image = definition.ImageId == null ? null : imagesById[definition.ImageId];
             var key = new MaterialKey(Channel(definition.BaseColor.R), Channel(definition.BaseColor.G),
-                Channel(definition.BaseColor.B), image?.Descriptor ?? -1, Wrap(definition.WrapS),
+                Channel(definition.BaseColor.B), definition.Preset, image?.Descriptor ?? -1, Wrap(definition.WrapS),
                 Wrap(definition.WrapT), Filter(definition.MinFilter), Filter(definition.MagFilter));
             if (!materialCache.TryGetValue(key, out var built))
             {
                 byte[] color = new byte[0x14];
-                color[0] = color[4] = key.R;
-                color[1] = color[5] = key.G;
-                color[2] = color[6] = key.B;
+                bool diffuse = key.Preset == ModelAdditionEditing.DiffuseMaterialPreset;
+                color[0] = diffuse ? (byte)(key.R / 2) : key.R;
+                color[1] = diffuse ? (byte)(key.G / 2) : key.G;
+                color[2] = diffuse ? (byte)(key.B / 2) : key.B;
+                color[4] = key.R;
+                color[5] = key.G;
+                color[6] = key.B;
                 color[3] = color[7] = color[0x0B] = 255;
-                Float(color, 0x0C, 1); // The initial preset renders opaque.
+                Float(color, 0x0C, 1); // Both supported presets render opaque.
                 Float(color, 0x10, 0); // No specular shininess.
                 int colorOffset = Append(color);
                 int? tobjOffset = null, lodOffset = null;
@@ -134,7 +146,8 @@ public static class ModelAdditionArchiveWriter
                     relocations.Add(tobjOffset.Value + 0x54);
                 }
                 byte[] mobj = new byte[0x18];
-                Put(mobj, 4, RenderConstant | (image == null ? 0 : RenderTex0));
+                Put(mobj, 4, (diffuse ? RenderDiffuse : RenderConstant)
+                    | (image == null ? 0 : RenderTex0));
                 if (tobjOffset.HasValue) Put(mobj, 8, tobjOffset.Value);
                 Put(mobj, 0x0C, colorOffset);
                 int mobjOffset = Append(mobj);
@@ -146,13 +159,14 @@ public static class ModelAdditionArchiveWriter
             materialsById.Add(definition.Id, built);
             materialWrites.Add(new(definition.Id, built.Mobj, built.Color, built.Tobj,
                 built.Lod, built.ImageDescriptor, key.WrapS, key.WrapT, key.MinFilter,
-                key.MagFilter, key.R, key.G, key.B));
+                key.MagFilter, key.R, key.G, key.B, key.Preset));
         }
 
         var pending = new List<(string AdditionId, string PartId, int ChunkIndex,
-            string TargetId, int Dobj, int Pobj, int Material, MeshData Mesh)>();
+            string TargetId, string Placement, int Dobj, int Pobj, int Material, MeshData Mesh)>();
         foreach (var addition in batch.Edits.Additions)
         {
+            var target = batch.Targets[addition.TargetJobjId];
             foreach (var part in addition.Parts)
             {
                 int material = materialsById[part.MaterialId].Mobj;
@@ -179,32 +193,93 @@ public static class ModelAdditionArchiveWriter
                     relocations.Add(dobjOffset + 8);
                     relocations.Add(dobjOffset + 0x0C);
                     pending.Add((addition.Id, part.Id, chunkIndex++, addition.TargetJobjId,
+                        target.Placement,
                         dobjOffset, pobjOffset, material, mesh));
                 }
             }
         }
         Require(pending.Count > 0, "MODEL_ADDITION_EMPTY", "No nondegenerate addition geometry remains.");
 
+        var jobjWrites = new List<ModelAdditionJobjWrite>();
+        foreach (var addition in batch.Edits.Additions.Where(edit =>
+            batch.Targets[edit.TargetJobjId].Placement == ModelAddition.NewJobjChainPlacement))
+        {
+            var chunks = pending.Where(chunk => chunk.AdditionId == addition.Id).ToArray();
+            Require(chunks.Length > 0, "MODEL_ADDITION_EMPTY", "A new JOBJ has no geometry.");
+            var target = batch.Targets[addition.TargetJobjId];
+            byte[] jobj = new byte[0x40];
+            Put(jobj, 4, JobjLighting | JobjOpaque);
+            Put(jobj, 0x10, chunks[0].Dobj);
+            Float(jobj, 0x20, 1);
+            Float(jobj, 0x24, 1);
+            Float(jobj, 0x28, 1);
+            int jobjOffset = Append(jobj);
+            relocations.Add(jobjOffset + 0x10);
+            jobjWrites.Add(new(addition.Id, addition.TargetJobjId,
+                target.AnchorJobjId, jobjOffset, chunks[0].Dobj));
+        }
+
         byte[] payload = data.ToArray();
         var patchedFields = new List<int>();
+
+        void LinkDobj((string AdditionId, string PartId, int ChunkIndex, string TargetId,
+            string Placement, int Dobj, int Pobj, int Material, MeshData Mesh)[] linked)
+        {
+            for (int index = 0; index + 1 < linked.Length; index++)
+            {
+                Put(payload, linked[index].Dobj + 4, linked[index + 1].Dobj);
+                relocations.Add(linked[index].Dobj + 4);
+            }
+        }
+
         foreach (var group in pending.GroupBy(chunk => chunk.TargetId))
         {
-            var target = byId[group.Key];
-            var existing = nodes.Where(node => node.Kind == "dobj" && node.OwnerId == target.Id)
-                .OrderBy(node => node.Index).ToArray();
-            int sourceField = existing.Length == 0 ? target.SourceOffset + 0x10
-                : existing[^1].SourceOffset + 4;
-            Require(sourceReader.Pointer(sourceField) == null, "MODEL_ADDITION_DOBJ_TAIL",
-                "Attachment DOBJ tail changed after eligibility validation.");
+            var definition = batch.Targets[group.Key];
             var chunks = group.ToArray();
-            Put(payload, sourceField, chunks[0].Dobj);
-            relocations.Add(sourceField);
-            patchedFields.Add(sourceField);
-            for (int index = 0; index + 1 < chunks.Length; index++)
+            if (definition.Placement == ModelAddition.ExistingJobjPlacement)
             {
-                Put(payload, chunks[index].Dobj + 4, chunks[index + 1].Dobj);
-                relocations.Add(chunks[index].Dobj + 4);
+                var target = byId[group.Key];
+                var existing = nodes.Where(node => node.Kind == "dobj" && node.OwnerId == target.Id)
+                    .OrderBy(node => node.Index).ToArray();
+                int sourceField = existing.Length == 0 ? target.SourceOffset + 0x10
+                    : existing[^1].SourceOffset + 4;
+                Require(sourceReader.Pointer(sourceField) == null, "MODEL_ADDITION_DOBJ_TAIL",
+                    "Attachment DOBJ tail changed after eligibility validation.");
+                Put(payload, sourceField, chunks[0].Dobj);
+                relocations.Add(sourceField);
+                patchedFields.Add(sourceField);
+                LinkDobj(chunks);
+                continue;
             }
+
+            var anchor = byId[definition.AnchorJobjId];
+            var children = nodes.Where(node => node.OwnerId == anchor.Id && node.Kind.EndsWith("jobj"))
+                .OrderBy(node => node.Index).ToArray();
+            int childField = children.Length == 0 ? anchor.SourceOffset + 8
+                : children[^1].SourceOffset + 12;
+            Require(sourceReader.Pointer(childField) == null, "MODEL_ADDITION_JOBJ_TAIL",
+                "Model-group JOBJ child tail changed after eligibility validation.");
+            var additions = jobjWrites.Where(jobj => jobj.TargetId == group.Key).ToArray();
+            Require(additions.Length > 0, "MODEL_ADDITION_JOBJ", "New-chain target has no generated JOBJ.");
+            Put(payload, childField, additions[0].JobjOffset);
+            relocations.Add(childField);
+            patchedFields.Add(childField);
+            for (int index = 0; index + 1 < additions.Length; index++)
+            {
+                Put(payload, additions[index].JobjOffset + 12, additions[index + 1].JobjOffset);
+                relocations.Add(additions[index].JobjOffset + 12);
+            }
+            int flagsField = anchor.SourceOffset + 4;
+            int flags = sourceReader.Int(flagsField);
+            if ((flags & JobjRootOpaque) == 0)
+            {
+                Require(children.Length == 0, "MODEL_ADDITION_JOBJ_FLAGS",
+                    "Cannot enable opaque traversal for an existing child hierarchy.");
+                Put(payload, flagsField, flags | JobjRootOpaque);
+                patchedFields.Add(flagsField);
+            }
+            foreach (var addition in additions)
+                LinkDobj(chunks.Where(chunk => chunk.AdditionId == addition.AdditionId).ToArray());
         }
 
         using var result = new MemoryStream();
@@ -219,9 +294,9 @@ public static class ModelAdditionArchiveWriter
         Put(output, 8, relocations.Count);
 
         var chunksWritten = pending.Select(chunk => new ModelAdditionChunkWrite(chunk.AdditionId,
-            chunk.PartId, chunk.ChunkIndex, chunk.TargetId, chunk.Dobj, chunk.Pobj,
+            chunk.PartId, chunk.ChunkIndex, chunk.TargetId, chunk.Placement, chunk.Dobj, chunk.Pobj,
             chunk.Material, chunk.Mesh.TriangleIndices.Length / 3, chunk.Mesh)).ToArray();
-        var write = new ModelAdditionWrite(output, chunksWritten, materialWrites.ToArray(),
+        var write = new ModelAdditionWrite(output, chunksWritten, jobjWrites.ToArray(), materialWrites.ToArray(),
             imageWrites.ToArray(), patchedFields.ToArray());
         Verify(source, identity, write);
         return write;
@@ -241,7 +316,8 @@ public static class ModelAdditionArchiveWriter
 
         var catalog = ModelIdentityCatalog.Restore(identity.Nodes);
         var extended = ModelIdentity.Capture(archive, catalog);
-        Require(extended.Nodes.Count == identity.Nodes.Count + expected.Chunks.Length * 2,
+        int expectedNewNodes = expected.Chunks.Length * 2 + expected.Jobjs.Length;
+        Require(extended.Nodes.Count == identity.Nodes.Count + expectedNewNodes,
             "MODEL_ADDITION_GRAPH", "Model graph extension contains an unexpected descriptor count.");
         var extendedById = extended.Nodes.ToDictionary(node => node.Id);
         foreach (var original in identity.Nodes)
@@ -253,16 +329,47 @@ public static class ModelAdditionArchiveWriter
 
         var originalIds = identity.Nodes.Select(node => node.Id).ToHashSet();
         var newNodes = extended.Nodes.Where(node => !originalIds.Contains(node.Id)).ToArray();
-        Require(newNodes.Length == expected.Chunks.Length * 2, "MODEL_ADDITION_GRAPH",
+        Require(newNodes.Length == expectedNewNodes, "MODEL_ADDITION_GRAPH",
             "Unexpected descriptors appeared in the extended model graph.");
         var reader = new ArchiveDataReader(archive);
+
+        var addedJobjNodes = new Dictionary<string, ModelIdentityNode>(StringComparer.Ordinal);
+        foreach (var jobj in expected.Jobjs)
+        {
+            Require(jobj.JobjOffset % 32 == 0, "MODEL_ADDITION_ALIGNMENT",
+                "Added JOBJ descriptor is not 32-byte aligned.");
+            var node = newNodes.SingleOrDefault(item => item.Kind == "jobj"
+                && item.SourceOffset == jobj.JobjOffset);
+            Require(node != null && node.OwnerId == jobj.AnchorJobjId,
+                "MODEL_ADDITION_GRAPH", "Added JOBJ ownership differs from the write map.");
+            addedJobjNodes.Add(jobj.AdditionId, node!);
+            var siblings = expected.Jobjs.Where(item => item.TargetId == jobj.TargetId).ToArray();
+            int siblingIndex = Array.IndexOf(siblings, jobj);
+            int? next = siblingIndex + 1 < siblings.Length ? siblings[siblingIndex + 1].JobjOffset : null;
+            Require(reader.Int(jobj.JobjOffset + 4) == (JobjLighting | JobjOpaque)
+                && reader.Pointer(jobj.JobjOffset + 8) == null
+                && reader.Pointer(jobj.JobjOffset + 12) == next
+                && reader.Pointer(jobj.JobjOffset + 16) == jobj.FirstDobjOffset
+                && Enumerable.Range(0, 3).All(axis => reader.Float(jobj.JobjOffset + 0x14 + axis * 4) == 0)
+                && Enumerable.Range(0, 3).All(axis => reader.Float(jobj.JobjOffset + 0x20 + axis * 4) == 1)
+                && Enumerable.Range(0, 3).All(axis => reader.Float(jobj.JobjOffset + 0x2C + axis * 4) == 0)
+                && reader.Pointer(jobj.JobjOffset + 0x38) == null
+                && reader.Pointer(jobj.JobjOffset + 0x3C) == null,
+                "MODEL_ADDITION_JOBJ", "Added JOBJ descriptor differs from the write map.");
+            var anchor = extendedById[jobj.AnchorJobjId];
+            Require((reader.Int(anchor.SourceOffset + 4) & JobjRootOpaque) != 0,
+                "MODEL_ADDITION_JOBJ", "Added JOBJ chain is not traversed in the opaque pass.");
+        }
+
         foreach (var chunk in expected.Chunks)
         {
             Require(chunk.DobjOffset % 32 == 0 && chunk.PobjOffset % 32 == 0,
                 "MODEL_ADDITION_ALIGNMENT", "Added model descriptors are not 32-byte aligned.");
             var dobj = newNodes.SingleOrDefault(node => node.Kind == "dobj" && node.SourceOffset == chunk.DobjOffset);
             var pobj = newNodes.SingleOrDefault(node => node.Kind == "pobj" && node.SourceOffset == chunk.PobjOffset);
-            Require(dobj != null && pobj != null && dobj.OwnerId == chunk.TargetJobjId
+            string expectedOwner = chunk.Placement == ModelAddition.NewJobjChainPlacement
+                ? addedJobjNodes[chunk.AdditionId].Id : chunk.TargetId;
+            Require(dobj != null && pobj != null && dobj.OwnerId == expectedOwner
                 && pobj.OwnerId == dobj.Id && pobj.Index == 0,
                 "MODEL_ADDITION_GRAPH", "Added DOBJ/POBJ ownership differs from the write map.");
             Require(reader.Pointer(dobj.SourceOffset + 8) == chunk.MaterialOffset
@@ -280,8 +387,28 @@ public static class ModelAdditionArchiveWriter
                 && mesh.BoundJobjSourceOffset == null,
                 "MODEL_ADDITION_GEOMETRY", "Added geometry differs after archive reload.");
         }
+        foreach (var target in expected.Chunks
+            .Where(chunk => chunk.Placement == ModelAddition.ExistingJobjPlacement)
+            .GroupBy(chunk => chunk.TargetId))
+        {
+            var offsets = newNodes.Where(node => node.Kind == "dobj" && node.OwnerId == target.Key)
+                .OrderBy(node => node.Index).Select(node => node.SourceOffset).ToArray();
+            Require(offsets.SequenceEqual(target.Select(chunk => chunk.DobjOffset)),
+                "MODEL_ADDITION_GRAPH", "Added existing-JOBJ DOBJ order differs from the write map.");
+        }
+        foreach (var addition in expected.Chunks
+            .Where(chunk => chunk.Placement == ModelAddition.NewJobjChainPlacement)
+            .GroupBy(chunk => chunk.AdditionId))
+        {
+            string owner = addedJobjNodes[addition.Key].Id;
+            var offsets = newNodes.Where(node => node.Kind == "dobj" && node.OwnerId == owner)
+                .OrderBy(node => node.Index).Select(node => node.SourceOffset).ToArray();
+            Require(offsets.SequenceEqual(addition.Select(chunk => chunk.DobjOffset)),
+                "MODEL_ADDITION_GRAPH", "Added new-JOBJ DOBJ order differs from the write map.");
+        }
         Require(newNodes.All(node => expected.Chunks.Any(chunk =>
-            node.SourceOffset == chunk.DobjOffset || node.SourceOffset == chunk.PobjOffset)),
+                node.SourceOffset == chunk.DobjOffset || node.SourceOffset == chunk.PobjOffset)
+            || expected.Jobjs.Any(jobj => node.SourceOffset == jobj.JobjOffset)),
             "MODEL_ADDITION_GRAPH", "Extended graph contains an undeclared descriptor.");
 
         foreach (var material in expected.Materials)
@@ -290,13 +417,14 @@ public static class ModelAdditionArchiveWriter
                 && (!material.TobjOffset.HasValue || material.TobjOffset.Value % 32 == 0)
                 && (!material.LodOffset.HasValue || material.LodOffset.Value % 32 == 0),
                 "MODEL_ADDITION_ALIGNMENT", "Added material descriptors are not 32-byte aligned.");
-            Require(reader.Int(material.MobjOffset + 4) == RenderConstant
+            bool diffuse = material.Preset == ModelAdditionEditing.DiffuseMaterialPreset;
+            Require(reader.Int(material.MobjOffset + 4) == (diffuse ? RenderDiffuse : RenderConstant)
                     + (material.TobjOffset.HasValue ? RenderTex0 : 0)
                 && reader.Pointer(material.MobjOffset + 0x0C) == material.ColorOffset
                 && reader.Pointer(material.MobjOffset + 8) == material.TobjOffset
-                && reader.Byte(material.ColorOffset) == material.Red
-                && reader.Byte(material.ColorOffset + 1) == material.Green
-                && reader.Byte(material.ColorOffset + 2) == material.Blue
+                && reader.Byte(material.ColorOffset) == (diffuse ? material.Red / 2 : material.Red)
+                && reader.Byte(material.ColorOffset + 1) == (diffuse ? material.Green / 2 : material.Green)
+                && reader.Byte(material.ColorOffset + 2) == (diffuse ? material.Blue / 2 : material.Blue)
                 && reader.Byte(material.ColorOffset + 4) == material.Red
                 && reader.Byte(material.ColorOffset + 5) == material.Green
                 && reader.Byte(material.ColorOffset + 6) == material.Blue

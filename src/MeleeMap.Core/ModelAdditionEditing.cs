@@ -16,6 +16,7 @@ public sealed record ModelAdditionEdits(
 public sealed record ModelAdditionEdit(
     [property: JsonRequired] string Id,
     [property: JsonRequired] string Name,
+    [property: JsonRequired] string Placement,
     [property: JsonRequired] string TargetJobjId,
     [property: JsonRequired] ModelAdditionPart[] Parts);
 
@@ -69,7 +70,9 @@ public static class ModelAdditionEditing
     public const int MaxTriangles = 200_000;
     public const int MaxPositions = 1_000_000;
     public const string PixelEncoding = "rgba8-srgb-straight-top-left";
-    public const string MaterialPreset = "opaque-texture-focused-v1";
+    public const string UnlitMaterialPreset = "opaque-texture-focused-v1";
+    public const string DiffuseMaterialPreset = "opaque-diffuse-texture-v2";
+    public const string MaterialPreset = UnlitMaterialPreset;
 
     public static ValidatedModelAdditionBatch Validate(string sessionDirectory, StageArchive source,
         ModelIdentitySnapshot identity, ModelAdditionEdits edits, IEnumerable<string> declaredTargetIds)
@@ -96,7 +99,7 @@ public static class ModelAdditionEditing
             Require(material != null && AddId(material.Id) && Name(material.Name)
                 && FiniteColor(material.BaseColor), "MODEL_ADDITION_MATERIAL",
                 "Materials require unique UUIDs, a display name, and finite RGBA values in [0,1].");
-            Require(material.Preset == MaterialPreset
+            Require(material.Preset is UnlitMaterialPreset or DiffuseMaterialPreset
                 && material.WrapS is "repeat" or "clamp" && material.WrapT is "repeat" or "clamp"
                 && material.MinFilter is "nearest" or "linear" && material.MagFilter is "nearest" or "linear",
                 "MODEL_ADDITION_MATERIAL", "Unsupported model-addition material preset or sampler setting.");
@@ -140,8 +143,9 @@ public static class ModelAdditionEditing
             Require(addition != null && AddId(addition.Id) && Name(addition.Name)
                 && addition.Parts is { Length: > 0 }, "MODEL_ADDITION_FORMAT",
                 "Additions require unique UUIDs, a display name, and at least one geometry part.");
+            eligible.TryGetValue(addition.TargetJobjId ?? "", out var target);
             Require(addition.TargetJobjId != null && declared.Contains(addition.TargetJobjId)
-                && eligible.TryGetValue(addition.TargetJobjId, out _), "MODEL_ADDITION_TARGET",
+                && target != null && addition.Placement == target.Placement, "MODEL_ADDITION_TARGET",
                 "Addition attachment is unsupported or absent from this session.");
             partCount = checked(partCount + addition.Parts.Length);
             Require(partCount <= MaxParts, "MODEL_ADDITION_COUNT", "Model additions exceed the geometry-part limit.");
@@ -151,6 +155,10 @@ public static class ModelAdditionEditing
                     && materials.ContainsKey(part.MaterialId),
                     "MODEL_ADDITION_PART", "Geometry parts require unique UUIDs and a declared material.");
                 var material = materials[part!.MaterialId];
+                string requiredPreset = target!.Placement == ModelAddition.NewJobjChainPlacement
+                    ? DiffuseMaterialPreset : UnlitMaterialPreset;
+                Require(material.Preset == requiredPreset, "MODEL_ADDITION_MATERIAL",
+                    "The material preset does not match the selected placement mode.");
                 usedMaterials.Add(part.MaterialId);
                 Require(part.Positions is { Length: > 0 and <= ushort.MaxValue }
                     && part.TriangleIndices is { Length: > 0 }

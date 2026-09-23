@@ -42,19 +42,29 @@ public class SessionTests
             var selectedTargets = ModelAddition.Select(stage, candidateIdentity, out var additionReadOnlyReasons);
             var eligibleCandidate = candidateIdentity.Nodes.Single(node => node.Kind == "jobj"
                 && node.GroupIndex == 3 && node.Index == 3);
-            Assert.True(selectedTargets.Length == 1,
+            var existingTargets = selectedTargets.Where(target =>
+                target.Placement == ModelAddition.ExistingJobjPlacement).ToArray();
+            var newChainTargets = selectedTargets.Where(target =>
+                target.Placement == ModelAddition.NewJobjChainPlacement).ToArray();
+            Assert.True(existingTargets.Length == 1,
                 additionReadOnlyReasons.GetValueOrDefault(eligibleCandidate.Id));
-            Assert.Equal(eligibleCandidate.Id, selectedTargets[0].Id);
-            Assert.Single(additionTargets);
-            Assert.Equal(3, additionTargets[0].GetProperty("groupIndex").GetInt32());
-            Assert.Equal(3, additionTargets[0].GetProperty("jobjIndex").GetInt32());
-            Assert.Equal("game-joint-local", additionTargets[0].GetProperty("coordinateSpace").GetString());
-            Assert.Equal("Group 003 / Joint 003", additionTargets[0].GetProperty("name").GetString());
-            Assert.True(additionTargets[0].GetProperty("hasExistingGeometry").GetBoolean());
-            Assert.True(additionTargets[0].GetProperty("inheritsStageTransform").GetBoolean());
-            Assert.True(additionTargets[0].GetProperty("inheritsStageVisibility").GetBoolean());
-            Assert.False(additionTargets[0].GetProperty("hiddenAtRest").GetBoolean());
-            Assert.True(additionTargets[0].GetProperty("existingMaterialAnimation").GetBoolean());
+            Assert.Equal(eligibleCandidate.Id, existingTargets[0].Id);
+            Assert.NotEmpty(newChainTargets);
+            Assert.Equal(selectedTargets.Length, additionTargets.Length);
+            var existing = additionTargets.Single(target => target.GetProperty("placement").GetString()
+                == ModelAddition.ExistingJobjPlacement);
+            Assert.Equal(3, existing.GetProperty("groupIndex").GetInt32());
+            Assert.Equal(3, existing.GetProperty("jobjIndex").GetInt32());
+            Assert.Equal("game-joint-local", existing.GetProperty("coordinateSpace").GetString());
+            Assert.Equal("Group 003 / Joint 003", existing.GetProperty("name").GetString());
+            Assert.Equal(ModelAddition.ExistingJobjPlacement, existing.GetProperty("placement").GetString());
+            Assert.Equal(existing.GetProperty("id").GetString(),
+                existing.GetProperty("anchorJobjId").GetString());
+            Assert.True(existing.GetProperty("hasExistingGeometry").GetBoolean());
+            Assert.True(existing.GetProperty("inheritsStageTransform").GetBoolean());
+            Assert.True(existing.GetProperty("inheritsStageVisibility").GetBoolean());
+            Assert.False(existing.GetProperty("hiddenAtRest").GetBoolean());
+            Assert.True(existing.GetProperty("existingMaterialAnimation").GetBoolean());
             Assert.Empty(root.GetProperty("deferredMeshes").EnumerateArray());
             Assert.Equal(Convert.ToHexString(SHA256.HashData(stage.Layout.Bytes)).ToLowerInvariant(), root.GetProperty("source").GetProperty("sha256").GetString());
             Assert.Equal(10, root.GetProperty("modelGroups").GetArrayLength());

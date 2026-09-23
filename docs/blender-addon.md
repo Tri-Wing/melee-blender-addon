@@ -140,12 +140,21 @@ Stages with eligible static JOBJ/DOBJ chains expose attachment choices computed
 from their archive structure; no filename or hash allowlist is used. Import an
 external mesh with Blender's normal OBJ, glTF, or FBX importer (or a Collada/DAE
 import extension), select its mesh objects, and choose **Add Selected Models to
-Stage**. Pick the attachment in the dialog. After every selected mesh validates,
-the add-on replaces it with an evaluated, editable registration under **Melee
-Stage → Added Models**; duplicate first if you want to retain an imported
-reference. Select registered objects and use **Remove Selected Added Models** to
-remove them from the pending export. A failed registration leaves the selected
-source objects untouched.
+Stage**. Pick either an existing-JOBJ attachment or a **New JOBJ Chain** entry
+beneath a compatible model-group root. The existing mode inherits that JOBJ's
+render behavior. The new-chain mode creates an identity-transform child with its
+own opaque lighting flags, so it can use the stage's diffuse lights without
+changing any existing model's lighting mode. After every selected mesh validates,
+the add-on replaces it with an evaluated, bone-parented **Editable Model** inside
+the selected **Melee Stage → Models → Group NNN** collection. Its name follows
+the other imported model objects. Each material partition is represented as a
+POBJ mesh beneath its own DOBJ object; new-chain placement also adds a generated
+identity-transform JOBJ bone to the group's existing armature and bone-parents
+those DOBJ branches to it. This matches the hierarchy emitted to
+the DAT, while any additional GX-size chunking remains an export detail. Duplicate first if you want to retain an
+imported reference. Select registered objects and use **Remove Selected Imported
+Models** to remove them from the pending export. A failed registration leaves
+the selected source objects untouched.
 
 Each face must have a material. The initial converter accepts either a constant
 base color or one Image Texture connected to a Principled BSDF Base Color input.
@@ -161,11 +170,13 @@ Object transforms, evaluated corner normals, material assignments, UV seams, UV
 tiling, packed images, and unsaved image pixels are retained.
 Stored sRGB channel values are copied directly into the DAT texture; Blender's
 image color-space setting is not applied a second time during export.
-Registration also replaces each imported shader with an unlit opaque preview of
-the current Melee material preset. This deliberately changes the selected
-object's appearance immediately so the viewport does not imply that unsupported
-Principled lighting, metallic, roughness, alpha, or vertex-color behavior will
-survive export.
+Registration also replaces each imported shader with the chosen Melee material
+preset immediately. Existing-JOBJ attachments use the unlit opaque preview.
+New-JOBJ-chain additions use the stage-light diffuse preview, including the
+material's half-strength ambient channel and current editable stage lights. This
+keeps the registered object aligned with its expected in-engine appearance;
+unsupported Principled metallic, roughness, alpha, specular, and vertex-color
+behavior is still omitted.
 
 Validate and export normally. Temporary `edits/additions.json` and raw RGBA
 payloads exist only for the backend call and are removed afterward; registered
@@ -173,7 +184,8 @@ objects and packed images remain in the `.blend`. Repeated exports always apply
 to the immutable imported source, so additions do not accumulate. Reimporting
 the exported DAT treats them as ordinary source models. The automated Blender
 round trip is passing, but this initial path still awaits an in-game textured
-fixture check.
+fixture check. The new placement schema requires a fresh DAT import; pending
+models registered by an older add-on/backend must be registered again.
 
 ## Edit static JOBJ transforms
 

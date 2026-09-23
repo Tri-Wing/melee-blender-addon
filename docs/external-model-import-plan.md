@@ -49,7 +49,8 @@ creating a complete stage archive from scratch is outside this feature.
    images or unsupported base-color graphs must be actionable errors, not an
    unexpected grey export.
 6. Preview the converted materials. Replace each successfully registered source
-   mesh with its evaluated stage copy in an **Added Models** collection; users
+   mesh with evaluated POBJ material partitions beneath generated DOBJ containers
+   in the selected existing model-group collection; users
    can duplicate before registration when they want a reference. Keep registered
    objects editable and pack their texture images for `.blend` save/reopen. A
    failed registration leaves its sources untouched.
@@ -126,16 +127,19 @@ its model importer, or its image-loading UI.
 
 ## Archive attachment design
 
-Append new DOBJ entries to the **end** of an eligible existing JOBJ's DOBJ list.
-Create a POBJ and GX buffers per generated geometry chunk, plus new materials,
-texture descriptors, and image buffers. Chunks may share newly generated
-material/image structures when their normalized definitions match.
+Two attachment modes are implemented. `existing-jobj` appends new DOBJ entries
+to the **end** of an eligible existing JOBJ's DOBJ list. `new-jobj-chain` appends
+one identity-transform JOBJ per registered object beneath a compatible top-level
+root, then owns that object's DOBJ chunks from the generated JOBJ. Both create a
+POBJ and GX buffers per geometry chunk, plus new materials, texture descriptors,
+and image buffers. Chunks may share newly generated material/image structures
+when their normalized definitions match.
 
-This preserves existing group indices, JOBJ preorder, and existing DOBJ/POBJ
-indices. A joint with no DOBJ list can receive one when otherwise eligible.
-No new JOBJ or model group is needed for the initial feature. The new geometry
-inherits the attachment's transform, visibility, and stage-controlled behavior;
-attachment selection cannot promise independence from stage code.
+Both modes preserve existing group indices, JOBJ preorder, and existing DOBJ/POBJ
+indices. A joint with no DOBJ list can receive one when otherwise eligible. The
+new-chain mode gives the addition independent lighting and visibility flags while
+still inheriting its root transform and model-group activation; attachment
+selection cannot promise independence from stage code.
 
 Eligibility must be separate from existing mesh-replacement eligibility:
 
@@ -148,9 +152,10 @@ Eligibility must be separate from existing mesh-replacement eligibility:
   animation. Audit all source animation slots and runtime stage behavior before
   broadening support. Appending to a list alone is not sufficient evidence that
   animation and render traversal will remain compatible.
-- Do not change original JOBJ render flags just to make new materials visible.
-  Verify that the selected target and its ancestors support the chosen opaque
-  material preset; reject or omit targets needing unimplemented flag changes.
+- Do not change an original geometry-owning JOBJ's lighting/render flags just to
+  make new materials visible. Existing targets must already support their opaque
+  preset. A new-chain root with no children may receive `JOBJ_ROOT_OPA` when the
+  first child is linked because the bit had no prior rendered subtree to affect.
 - Recompute eligibility in the backend from the immutable source. A modified
   manifest or Blender tag must not enable an unsupported target.
 
@@ -223,15 +228,16 @@ conversion must occur exactly once.
 ## Proposed session extension
 
 Keep session protocol v2 and add an explicit, versioned capability:
-`capabilities.modelAddition: true`, `modelAdditionSchemaVersion: 1`, plus
-`modelAdditionTargets` containing source JOBJ IDs and eligibility information.
+`capabilities.modelAddition: true`, `modelAdditionSchemaVersion: 2`, plus
+`modelAdditionTargets` containing placement modes, anchor JOBJ IDs, and
+eligibility information.
 Require fresh extraction to enable additions in older saved scenes. The CLI
 process-result envelope remains version 1; it is separate from session versions.
 
 Introduce `edits/additions.json` with these logical fields:
 
 - Protocol and addition-schema versions, coordinate space `game-joint-local`.
-- Additions with stable session UUIDs, display names, target JOBJ IDs, geometry,
+- Additions with stable session UUIDs, display names, placement and target IDs, geometry,
   per-corner UVs/normals, and material references per triangle or partition.
 - Normalized material definitions and image references.
 - Image records with dimensions, pixel encoding, payload path, and SHA-256.
@@ -250,7 +256,8 @@ Additions must be counted as real changes in apply results and validation.
 Stage edit files and image payloads transactionally for each validate/export.
 Extend the existing scene export cleanup to remove only files created by that
 attempt, including on failure. Preserve preexisting user edit files and report
-conflicts. Keep packed images and registration metadata in `.blend`; temporary
+conflicts. Keep packed images and the same minimal hidden identity fields used by
+other imported model objects in `.blend`; temporary
 session payloads must not be the only surviving copy of a converted texture.
 
 ## Preservation and validation changes
@@ -268,7 +275,8 @@ new nodes or reparenting.
 
 The writer should append all new data while retaining existing offsets. For an
 addition-only export, allowed changes to original data are limited to each
-approved list-tail `next` field, or the JOBJ DOBJ-head field for an empty list.
+approved DOBJ or child-JOBJ list-tail field, the JOBJ DOBJ-head field for an empty
+list, and the opaque-child traversal bit on a root whose child list was empty.
 Rebuild archive size/relocation metadata as needed and preserve roots, names,
 external reference chains, and all other original payload bytes. For combined
 edits, compose this patch set with the explicitly allowed existing edit patches.

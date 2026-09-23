@@ -125,7 +125,7 @@ class MME_OT_add_models(bpy.types.Operator):
     bl_label = 'Add Selected Models to Stage'
     bl_options = {'REGISTER', 'UNDO'}
 
-    target_jobj_id: EnumProperty(name='Attachment', items=model_additions.target_items)
+    target_jobj_id: EnumProperty(name='Placement Target', items=model_additions.target_items)
 
     def invoke(self, context, event):
         if not model_additions.target_items(self, context):
@@ -136,20 +136,21 @@ class MME_OT_add_models(bpy.types.Operator):
     def execute(self, context):
         def action():
             added = model_additions.register_selected(context, self.target_jobj_id)
-            context.scene.mme_status = f'Converted and registered {len(added)} Added Model object(s).'
+            count = len({obj.parent.get('mme_addition_id') for obj in added if obj.parent})
+            context.scene.mme_status = f'Converted and integrated {count} imported model(s).'
             self.report({'INFO'}, context.scene.mme_status)
         return execute_safely(self, context, action)
 
 
 class MME_OT_remove_models(bpy.types.Operator):
     bl_idname = 'mme.remove_models'
-    bl_label = 'Remove Selected Added Models'
+    bl_label = 'Remove Selected Imported Models'
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         def action():
             count = model_additions.remove_selected(context)
-            context.scene.mme_status = f'Removed {count} pending Added Model object(s).'
+            context.scene.mme_status = f'Removed {count} pending imported model object(s).'
             self.report({'INFO'}, context.scene.mme_status)
         return execute_safely(self, context, action)
 
@@ -182,6 +183,18 @@ class MME_OT_edit_model(bpy.types.Operator):
     def execute(self, context):
         def action():
             active = context.active_object
+            if active and active.get('mme_role') == model_additions.ROLE \
+                    and active.get('mme_session_id') == context.scene.mme_session_id:
+                if context.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.select_all(action='DESELECT')
+                active.hide_set(False)
+                active.select_set(True)
+                context.view_layer.objects.active = active
+                context.tool_settings.mesh_select_mode = (True, False, False)
+                bpy.ops.object.mode_set(mode='EDIT')
+                context.scene.mme_status = f'Editing {active.name}.'
+                return
             infos = modeling.targets(context.scene)
             selected = next((info for info in infos if active and active.get('mme_id') == info['id']
                              and active.get('mme_session_id') == context.scene.mme_session_id), None)
@@ -462,7 +475,10 @@ class MME_PT_stage(bpy.types.Panel):
             addition_targets = []
         if addition_targets:
             pending = model_additions.objects(s)
-            layout.label(text=f'{len(pending)} pending Added Model object(s)')
+            layout.label(text=f'{len(pending)} pending imported model object(s)')
+            active_pending = context.active_object in pending
+            if active_pending:
+                layout.operator('mme.edit_model', text='Edit Selected Model', icon='EDITMODE_HLT')
             layout.operator('mme.add_models', icon='ADD')
             row = layout.row()
             row.enabled = bool(context.selected_objects

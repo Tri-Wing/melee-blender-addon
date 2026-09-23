@@ -33,22 +33,26 @@ edits/additions.json                     # optional appended rigid model batch
 edits/addition-assets/<UUID>.rgba        # temporary raw RGBA image payloads
 ```
 
-The manifest defines model-addition schema version 1 and emits structurally eligible
-`modelAdditionTargets`. Each target identifies a source JOBJ, uses
-`game-joint-local` coordinates, and reports inherited transform/visibility,
-rest-pose visibility, existing geometry, and existing material animation. The
-capability is `capabilities.modelAddition: true` only when at least one eligible
-target exists. Clients must require that capability and use a listed target.
+The manifest defines model-addition schema version 2 and emits structurally eligible
+`modelAdditionTargets`. A target's `placement` is either `existing-jobj`, which
+appends DOBJ geometry to its source JOBJ, or `new-jobj-chain`, which creates a new
+identity-transform JOBJ beneath the reported `anchorJobjId`. Both use
+`game-joint-local` coordinates. Existing-JOBJ targets also report inherited
+transform/visibility, rest-pose visibility, existing geometry, and existing
+material animation. The capability is `capabilities.modelAddition: true` only
+when at least one eligible target exists. Clients must require that capability
+and use a listed target without forging placement or anchor metadata.
 
 The addition document is strictly validated using this shape:
 
 ```json
 {
   "protocolVersion": 2,
-  "modelAdditionSchemaVersion": 1,
+  "modelAdditionSchemaVersion": 2,
   "coordinateSpace": "game-joint-local",
   "additions": [{
-    "id": "<UUID>", "name": "Object", "targetJobjId": "<manifest target UUID>",
+    "id": "<UUID>", "name": "Object", "placement": "new-jobj-chain",
+    "targetJobjId": "<manifest target ID>",
     "parts": [{
       "id": "<UUID>", "materialId": "<UUID>",
       "positions": [{"x": 0, "y": 0, "z": 0}],
@@ -62,7 +66,7 @@ The addition document is strictly validated using this shape:
     "baseColor": {"r": 1, "g": 1, "b": 1, "a": 1}, "imageId": null,
     "wrapS": "repeat", "wrapT": "repeat",
     "minFilter": "linear", "magFilter": "linear",
-    "preset": "opaque-texture-focused-v1"
+    "preset": "opaque-diffuse-texture-v2"
   }],
   "images": []
 }
@@ -78,15 +82,20 @@ symbolic links. Current bounds are 1,024 pixels per image, 32 MiB aggregate RGBA
 200,000 input triangles, and 1,000,000 positions per batch. Every declared
 material and image must be used.
 
-Apply appends ordinary rigid DOBJ/POBJ/GX structures to the selected JOBJ list.
-The initial material preset is opaque and supports a constant base color or one
-RGBA8 UV texture with repeat/clamp and nearest/linear sampling. Image alpha is
-preserved in the payload but is intentionally not used for blending. Degenerate
-triangles are removed; remaining geometry is deterministically chunked for GX
-limits. Exact extension verification preserves all original identities and
-bytes except the selected DOBJ tail link, decodes every added mesh and image, and
-checks all new pointers and sampler fields. `MODEL_ADDITION_*` is only the error
-code namespace; successful output contains no special addition tag.
+Apply either appends ordinary rigid DOBJ/POBJ/GX structures to the selected JOBJ
+list or appends a new JOBJ sibling chain beneath the selected root. New JOBJs use
+independent `LIGHTING | OPA` flags and a diffuse material preset; existing-JOBJ
+attachments retain the unlit constant preset because changing their lighting
+flags would also change existing geometry. Both presets support a constant base
+color or one RGBA8 UV texture with repeat/clamp and nearest/linear sampling.
+Image alpha is preserved in the payload but is intentionally not used for
+blending. Degenerate triangles are removed; remaining geometry is deterministically
+chunked for GX limits. Exact extension verification preserves all original
+identities and bytes except the approved DOBJ/JOBJ tail link and, for an empty
+root child list, the otherwise inert opaque-child traversal bit. It decodes every
+added mesh and image and checks all new pointers, flags, ownership, and sampler
+fields. `MODEL_ADDITION_*` is only the error-code namespace; successful output
+contains no special addition tag.
 
 ## Manifest and protected identity
 

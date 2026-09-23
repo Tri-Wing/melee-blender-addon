@@ -3,7 +3,7 @@ using static MeleeMap.Core.ArchiveLayout;
 namespace MeleeMap.Core;
 
 public sealed record ModelAdditionTarget(string Id, int GroupIndex, int JobjIndex,
-    string Name, string CoordinateSpace, bool HasExistingGeometry,
+    string Name, string Placement, string AnchorJobjId, string CoordinateSpace, bool HasExistingGeometry,
     bool InheritsStageTransform, bool InheritsStageVisibility, bool HiddenAtRest,
     bool ExistingMaterialAnimation);
 
@@ -14,7 +14,9 @@ public sealed record ModelAdditionTarget(string Id, int GroupIndex, int JobjInde
 /// </summary>
 public static class ModelAddition
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
+    public const string ExistingJobjPlacement = "existing-jobj";
+    public const string NewJobjChainPlacement = "new-jobj-chain";
 
     private const int Hidden = 1 << 4;
     private const int Opaque = 1 << 18;
@@ -50,10 +52,70 @@ public static class ModelAddition
             var group = nodes.First(node => node.GroupIndex == joint.GroupIndex && node.Kind == "group");
             bool materialAnimation = HasDobjAnimation(PathFromGroup(joint, group).ToArray(), group.SourceOffset + 8);
             result.Add(new(joint.Id, joint.GroupIndex, joint.Index,
-                $"Group {joint.GroupIndex:D3} / Joint {joint.Index:D3}", "game-joint-local",
+                $"Group {joint.GroupIndex:D3} / Joint {joint.Index:D3}", ExistingJobjPlacement,
+                joint.Id, "game-joint-local",
                 hasGeometry, true, true, (flags & Hidden) != 0, materialAnimation));
         }
+
+        foreach (var group in nodes.Where(node => node.Kind == "group"))
+        {
+            var roots = nodes.Where(node => node.OwnerId == group.Id && node.Kind.EndsWith("jobj"))
+                .OrderBy(node => node.Index).ToArray();
+            if (roots.Length == 0) continue;
+            var root = roots[^1];
+            string? reason = NewChainReason(group, root);
+            if (reason != null)
+            {
+                readOnlyReasons[group.Id] = reason;
+                continue;
+            }
+            result.Add(new(group.Id, group.GroupIndex, root.Index,
+                $"Group {group.GroupIndex:D3} / Root Joint {root.Index:D3} / New JOBJ Chain",
+                NewJobjChainPlacement, root.Id, "game-joint-local", false, true, false, false, false));
+        }
         return result.ToArray();
+
+        string? NewChainReason(ModelIdentityNode group, ModelIdentityNode root)
+        {
+            if (nodes.Any(node => node.GroupIndex == group.GroupIndex && node.Kind == "instance-jobj"))
+                return "This group contains JOBJ instances.";
+            if (root.Kind != "jobj" || HasReference(root.SourceOffset)
+                || HasInteriorReference(root.SourceOffset, 0x40))
+                return "This group does not have an ordinary root JOBJ.";
+            var ownershipFields = nodes.Where(node => node.Kind is "group" or "sentinel-group")
+                .Select(node => node.SourceOffset)
+                .Concat(nodes.Where(node => node.Kind.EndsWith("jobj"))
+                    .SelectMany(node => new[] { node.SourceOffset + 8, node.SourceOffset + 12 }));
+            if (ownershipFields.Count(field => archive.Pointers.GetValueOrDefault(field, -1)
+                    == root.SourceOffset) != 1)
+                return "This group's root JOBJ has shared hierarchy ownership.";
+            int flags = reader.Int(root.SourceOffset + 4);
+            if ((flags & UnsupportedTransformFlags) != 0
+                || HasReference(root.SourceOffset + 0x38) || HasReference(root.SourceOffset + 0x3C))
+                return "This group's root JOBJ uses unsupported transform behavior.";
+            if (Enumerable.Range(0, 3).Any(axis =>
+                MathF.Abs(reader.Float(root.SourceOffset + 0x20 + axis * 4)) <= 1e-6f))
+                return "This group's root JOBJ has non-invertible scale.";
+            if (reader.Pointer(root.SourceOffset + 12) != null)
+                return "This root is not the final hierarchy chain; adding a child would shift protected JOBJ order.";
+            var children = nodes.Where(node => node.OwnerId == root.Id && node.Kind.EndsWith("jobj"))
+                .OrderBy(node => node.Index).ToArray();
+            int? head = reader.Pointer(root.SourceOffset + 8);
+            if ((children.Length == 0) != !head.HasValue
+                || children.Length > 0 && children[0].SourceOffset != head)
+                return "This group's root child list does not match its protected identity graph.";
+            if (children.Length > 0)
+            {
+                if ((flags & RootOpaque) == 0)
+                    return "This group's existing children are not traversed in the opaque pass.";
+                var tail = children[^1];
+                if (tail.Kind != "jobj" || HasReference(tail.SourceOffset)
+                    || HasInteriorReference(tail.SourceOffset, 0x40)
+                    || reader.Pointer(tail.SourceOffset + 12) != null)
+                    return "This group's root child tail is not an ordinary appendable JOBJ.";
+            }
+            return null;
+        }
 
         string? StructuralReason(ModelIdentityNode joint)
         {

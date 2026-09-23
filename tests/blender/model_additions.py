@@ -1,5 +1,6 @@
 """Run: blender --background --factory-startup --python-exit-code 1 --python tests/blender/model_additions.py"""
 import json
+import gc
 import os
 from pathlib import Path
 import sys
@@ -25,7 +26,12 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
     scene.import_session(bpy.context, directory)
     stage = read(directory / 'stage.json')
     assert stage['capabilities']['modelAddition']
+    enum_items = model_additions.target_items(None, bpy.context)
+    gc.collect()
+    assert enum_items is model_additions.target_items(None, bpy.context)
+    assert all(identifier and name for identifier, name, _description in enum_items)
     target = stage['modelAdditionTargets'][0]['id']
+    assert stage['modelAdditionTargets'][0]['placement'] == 'existing-jobj'
     source_mesh_count = sum(len(read(directory / group['file'])['meshes'])
                             for group in stage['modelGroups'])
 
@@ -81,7 +87,24 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
     source_name = source.name
     assert bpy.ops.mme.add_models(target_jobj_id=target) == {'FINISHED'}
     registered = model_additions.objects(bpy.context.scene)
-    assert len(registered) == 1 and source_name not in bpy.context.scene.objects
+    assert len(registered) == 2 and source_name not in bpy.context.scene.objects
+    assert all(obj.name.startswith('Editable Model - Group ') for obj in registered)
+    assert all(len(obj.users_collection) == 1
+               and obj.users_collection[0].get('mme_role') == 'group' for obj in registered)
+    assert all(obj.parent and obj.parent.get('mme_role') == model_additions.DOBJ_ROLE
+               for obj in registered)
+    assert all(obj.parent.parent_type == 'BONE' and obj.parent.parent_bone
+               for obj in registered)
+    assert all(obj.data.name.startswith('Group 003 Mesh')
+               and 'Imported' not in obj.data.name for obj in registered)
+    assert not any(collection.get('mme_role') == model_additions.COLLECTION_ROLE
+                   for collection in bpy.data.collections)
+    assert all(key not in obj for obj in registered for key in ('mme_target_placement',
+        'mme_anchor_jobj_id', 'mme_source_name', 'mme_material_ids',
+        'mme_part_ids', 'mme_image_ids'))
+    assert bpy.ops.mme.edit_model() == {'FINISHED'}
+    assert bpy.context.object.mode == 'EDIT'
+    bpy.ops.object.mode_set(mode='OBJECT')
     assert registered[0].data.materials[0] != textured
     registered_nodes = registered[0].data.materials[0].node_tree.nodes
     assert any(node.bl_idname == 'ShaderNodeEmission' for node in registered_nodes)
@@ -97,6 +120,8 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
         set(json.loads(bpy.context.scene['mme_jobj_baselines'])))
     payload, assets = model_additions.edits(bpy.context.scene, stage)
     assert len(payload['additions']) == 1
+    assert payload['modelAdditionSchemaVersion'] == 2
+    assert payload['additions'][0]['placement'] == 'existing-jobj'
     assert len(payload['additions'][0]['parts']) == 2
     assert len(payload['materials']) == 2 and len(payload['images']) == 1
     report = json.loads(bpy.context.scene['mme_addition_report'])
@@ -109,7 +134,7 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
         registered_texture.image.colorspace_settings.name, list(registered_texture.image.pixels[:8]))
     bpy.ops.wm.save_as_mainfile(filepath=str(temporary / 'additions.blend'))
     bpy.ops.wm.open_mainfile(filepath=str(temporary / 'additions.blend'))
-    assert len(model_additions.objects(bpy.context.scene)) == 1
+    assert len(model_additions.objects(bpy.context.scene)) == 2
     reopened_payload, reopened_assets = model_additions.edits(bpy.context.scene, stage)
     assert reopened_payload == payload and reopened_assets == assets
     result = scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'added.dat')

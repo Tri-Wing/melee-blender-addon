@@ -4,10 +4,11 @@ Linux-first Blender stage editor, with a working Blender collision editing previ
 [the implementation plan](docs/blender-addon-plan.md) and
 [format audit / implementation status](docs/format-audit.md).
 
-Initial [external model addition and material conversion](docs/external-model-import-plan.md)
+[External model addition and material conversion](docs/external-model-import-plan.md)
 is available wherever the imported stage contains a structurally eligible static
-JOBJ attachment, preserving UVs and RGBA8 base-color textures while adding
-ordinary model geometry without replacing meshes.
+JOBJ attachment or model-group root. Additions can append to an existing JOBJ or
+create a separately lit JOBJ chain, preserving UVs and RGBA8 base-color textures
+while adding ordinary model geometry without replacing meshes.
 
 Requires the .NET 8 SDK. The CLI references `HSDLib/HSDRaw` directly; it does not
 reference HSDRawViewer or launch a GUI. NuGet access is needed for initial restore.
@@ -63,9 +64,9 @@ stage materials now include packed texture previews and UV Editor images. JOBJ
 transform animations import as native editable bone curves and export back to DAT;
 supported material/texture-transform animations play from the Blender timeline as
 preview-only source slots. Selected external meshes can be registered as opaque
-constant-color or single-image Added Models (including common imported
-texture×vertex-color graphs) and exported on programmatically selected attachment
-points. Dynamic collision editing, full
+constant-color or single-image imported models (including common imported
+texture×vertex-color graphs) and exported either onto a programmatically selected
+existing JOBJ or into a new lit JOBJ chain beneath a compatible root. Dynamic collision editing, full
 GX/reference validation, and self-contained
 distribution are still pending. Passing the
 current validator is not an in-game compatibility test.

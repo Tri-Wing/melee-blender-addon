@@ -9,9 +9,10 @@ name, hardcoded offset, or explicit target allowlist.
 - `HSD_JObjDispAll` in `melee/src/sysdolphin/baselib/jobj.c` renders a JOBJ's
   DOBJ list only when the JOBJ participates in the requested render pass, and
   follows children only when the corresponding root traversal bit is present.
-  The initial preset is opaque, so the selected JOBJ must have `1 << 18` and
-  every ancestor must have `JOBJ_ROOT_OPA` (`1 << 28`). No source flags are
-  changed to enable an attachment.
+  The presets are opaque, so an existing selected JOBJ must have `1 << 18` and
+  every ancestor must have `JOBJ_ROOT_OPA` (`1 << 28`). A generated child owns
+  those flags itself; only an empty root child list may have its otherwise inert
+  traversal bit enabled.
 - `JObjLoad` selects custom classes from the descriptor class-name pointer and
   loads particle/spline data from the same union used for DOBJ lists. Initial
   targets therefore require null class pointers and ordinary JOBJ/DOBJ types.
@@ -26,6 +27,13 @@ name, hardcoded offset, or explicit target allowlist.
   appended after all original DOBJ descriptors receives no material or shape
   animation. This list behavior is engine-wide, so existing material animation
   does not require a stage-specific exception. Shape animation remains rejected.
+- `HSD_JObjAddAnimAll` advances the owned JOBJ child/next hierarchy and its
+  animation hierarchy in parallel. Once the source animation list ends, an
+  appended child-tail JOBJ receives null joint, material, and shape animation.
+- POBJ normal-matrix setup follows `JOBJ_LIGHTING`. A diffuse MOBJ cannot safely
+  be added to an arbitrary unlit existing JOBJ: enabling lighting there would
+  also change its original DOBJ geometry. A generated JOBJ can instead own
+  `JOBJ_LIGHTING | JOBJ_OPA` without modifying existing geometry.
 
 ## Programmatic eligibility
 
@@ -44,11 +52,24 @@ from immutable `source.dat`. A target is emitted only when:
 
 Targets report whether they are hidden at rest, already own geometry, or have
 existing material animation so the Blender UI can describe inherited behavior.
-The writer never changes source visibility or traversal flags.
+The writer never changes source visibility or an existing geometry-owning JOBJ's
+lighting/render flags.
 
-As corpus examples, this analysis finds one target in `GrNLa.dat` and thirteen in
-`GrGd.dat`. Other stages expose however many descriptors satisfy the same rules;
-zero eligible targets leaves the capability disabled.
+The selector also emits `new-jobj-chain` targets for compatible top-level roots.
+The root and its direct child tail must be ordinary, uniquely owned in the JOBJ
+hierarchy, unaliased, and use supported invertible transforms. It must be the
+final top-level sibling so an appended child cannot shift any protected JOBJ's
+preorder index. Groups containing instances are excluded. A root with existing children must already have
+`JOBJ_ROOT_OPA`; an empty child list may have that otherwise inert traversal bit
+enabled when the first generated child is linked. Each registered Blender object
+becomes one identity-transform `JOBJ_LIGHTING | JOBJ_OPA` child, with all of its
+material chunks chained as DOBJ children. Multiple additions to the same target
+form an appended sibling chain.
+
+As corpus examples, the existing-JOBJ analysis finds one target in `GrNLa.dat`
+and thirteen in `GrGd.dat`; both fixtures also expose compatible new-chain roots.
+Other stages expose however many descriptors satisfy the same rules; zero
+eligible targets across both modes leaves the capability disabled.
 
 The DOBJ/POBJ/material writer, exact graph-extension validation, RGBA8 decode
 verification, and Blender export/reimport fixtures pass automatically. Runtime
