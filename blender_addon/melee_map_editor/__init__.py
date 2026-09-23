@@ -404,12 +404,36 @@ class MME_OT_open_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class MME_PT_stage(bpy.types.Panel):
-    bl_label = 'Melee Map'
-    bl_idname = 'MME_PT_stage'
+def _stage_info(s):
+    try:
+        return json.loads(s.get('mme_stage_info', '{}'))
+    except (TypeError, ValueError):
+        return {}
+
+
+def _addition_targets(s):
+    try:
+        return model_additions.stage_targets(read(scene.session(s) / 'stage.json'))
+    except (StageError, OSError, ValueError, KeyError):
+        return []
+
+
+def _wrapped_labels(layout, text, width=38):
+    import textwrap
+    for line in textwrap.wrap(text or '', width=width):
+        layout.label(text=line)
+
+
+class MME_PT_sidebar:
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Melee Map'
+
+
+class MME_PT_stage(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Stage'
+    bl_idname = 'MME_PT_stage'
+    bl_order = 0
 
     def draw(self, context):
         layout = self.layout
@@ -418,132 +442,207 @@ class MME_PT_stage(bpy.types.Panel):
         if not s.mme_session:
             layout.label(text='Choose the CLI in add-on preferences.')
             return
-        layout.prop(s, 'mme_dithered_transparency')
-        info = s.get('mme_stage_info')
+        info = _stage_info(s)
         if info:
-            import json
-            info = json.loads(info)
-            layout.label(text=info['filename'])
-            layout.label(text=f"{info['groups']} groups / {info['lines']} collision lines")
-            layout.label(text='Source hash checked on validation/export')
-            if info.get('deferred'):
-                layout.label(text=f"{info['deferred']} unsupported meshes omitted", icon='ERROR')
-            if not info['editable']:
-                layout.label(text='Collision is read-only for this stage.', icon='LOCKED')
-        try:
-            obj = scene.collision_object(s)
-            layout.label(text='Collision: edited' if obj.get('mme_dirty') else 'Collision: unchanged')
-        except StageError:
-            layout.label(text='Collision object missing', icon='ERROR')
+            layout.label(text=info.get('filename', 'Imported stage'), icon='SCENE_DATA')
+            layout.label(text=f"{info.get('groups', 0)} model groups · {info.get('lines', 0)} collision lines")
+
+
+class MME_PT_viewport(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Viewport'
+    bl_idname = 'MME_PT_viewport'
+    bl_order = 1
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(context.scene, 'mme_dithered_transparency')
+        layout.operator('mme.toggle_models')
+
+
+class MME_PT_models(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Models'
+    bl_idname = 'MME_PT_models'
+    bl_order = 2
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
         editable = modeling.targets(s)
-        if editable:
-            ids = {info['id'] for info in editable}
-            layout.label(text=f'{len(editable)} editable rigid models')
-            active = context.active_object
-            selected = active and active.get('mme_session_id') == s.mme_session_id and active.get('mme_id') in ids
-            row = layout.row()
-            row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
-            row.operator('mme.edit_model', icon='EDITMODE_HLT')
-            if selected:
-                layout.label(text='Selected: edited' if active.get('mme_dirty') else 'Selected: editable — unchanged')
-            elif active and active.get('mme_role') == 'pobj':
-                layout.label(text='Selected model: read-only', icon='LOCKED')
-                layout.label(text=active.get('mme_read_only_reason', 'Read-only in this session.'))
-            layout.label(text='Vertex moves preserve original appearance.')
-            layout.label(text='New faces use the assigned stage material.')
-            positions_only = selected and next(i for i in editable if i['id'] == active.get('mme_id')).get('positionsOnly', False)
+        if not editable:
+            layout.label(text='No editable rigid models', icon='LOCKED')
+            return
+        ids = {info['id'] for info in editable}
+        active = context.active_object
+        selected = (active and active.get('mme_session_id') == s.mme_session_id
+                    and active.get('mme_id') in ids)
+        layout.label(text=f'{len(editable)} editable rigid models')
+        row = layout.row()
+        row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
+        row.operator('mme.edit_model', icon='EDITMODE_HLT')
+        positions_only = False
+        if selected:
+            target = next(info for info in editable if info['id'] == active.get('mme_id'))
+            positions_only = target.get('positionsOnly', False)
+            state = 'edited' if active.get('mme_dirty') else 'unchanged'
+            layout.label(text=f'Selected: {state}')
             if positions_only:
-                layout.label(text='Animated material: vertex movement only.', icon='INFO')
-                layout.label(text='Keep topology, UVs and materials unchanged.')
-            row = layout.row()
-            row.enabled = bool(selected) and not positions_only
-            row.operator('mme.model_material', icon='MATERIAL')
-            layout.label(text='Texture image edits are preview-only.')
-            layout.label(text='One material per model; UVs use the active map.')
-            if not s.get('mme_model_materials'):
-                layout.label(text='Re-import to load stage materials.')
-            layout.label(text='Model-object transforms and hierarchy are read-only.')
+                layout.label(text='Animated material: move vertices only', icon='INFO')
+        elif active and active.get('mme_role') == 'pobj':
+            layout.label(text='Selected model is read-only', icon='LOCKED')
+            _wrapped_labels(layout, active.get('mme_read_only_reason', 'Read-only in this session.'))
+        row = layout.row()
+        row.enabled = bool(selected) and not positions_only
+        row.operator('mme.model_material', icon='MATERIAL')
+        if not s.get('mme_model_materials'):
+            layout.label(text='Re-import to load stage materials', icon='INFO')
+
+
+class MME_PT_import_models(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Import Models'
+    bl_idname = 'MME_PT_import_models'
+    bl_order = 3
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
+        if not _addition_targets(s):
+            layout.label(text='Unavailable for this stage', icon='LOCKED')
+            return
+        pending = model_additions.objects(s)
+        addition_ids = {obj.parent.get('mme_addition_id') for obj in pending if obj.parent}
+        addition_ids.discard(None)
+        if addition_ids:
+            layout.label(text=f'{len(addition_ids)} pending model addition(s) · {len(pending)} mesh part(s)')
         else:
-            layout.label(text='No supported rigid models in this scene.')
-        if 'mme_editable_meshes' not in s:
-            layout.label(text='Re-import to enable multiple model targets.')
-        layout.separator()
+            layout.label(text='No pending model additions')
+        if context.active_object in pending:
+            layout.operator('mme.edit_model', text='Edit Selected Model', icon='EDITMODE_HLT')
+        layout.operator('mme.add_models', icon='ADD')
+        row = layout.row()
+        row.enabled = any(model_additions.is_pending(obj) for obj in context.selected_objects)
+        row.operator('mme.remove_models', icon='REMOVE')
+
+
+class MME_PT_import_report(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Conversion Report'
+    bl_idname = 'MME_PT_import_report'
+    bl_parent_id = 'MME_PT_import_models'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session and context.scene.get('mme_addition_report'))
+
+    def draw(self, context):
+        layout = self.layout
         try:
-            stage = read(scene.session(s) / 'stage.json')
-            addition_targets = model_additions.stage_targets(stage)
-        except (StageError, OSError, ValueError, KeyError):
-            addition_targets = []
-        if addition_targets:
-            pending = model_additions.objects(s)
-            layout.label(text=f'{len(pending)} pending imported model object(s)')
-            active_pending = context.active_object in pending
-            if active_pending:
-                layout.operator('mme.edit_model', text='Edit Selected Model', icon='EDITMODE_HLT')
-            layout.operator('mme.add_models', icon='ADD')
-            row = layout.row()
-            row.enabled = bool(context.selected_objects
-                               and any(obj.get('mme_role') == model_additions.ROLE
-                                       for obj in context.selected_objects))
-            row.operator('mme.remove_models', icon='REMOVE')
-            layout.label(text='Opaque base color / direct image texture preset.')
-            if s.get('mme_addition_report'):
-                report = json.loads(s['mme_addition_report'])
-                layout.label(text=f"{report.get('triangles', 0)} triangles / {report.get('chunks', 0)} GX chunks")
-                layout.label(text=f"{report.get('parts', 0)} parts / {report.get('images', 0)} images / {report.get('textureBytes', 0)} RGBA bytes")
-                if report['warnings']:
-                    box = layout.box()
-                    box.label(text=f"{len(report['warnings'])} conversion warning(s)", icon='INFO')
-                    for warning in report['warnings'][:3]:
-                        box.label(text=warning)
-                    if len(report['warnings']) > 3:
-                        box.label(text=f"…and {len(report['warnings']) - 3} more")
-        else:
-            layout.label(text='Model addition unavailable for this stage.', icon='LOCKED')
+            report = json.loads(context.scene['mme_addition_report'])
+        except (TypeError, ValueError, KeyError):
+            layout.label(text='Conversion report is unavailable', icon='ERROR')
+            return
+        layout.label(text=f"{report.get('triangles', 0)} triangles · {report.get('chunks', 0)} GX chunks")
+        layout.label(text=f"{report.get('parts', 0)} parts · {report.get('images', 0)} images")
+        layout.label(text=f"{report.get('textureBytes', 0)} RGBA texture bytes")
+        warnings = report.get('warnings', [])
+        if warnings:
+            box = layout.box()
+            box.label(text=f'{len(warnings)} conversion warning(s)', icon='INFO')
+            for warning in warnings:
+                _wrapped_labels(box, warning)
+
+
+class MME_PT_jobj_animation(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'JOBJ & Animation'
+    bl_idname = 'MME_PT_jobj_animation'
+    bl_order = 4
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
         editable_jobjs = jobjs.targets(s)
         if editable_jobjs:
-            layout.separator()
             layout.label(text=f'{len(editable_jobjs)} editable static JOBJs')
             layout.operator('mme.edit_jobj', icon='EMPTY_ARROWS')
             active_bone = context.active_pose_bone
             if active_bone and active_bone.get('mme_id') in {info['id'] for info in editable_jobjs}:
-                layout.label(text='Selected JOBJ: edited' if active_bone.get('mme_dirty') else 'Selected JOBJ: unchanged')
+                state = 'edited' if active_bone.get('mme_dirty') else 'unchanged'
+                layout.label(text=f'Selected JOBJ: {state}')
             elif active_bone and active_bone.get('mme_role'):
-                layout.label(text='Selected JOBJ: read-only', icon='LOCKED')
-                layout.label(text=active_bone.get('mme_read_only_reason', 'Unsupported JOBJ transform mode.'))
-            layout.label(text='Use Pose Mode Move, Rotate, and Scale.')
-            layout.label(text='Hierarchy editing remains read-only.')
+                layout.label(text='Selected JOBJ is read-only', icon='LOCKED')
         elif 'mme_editable_jobjs' in s:
-            layout.label(text='No editable static JOBJs in this stage.', icon='LOCKED')
+            layout.label(text='No editable static JOBJs', icon='LOCKED')
         animated_armatures = [obj for obj in s.objects if obj.type == 'ARMATURE'
                               and animations.actions(obj)]
-        if animated_armatures:
+        if not animated_armatures:
+            return
+        if editable_jobjs or 'mme_editable_jobjs' in s:
             layout.separator()
-            layout.label(text=f'{sum(len(animations.actions(obj)) for obj in animated_armatures)} stage animation actions')
-            active_armature = (context.active_object if context.active_object in animated_armatures
-                               else animated_armatures[0])
-            active_action = animations.active_action(active_armature)
-            if active_action:
-                layout.label(text=active_action.name)
-            row = layout.row(align=True)
-            row.operator('mme.cycle_animation', text='Previous').direction = -1
-            row.operator('mme.cycle_animation', text='Next').direction = 1
-            editable_actions = sum(bool(json.loads(action.get('mme_fcurve_jobj_ids', '[]')))
-                                   for obj in animated_armatures for action in animations.actions(obj))
-            if editable_actions:
-                layout.label(text=f'{editable_actions} Actions have editable JOBJ curves.')
-                layout.label(text='Edit bone Loc/Rot/Scale keys in Dope Sheet or Graph Editor.')
-            layout.label(text='Material animation remains preview-only.')
-        layout.operator('mme.toggle_models')
-        layout.operator('mme.edit_collision')
-        layout.label(text='Move vertices on X/Z; keep Blender Y = 0.')
-        layout.label(text='Use these tools to create or reconnect edges.')
+        actions = [action for obj in animated_armatures for action in animations.actions(obj)]
+        layout.label(text=f'{len(actions)} stage animation actions')
+        active_armature = (context.active_object if context.active_object in animated_armatures
+                           else animated_armatures[0])
+        active_action = animations.active_action(active_armature)
+        if active_action:
+            layout.label(text=active_action.name, icon='ACTION')
+        row = layout.row(align=True)
+        row.operator('mme.cycle_animation', text='Previous').direction = -1
+        row.operator('mme.cycle_animation', text='Next').direction = 1
+        editable_actions = sum(bool(json.loads(action.get('mme_fcurve_jobj_ids', '[]')))
+                               for action in actions)
+        if editable_actions:
+            layout.label(text=f'{editable_actions} actions have editable JOBJ curves')
+
+
+class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Collision'
+    bl_idname = 'MME_PT_collision'
+    bl_order = 5
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
+        editable = _stage_info(s).get('editable', False)
+        try:
+            obj = scene.collision_object(s)
+            layout.label(text='Edited' if obj.get('mme_dirty') else 'Unchanged')
+        except StageError:
+            layout.label(text='Collision object missing', icon='ERROR')
+            return
+        row = layout.row()
+        row.enabled = editable
+        row.operator('mme.edit_collision')
+        if not editable:
+            layout.label(text='Read-only for this stage', icon='LOCKED')
+            return
         for left, right in ((('split', 'Split Edge'), ('extend', 'Extend Collision')),
                             (('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))):
             row = layout.row(align=True)
             for action, label in (left, right):
                 row.operator('mme.collision_topology', text=label).operation = action
-        layout.label(text='Native vertex/edge deletion is supported.')
-        layout.label(text='Arrows show edge direction.')
         row = layout.row(align=True)
         row.prop(s, 'mme_collision_type', text='')
         row.operator('mme.assign_collision', text='Assign Type').property = 'type'
@@ -553,29 +652,77 @@ class MME_PT_stage(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator('mme.assign_collision', text='Toggle Drop-through').property = 'drop'
         row.operator('mme.assign_collision', text='Toggle Ledge-grab').property = 'ledge'
+
+
+class MME_PT_collision_legend(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Display Legend'
+    bl_idname = 'MME_PT_collision_legend'
+    bl_parent_id = 'MME_PT_collision'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
         layout.label(text='Solid floor: dark green')
         layout.label(text='Drop-through floor: bright green')
         layout.label(text='Ceiling: red')
-        layout.label(text='Right wall: blue / Left wall: amber')
+        layout.label(text='Right wall: blue · Left wall: amber')
         layout.label(text='Dynamic: purple (read-only)')
         layout.label(text='White mark: ledge-grab flag')
+        layout.label(text='Arrows show edge direction')
+
+
+class MME_PT_export(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Validate & Export'
+    bl_idname = 'MME_PT_export'
+    bl_order = 6
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
         layout.operator('mme.validate_stage', icon='CHECKMARK')
         layout.operator('mme.export_stage', icon='EXPORT')
         if s.mme_export_directory:
             layout.operator('mme.open_export_directory', icon='FILE_FOLDER')
         box = layout.box()
-        import textwrap
-        for line in textwrap.wrap(s.mme_status, width=38):
-            box.label(text=line)
+        _wrapped_labels(box, s.mme_status)
 
 
-class MME_PT_edge(bpy.types.Panel):
+class MME_PT_diagnostics(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Diagnostics'
+    bl_idname = 'MME_PT_diagnostics'
+    bl_order = 7
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
+        info = _stage_info(s)
+        layout.label(text='Source hash checked on validation/export')
+        if info.get('deferred'):
+            layout.label(text=f"{info['deferred']} unsupported meshes omitted", icon='ERROR')
+        else:
+            layout.label(text='No unsupported meshes omitted')
+        if not info.get('editable', False):
+            layout.label(text='Collision editing unavailable', icon='LOCKED')
+        layout.label(text=f'{len(_addition_targets(s))} model placement target(s)')
+
+
+class MME_PT_edge(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Selected Edge Metadata'
     bl_idname = 'MME_PT_edge'
-    bl_parent_id = 'MME_PT_stage'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Melee Map'
+    bl_parent_id = 'MME_PT_collision'
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -622,13 +769,10 @@ class MME_PT_edge(bpy.types.Panel):
         layout.label(text='Read-only display of actual edge values.')
 
 
-class MME_PT_edge_raw(bpy.types.Panel):
+class MME_PT_edge_raw(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Raw Flags and Source Metadata'
     bl_idname = 'MME_PT_edge_raw'
     bl_parent_id = 'MME_PT_edge'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Melee Map'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -884,8 +1028,11 @@ class MME_PT_material(bpy.types.Panel):
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_add_models, MME_OT_remove_models,
            MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
-           MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
-           MME_PT_edge_raw, MME_TextureLayerProperties, MME_PT_material)
+           MME_OT_assign, MME_OT_topology, MME_OT_open_export,
+           MME_PT_stage, MME_PT_viewport, MME_PT_models, MME_PT_import_models,
+           MME_PT_import_report, MME_PT_jobj_animation, MME_PT_collision,
+           MME_PT_collision_legend, MME_PT_edge, MME_PT_edge_raw, MME_PT_export,
+           MME_PT_diagnostics, MME_TextureLayerProperties, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface',
                'mme_dithered_transparency')

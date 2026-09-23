@@ -92,7 +92,7 @@ reload workflow headlessly:
 
 ## Edit a stage
 
-1. Open the 3D View sidebar (`N`), then **Melee Map → Import Stage DAT**.
+1. Open the 3D View sidebar (`N`), then **Melee Map → Stage → Import Stage DAT**.
 2. Choose `GrNLa.dat`. Its ten groups appear under **Melee Stage → Models**,
    containing 93 grey meshes and the protected source hierarchy. Toggle all
    models with **Show / Hide Model Groups**, or individual groups in the Outliner.
@@ -104,8 +104,9 @@ reload workflow headlessly:
    be moved, renamed, or deleted without affecting DAT export.
    The scene World uses the selected group fog color, matching the clear color
    Melee displays behind all stage geometry. This atmosphere is also preview-only.
-3. Choose **Enter Collision Editing**. Front view (`Numpad 1`) looks onto the
-   gameplay plane. Move vertices along Blender X and Z; keep Blender Y at zero.
+3. Expand **Collision** and choose **Enter Collision Editing**. Front view
+   (`Numpad 1`) looks onto the gameplay plane. Move vertices along Blender X and
+   Z; keep Blender Y at zero.
    Use the dedicated topology tools below to add or reconnect collision. Native
    vertex/edge deletion is supported. Object transforms and modifiers are rejected.
 4. Select edges to assign a collision type or named surface type, or toggle
@@ -115,8 +116,8 @@ reload workflow headlessly:
    Ceilings are red, right walls blue, left walls amber, and dynamic collision
    purple. White crosses mark lines with ledge-grab set. Blender's Overlays toggle controls this
    visualization. Unknown source flag bits remain protected.
-5. Choose **Validate Stage**, then **Export Stage DAT**. The filename defaults
-   to the imported DAT name.
+5. Under **Validate & Export**, choose **Validate Stage**, then **Export Stage
+   DAT**. The filename defaults to the imported DAT name.
    Both actions check the source/session hashes, protected scene content,
    collision compilation, and output reload. Blender asks for confirmation when
    replacing an existing file. Replacement happens only after validation succeeds;
@@ -139,9 +140,9 @@ certified. Missing extracted meshes are reported in the sidebar.
 Stages with eligible static JOBJ/DOBJ chains expose attachment choices computed
 from their archive structure; no filename or hash allowlist is used. Import an
 external mesh with Blender's normal OBJ, glTF, or FBX importer (or a Collada/DAE
-import extension), select its mesh objects, and choose **Add Selected Models to
-Stage**. Pick either an existing-JOBJ attachment or a **New JOBJ Chain** entry
-beneath a compatible model-group root. The existing mode inherits that JOBJ's
+import extension), select its mesh objects, expand **Import Models**, and choose
+**Add Selected Models to Stage**. Pick either an existing-JOBJ attachment or a
+**New JOBJ Chain** entry beneath a compatible model-group root. The existing mode inherits that JOBJ's
 render behavior. The new-chain mode creates an identity-transform child with its
 own opaque lighting flags, so it can use the stage's diffuse lights without
 changing any existing model's lighting mode. After every selected mesh validates,
@@ -191,7 +192,7 @@ models registered by an older add-on/backend must be registered again.
 
 Fresh imports create one armature for each model group and represent every JOBJ
 as a bone. Select a supported bone directly, or select one of its model
-descendants and click **Select Editable JOBJ** in the Melee Map sidebar. Use
+descendants and click **Select Editable JOBJ** under **JOBJ & Animation**. Use
 Blender's normal Pose Mode Move, Rotate, and Scale tools. Rotation mode must
 remain **XYZ Euler**. Validate and export normally; JOBJ transforms compose with
 geometry, collision, material, and light edits in the same export.
@@ -436,8 +437,8 @@ node changes do not author game assets or affect DAT export.
 ## Inspect a selected edge
 
 In Collision Edit Mode, select an edge and expand **Selected Edge Metadata**
-under Melee Map. It reads the actual selected edge, independently of the type and
-surface dropdowns used for assignment. It shows the current type, named surface
+under **Melee Map → Collision**. It reads the actual selected edge,
+independently of the type and surface dropdowns used for assignment. It shows the current type, named surface
 and numeric ID, drop-through/ledge flags, disabled state, collision joint,
 direction, length, endpoint coordinates, and adjacent edges. Drop-through on a
 non-floor is labeled as floor-only. New edges are identified explicitly.
@@ -604,7 +605,7 @@ existing preview limitations.
 
 ## Alpha previews
 
-Enable **Dithered Transparency** in the **Melee Map** sidebar to use dithering
+Enable **Dithered Transparency** under **Melee Map → Viewport** to use dithering
 for all stage transparency previews, including additive effects. This can speed
 up the viewport but may introduce visible noise or change overlapping effects.
 Disable it to restore normal blending. The setting defaults off, is saved with
