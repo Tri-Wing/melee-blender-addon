@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeleeMap.Core;
+using MeleeMap.Core.Gx;
 using Xunit;
 
 namespace MeleeMap.Core.Tests;
@@ -134,5 +135,50 @@ public class ApplyTests
         string manifest = Path.Combine(session.Directory, "stage.json"); var node = JsonNode.Parse(File.ReadAllText(manifest))!; node["protocolVersion"] = 1; File.WriteAllText(manifest, node.ToJsonString());
         Assert.Equal("SESSION_VERSION", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.False(File.Exists(session.Output));
+    }
+
+    [PrimaryFixtureFact]
+    public void AppliesAdditionAsOrdinaryModelGeometry()
+    {
+        using var session = new Session();
+        using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory, "stage.json")));
+        string target = manifest.RootElement.GetProperty("modelAdditionTargets")[0].GetProperty("id").GetString()!;
+        string materialId = Guid.NewGuid().ToString("N");
+        var part = new ModelAdditionPart(Guid.NewGuid().ToString("N"), materialId,
+            [new(0, 0, 0), new(1, 0, 0), new(0, 1, 0)], [0, 1, 2],
+            [new(0, 0, 1), new(0, 0, 1), new(0, 0, 1)], null);
+        var material = new ModelAdditionMaterial(materialId, "Constant", new ColorData(1, 1, 1, 1),
+            null, "repeat", "repeat", "linear", "linear", ModelAdditionEditing.MaterialPreset);
+        var edits = new ModelAdditionEdits(SessionExtractor.ProtocolVersion, ModelAddition.SchemaVersion,
+            "game-joint-local", [new(Guid.NewGuid().ToString("N"), "Test", target, [part])], [material], []);
+        File.WriteAllText(Path.Combine(session.Directory, "edits/additions.json"), JsonSerializer.Serialize(edits));
+        var collisionEdits = session.Edits();
+        collisionEdits.Vertices[0] = collisionEdits.Vertices[0] with
+        {
+            Y = collisionEdits.Vertices[0].Y + 1
+        };
+        session.Write(collisionEdits);
+
+        var result = SessionApplier.Apply(session.Directory, session.Output);
+        var output = new StageArchive(session.Output);
+        var catalog = new ModelIdentityCatalog();
+        var original = ModelIdentity.Capture(session.Source.Layout, catalog);
+        var extended = ModelIdentity.Capture(output.Layout, catalog);
+        Assert.True(result.ModelChanged);
+        Assert.True(result.CollisionChanged);
+        Assert.Equal(1, result.ModelTriangles);
+        Assert.Empty(output.Validate());
+        Assert.Equal(original.Nodes.Count + 2, extended.Nodes.Count);
+        Assert.True(manifest.RootElement.GetProperty("capabilities").GetProperty("modelAddition").GetBoolean());
+
+        byte[] published = File.ReadAllBytes(session.Output);
+        var invalid = edits with
+        {
+            Additions = [edits.Additions[0] with { TargetJobjId = Guid.NewGuid().ToString("N") }]
+        };
+        File.WriteAllText(Path.Combine(session.Directory, "edits/additions.json"), JsonSerializer.Serialize(invalid));
+        Assert.Equal("MODEL_ADDITION_TARGET", Assert.Throws<StageException>(() =>
+            SessionApplier.Apply(session.Directory, session.Output)).Code);
+        Assert.Equal(published, File.ReadAllBytes(session.Output));
     }
 }

@@ -40,7 +40,10 @@ public class CorpusTests
                     var identities = new ModelIdentityCatalog();
                     var before = ModelIdentity.Capture(archive.Layout, identities);
                     var editableJobjs = JobjEditing.Select(archive.Layout, before);
+                    var additionTargets = ModelAddition.Select(archive, before);
                     Assert.Equal(editableJobjs.Length, editableJobjs.Select(joint => joint.Id).Distinct().Count());
+                    Assert.Equal(additionTargets.Length, additionTargets.Select(target => target.Id).Distinct().Count());
+                    if (Path.GetFileName(file) == "GrGd.dat") Assert.NotEmpty(additionTargets);
                     string saved = Path.Combine(output, Path.GetFileName(file));
                     archive.Roundtrip(saved, compare: true);
                     // No-edit preservation retains descriptor offsets; edited/relocated archives

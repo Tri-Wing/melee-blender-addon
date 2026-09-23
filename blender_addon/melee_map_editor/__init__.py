@@ -1,7 +1,7 @@
 bl_info = {
     'name': 'Melee Map Editor', 'author': 'Melee Map Editor contributors',
     'version': (0, 1, 0), 'blender': (4, 5, 0), 'location': 'View3D > Sidebar > Melee Map',
-    'description': 'Import Melee stages and edit static collision', 'category': 'Import-Export',
+    'description': 'Import and edit Melee stages, including external model additions', 'category': 'Import-Export',
 }
 
 import uuid
@@ -12,7 +12,7 @@ import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty,
                        FloatVectorProperty, IntProperty, StringProperty)
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import animations, atmosphere, camera, collision, scene, topology, materials, inspector, modeling, surface, material_properties, jobjs
+from . import animations, atmosphere, camera, collision, scene, topology, materials, inspector, modeling, model_additions, surface, material_properties, jobjs
 from .protocol import StageError, read, run
 
 
@@ -117,6 +117,40 @@ class MME_OT_groups(bpy.types.Operator):
             if len(matches) != 1:
                 raise StageError('The protected Models collection is missing or duplicated.')
             matches[0].hide_viewport = not matches[0].hide_viewport
+        return execute_safely(self, context, action)
+
+
+class MME_OT_add_models(bpy.types.Operator):
+    bl_idname = 'mme.add_models'
+    bl_label = 'Add Selected Models to Stage'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    target_jobj_id: EnumProperty(name='Attachment', items=model_additions.target_items)
+
+    def invoke(self, context, event):
+        if not model_additions.target_items(self, context):
+            self.report({'ERROR'}, 'This stage has no structurally eligible model-addition attachment.')
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        def action():
+            added = model_additions.register_selected(context, self.target_jobj_id)
+            context.scene.mme_status = f'Converted and registered {len(added)} Added Model object(s).'
+            self.report({'INFO'}, context.scene.mme_status)
+        return execute_safely(self, context, action)
+
+
+class MME_OT_remove_models(bpy.types.Operator):
+    bl_idname = 'mme.remove_models'
+    bl_label = 'Remove Selected Added Models'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        def action():
+            count = model_additions.remove_selected(context)
+            context.scene.mme_status = f'Removed {count} pending Added Model object(s).'
+            self.report({'INFO'}, context.scene.mme_status)
         return execute_safely(self, context, action)
 
 
@@ -420,6 +454,35 @@ class MME_PT_stage(bpy.types.Panel):
             layout.label(text='No supported rigid models in this scene.')
         if 'mme_editable_meshes' not in s:
             layout.label(text='Re-import to enable multiple model targets.')
+        layout.separator()
+        try:
+            stage = read(scene.session(s) / 'stage.json')
+            addition_targets = model_additions.stage_targets(stage)
+        except (StageError, OSError, ValueError, KeyError):
+            addition_targets = []
+        if addition_targets:
+            pending = model_additions.objects(s)
+            layout.label(text=f'{len(pending)} pending Added Model object(s)')
+            layout.operator('mme.add_models', icon='ADD')
+            row = layout.row()
+            row.enabled = bool(context.selected_objects
+                               and any(obj.get('mme_role') == model_additions.ROLE
+                                       for obj in context.selected_objects))
+            row.operator('mme.remove_models', icon='REMOVE')
+            layout.label(text='Opaque base color / direct image texture preset.')
+            if s.get('mme_addition_report'):
+                report = json.loads(s['mme_addition_report'])
+                layout.label(text=f"{report.get('triangles', 0)} triangles / {report.get('chunks', 0)} GX chunks")
+                layout.label(text=f"{report.get('parts', 0)} parts / {report.get('images', 0)} images / {report.get('textureBytes', 0)} RGBA bytes")
+                if report['warnings']:
+                    box = layout.box()
+                    box.label(text=f"{len(report['warnings'])} conversion warning(s)", icon='INFO')
+                    for warning in report['warnings'][:3]:
+                        box.label(text=warning)
+                    if len(report['warnings']) > 3:
+                        box.label(text=f"…and {len(report['warnings']) - 3} more")
+        else:
+            layout.label(text='Model addition unavailable for this stage.', icon='LOCKED')
         editable_jobjs = jobjs.targets(s)
         if editable_jobjs:
             layout.separator()
@@ -803,6 +866,7 @@ class MME_PT_material(bpy.types.Panel):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
+           MME_OT_add_models, MME_OT_remove_models,
            MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
            MME_PT_edge_raw, MME_TextureLayerProperties, MME_PT_material)

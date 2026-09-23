@@ -29,7 +29,64 @@ edits/models.json                        # optional batch of rigid model replace
 edits/materials.json                     # optional static material changes
 edits/lights.json                        # optional static LOBJ changes
 edits/jobjs.json                         # optional static JOBJ SRT changes
+edits/additions.json                     # optional appended rigid model batch
+edits/addition-assets/<UUID>.rgba        # temporary raw RGBA image payloads
 ```
+
+The manifest defines model-addition schema version 1 and emits structurally eligible
+`modelAdditionTargets`. Each target identifies a source JOBJ, uses
+`game-joint-local` coordinates, and reports inherited transform/visibility,
+rest-pose visibility, existing geometry, and existing material animation. The
+capability is `capabilities.modelAddition: true` only when at least one eligible
+target exists. Clients must require that capability and use a listed target.
+
+The addition document is strictly validated using this shape:
+
+```json
+{
+  "protocolVersion": 2,
+  "modelAdditionSchemaVersion": 1,
+  "coordinateSpace": "game-joint-local",
+  "additions": [{
+    "id": "<UUID>", "name": "Object", "targetJobjId": "<manifest target UUID>",
+    "parts": [{
+      "id": "<UUID>", "materialId": "<UUID>",
+      "positions": [{"x": 0, "y": 0, "z": 0}],
+      "triangleIndices": [0, 1, 2],
+      "cornerNormals": [{"x": 0, "y": 0, "z": 1}],
+      "texCoords0": null
+    }]
+  }],
+  "materials": [{
+    "id": "<UUID>", "name": "Material",
+    "baseColor": {"r": 1, "g": 1, "b": 1, "a": 1}, "imageId": null,
+    "wrapS": "repeat", "wrapT": "repeat",
+    "minFilter": "linear", "magFilter": "linear",
+    "preset": "opaque-texture-focused-v1"
+  }],
+  "images": []
+}
+```
+
+Each part has one material. Normals and UVs are triangle-corner arrays, so seams
+remain explicit. A textured material requires `texCoords0`; a constant-color
+material requires it to be null. Images use flat
+`edits/addition-assets/<name>.rgba` paths and
+`rgba8-srgb-straight-top-left` pixels. The validator checks exact byte counts,
+lowercase SHA-256 hashes, declared-file inventory, path containment, and rejects
+symbolic links. Current bounds are 1,024 pixels per image, 32 MiB aggregate RGBA,
+200,000 input triangles, and 1,000,000 positions per batch. Every declared
+material and image must be used.
+
+Apply appends ordinary rigid DOBJ/POBJ/GX structures to the selected JOBJ list.
+The initial material preset is opaque and supports a constant base color or one
+RGBA8 UV texture with repeat/clamp and nearest/linear sampling. Image alpha is
+preserved in the payload but is intentionally not used for blending. Degenerate
+triangles are removed; remaining geometry is deterministically chunked for GX
+limits. Exact extension verification preserves all original identities and
+bytes except the selected DOBJ tail link, decodes every added mesh and image, and
+checks all new pointers and sampler fields. `MODEL_ADDITION_*` is only the error
+code namespace; successful output contains no special addition tag.
 
 ## Manifest and protected identity
 

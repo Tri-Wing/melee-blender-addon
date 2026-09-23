@@ -26,6 +26,7 @@ public static class SessionExtractor
         var camera = StageCameraReader.Read(stage.Layout);
         var editableModels = ModelEditing.SelectAll(stage.Layout, identity, out var readOnlyReasons);
         var editableJobjs = JobjEditing.Select(stage.Layout, identity, out var jobjReadOnlyReasons);
+        var modelAdditionTargets = ModelAddition.Select(stage, identity);
         var editable = ModelEditing.Select(stage.Layout, identity) ?? editableModels.FirstOrDefault();
         var reader = new ArchiveDataReader(stage.Layout);
         var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
@@ -178,6 +179,8 @@ public static class SessionExtractor
                 modelGroupCount = groups.Length,
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
+                modelAdditionSchemaVersion = ModelAddition.SchemaVersion,
+                modelAdditionTargets,
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
                     collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0,
                     modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
@@ -193,6 +196,7 @@ public static class SessionExtractor
                         .SelectMany(texture => texture.Tracks)
                         .Any(track => track.Channel.StartsWith("konst.") || track.Channel.StartsWith("tev0.")
                             || track.Channel.StartsWith("tev1.")),
+                    modelAddition = modelAdditionTargets.Length > 0,
                     dynamicCollisionEdit = false, apply = true },
                 deferredCapabilities = new[] { "material-animation-export", "material-pixel-animation-preview", "shape-animations",
                     "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },

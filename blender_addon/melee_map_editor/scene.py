@@ -5,7 +5,7 @@ import tempfile
 import uuid
 import bpy
 from mathutils import Matrix
-from . import animations, atmosphere, camera, collision, jobjs, lighting, modeling, surface
+from . import animations, atmosphere, camera, collision, jobjs, lighting, modeling, model_additions, surface
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, deform_rest, joint_matrices, joint_srt, mesh_binding, mesh_pose
 
@@ -35,11 +35,12 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     editable_ids = {editable_id} if isinstance(editable_id, str) else set(editable_id or ())
     editable_transform_ids = set(editable_transform_ids or ())
     sid = scene.mme_session_id
-    collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid]
+    collections = [c for c in bpy.data.collections if c.get('mme_session_id') == sid
+                   and c.get('mme_role') != model_additions.COLLECTION_ROLE]
     # Preview cameras are disposable editor aids. Moving, renaming, or deleting
     # one must never turn into a DAT edit or fail protected-scene validation.
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid
-               and o.get('mme_role') != 'preview-camera']
+               and o.get('mme_role') not in ('preview-camera', model_additions.ROLE)]
     result = {'collections': [], 'objects': []}
     session_actions = [action for action in bpy.data.actions
                        if action.get('mme_session_id') == sid]
@@ -55,8 +56,9 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
             'parents': sorted(p.get('mme_id', p.name) for p in bpy.data.collections if c.name in p.children)
                        + (['SCENE'] if c.name in scene.collection.children else []),
             'objects': sorted(o.get('mme_id', o.name) for o in c.objects
-                              if o.get('mme_role') != 'preview-camera'),
-            'children': sorted(x.get('mme_id', x.name) for x in c.children)})
+                              if o.get('mme_role') not in ('preview-camera', model_additions.ROLE)),
+            'children': sorted(x.get('mme_id', x.name) for x in c.children
+                               if x.get('mme_role') != model_additions.COLLECTION_ROLE)})
     for o in objects:
         if o.mode == 'EDIT':
             o.update_from_editmode()
@@ -519,6 +521,7 @@ def prepare(scene):
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobjs.edits(scene, stage, groups)
     animations.edits(scene, stage, groups)
+    model_additions.edits(scene, stage)
     return directory, edits if dirty else None
 
 
@@ -532,6 +535,7 @@ def apply(scene, cli, dotnet, output):
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobj_edits = jobjs.edits(scene, stage, groups)
     animation_edits = animations.edits(scene, stage, groups)
+    addition_edits, addition_assets = model_additions.edits(scene, stage)
     payloads = {}
     if light_edits is not None:
         payloads[directory / 'edits/lights.json'] = light_edits
@@ -545,17 +549,26 @@ def apply(scene, cli, dotnet, output):
         payloads[directory / 'edits/collision.json'] = edits
     if model_edits is not None:
         payloads[directory / 'edits/models.json'] = model_edits
+    if addition_edits is not None:
+        payloads[directory / 'edits/additions.json'] = addition_edits
+        payloads.update({directory / relative: value for relative, value in addition_assets.items()})
     # Edits are temporary process input; the .blend is the authoritative edited scene.
     if (directory / 'edits').exists() and any((directory / 'edits').iterdir()):
         raise StageError('Session has external pending edits. Use a fresh import to avoid mixing edits.')
     try:
         for target, payload in payloads.items():
-            target.parent.mkdir(exist_ok=True)
-            target.write_text(json.dumps(payload, allow_nan=False), encoding='utf-8')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(payload, bytes):
+                target.write_bytes(payload)
+            else:
+                target.write_text(json.dumps(payload, allow_nan=False), encoding='utf-8')
         return run(cli, dotnet, 'apply', directory, '--output', output)
     finally:
         for target in payloads:
             target.unlink(missing_ok=True)
+        asset_directory = directory / 'edits/addition-assets'
+        if asset_directory.is_dir() and not any(asset_directory.iterdir()):
+            asset_directory.rmdir()
 
 
 def validate(scene, cli, dotnet):

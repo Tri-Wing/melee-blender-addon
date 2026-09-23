@@ -134,6 +134,47 @@ no-edit export preserves them. `GrGb.dat` is covered by the read-only smoke test
 Other stages may contain unsupported preview transforms/bindings and are not yet
 certified. Missing extracted meshes are reported in the sidebar.
 
+## Add an external model
+
+Stages with eligible static JOBJ/DOBJ chains expose attachment choices computed
+from their archive structure; no filename or hash allowlist is used. Import an
+external mesh with Blender's normal OBJ, glTF, or FBX importer (or a Collada/DAE
+import extension), select its mesh objects, and choose **Add Selected Models to
+Stage**. Pick the attachment in the dialog. After every selected mesh validates,
+the add-on replaces it with an evaluated, editable registration under **Melee
+Stage → Added Models**; duplicate first if you want to retain an imported
+reference. Select registered objects and use **Remove Selected Added Models** to
+remove them from the pending export. A failed registration leaves the selected
+source objects untouched.
+
+Each face must have a material. The initial converter accepts either a constant
+base color or one Image Texture connected to a Principled BSDF Base Color input.
+The texture may be direct or pass through a simple Multiply with vertex color,
+as produced by common DAE importers. Vertex-color modulation is omitted with a
+conversion warning while the connected texture is retained. The image may use
+the active UV map, a direct UV Map node, or the UV output of Texture Coordinate.
+Flat projection, Repeat/Extend wrapping, and Closest/Linear filtering are
+supported. Other shader inputs are omitted and reported; image alpha is embedded
+but renders opaque. Complex node graphs, missing UVs/images, animation,
+constraints, modifiers, and shape keys are rejected with an actionable error.
+Object transforms, evaluated corner normals, material assignments, UV seams, UV
+tiling, packed images, and unsaved image pixels are retained.
+Stored sRGB channel values are copied directly into the DAT texture; Blender's
+image color-space setting is not applied a second time during export.
+Registration also replaces each imported shader with an unlit opaque preview of
+the current Melee material preset. This deliberately changes the selected
+object's appearance immediately so the viewport does not imply that unsupported
+Principled lighting, metallic, roughness, alpha, or vertex-color behavior will
+survive export.
+
+Validate and export normally. Temporary `edits/additions.json` and raw RGBA
+payloads exist only for the backend call and are removed afterward; registered
+objects and packed images remain in the `.blend`. Repeated exports always apply
+to the immutable imported source, so additions do not accumulate. Reimporting
+the exported DAT treats them as ordinary source models. The automated Blender
+round trip is passing, but this initial path still awaits an in-game textured
+fixture check.
+
 ## Edit static JOBJ transforms
 
 Fresh imports create one armature for each model group and represent every JOBJ
@@ -443,10 +484,10 @@ the source DAT and immutable model/collision payloads needed for export. Packing
 Blender resources does not embed the session. Session relocation and cleanup UI
 are not implemented yet; sessions are intentionally not auto-deleted.
 
-Exports generate temporary `edits/collision.json` input, invoke the CLI, then
-remove that edit file even on failure. The saved Blender scene holds the edited
-state. Existing external edit files cause an error to avoid mixing two editing
-sessions. Do not edit the session's baseline files.
+Exports generate temporary edit JSON and model-addition RGBA payloads, invoke the
+CLI, then remove those files even on failure. The saved Blender scene holds the
+edited state. Existing external edit files cause an error to avoid mixing two
+editing sessions. Do not edit the session's baseline files.
 
 ## Preview limitations
 
@@ -480,6 +521,12 @@ dotnet test MeleeMap.sln
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/models.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/model_additions.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/model_addition_boat.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/model_addition_grgd.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/jobjs.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/envelopes.py
@@ -500,7 +547,10 @@ replacement, failed-export cleanup, and dynamic collision restrictions. It uses
 temporary sessions and outputs. The topology script covers the new tools, native
 deletion, Undo/Redo, stable identities, and DAT export/reload. GPU arrow appearance
 still needs interactive checking; the user has reported the collision workflow
-working in game. New model exports still need in-game acceptance.
+working in game. The addition scripts cover synthetic asymmetric textures,
+multiple materials, negative scale, save/reopen, deterministic repeated export,
+the local Salvage Boat OBJ/MTL/PNG fixture, and programmatic discovery/export on
+`GrGd.dat`. Added textured models still need in-game acceptance.
 
 ## Ceiling assignment correction
 

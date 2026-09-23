@@ -78,10 +78,28 @@ public static class SessionApplier
         string lightPath = Path.Combine(directory, "edits/lights.json");
         string jobjPath = Path.Combine(directory, "edits/jobjs.json");
         string animationPath = Path.Combine(directory, "edits/animations.json");
-        foreach (string edit in Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories))
+        string additionPath = Path.Combine(directory, "edits/additions.json");
+        string additionAssets = Path.Combine(directory, "edits/addition-assets");
+        string[] editFiles = Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories);
+        foreach (string edit in editFiles)
             Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath
-                || edit == jobjPath || edit == animationPath,
+                || edit == jobjPath || edit == animationPath || edit == additionPath
+                || edit.StartsWith(additionAssets + Path.DirectorySeparatorChar, StringComparison.Ordinal),
                 "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
+        Require(File.Exists(additionPath) || !editFiles.Any(edit =>
+            edit.StartsWith(additionAssets + Path.DirectorySeparatorChar, StringComparison.Ordinal)),
+            "EDIT_UNSUPPORTED", "Addition assets require edits/additions.json.");
+        ValidatedModelAdditionBatch? additionBatch = null;
+        if (File.Exists(additionPath))
+        {
+            Require(new FileInfo(additionPath).Length <= 64L * 1024 * 1024,
+                "MODEL_ADDITION_FORMAT", "Model-addition JSON exceeds the 64 MiB limit.");
+            var additions = JsonSerializer.Deserialize<ModelAdditionEdits>(File.ReadAllText(additionPath), Json);
+            Require(additions != null, "MODEL_ADDITION_FORMAT", "Empty model-addition edit document.");
+            string[] declared = m.TryGetProperty("modelAdditionTargets", out var targets)
+                ? targets.EnumerateArray().Select(target => target.GetProperty("id").GetString()!).ToArray() : [];
+            additionBatch = ModelAdditionEditing.Validate(directory, source, modelBaseline, additions!, declared);
+        }
         bool changed = File.Exists(editPath);
         byte[] bytes = source.Layout.Bytes;
         if (changed)
@@ -172,12 +190,27 @@ public static class SessionApplier
                 modelBaseline, edits!, declared);
             bytes = animationWrite.Bytes;
         }
+        ArchiveLayout? additionBase = null;
+        ModelAdditionWrite? additionWrite = null;
+        if (additionBatch != null)
+        {
+            additionBase = new ArchiveLayout(bytes);
+            additionWrite = ModelAdditionArchiveWriter.Write(additionBase, modelBaseline, additionBatch);
+            bytes = additionWrite.Bytes;
+        }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             using (var file = new FileStream(temp, FileMode.CreateNew)) file.Write(bytes);
             var reloaded = new StageArchive(temp); reloaded.Validate();
-            modelBaseline.RequireUnchanged(ModelIdentity.Capture(reloaded.Layout, catalog));
+            if (additionWrite == null)
+                modelBaseline.RequireUnchanged(ModelIdentity.Capture(reloaded.Layout, catalog));
+            else
+            {
+                Require(reloaded.Layout.Bytes.SequenceEqual(additionWrite.Bytes),
+                    "MODEL_ADDITION_RELOAD", "Reloaded model addition archive differs from the written bytes.");
+                ModelAdditionArchiveWriter.Verify(additionBase!, modelBaseline, additionWrite);
+            }
             var written = CollisionData.Read(reloaded.Layout);
             Require(written.Vertices.SequenceEqual(collision.Vertices) && written.Lines.SequenceEqual(collision.Lines)
                 && written.Ranges.SequenceEqual(collision.Ranges) && written.Attachments.SequenceEqual(collision.Attachments)
@@ -195,13 +228,16 @@ public static class SessionApplier
             if (jobjWrite != null) JobjEditing.Verify(reloaded.Layout, modelBaseline, jobjWrite);
             if (animationWrite != null) JointAnimationEditing.Verify(reloaded.Layout, modelBaseline, animationWrite);
             if (!changed && !modelChanged && materialWrite == null && lightWrite == null
-                && jobjWrite == null && animationWrite == null)
+                && jobjWrite == null && animationWrite == null && additionWrite == null)
                 Require(source.Layout.SemanticHash() == reloaded.Layout.SemanticHash(), "ROUNDTRIP_MISMATCH", "No-edit apply changed archive semantics.");
             File.Move(temp, output, overwrite: true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
+        bool anyModelChanged = modelChanged || additionWrite != null;
+        int modelTriangles = compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3)
+            + (additionWrite?.Chunks.Sum(chunk => chunk.TriangleCount) ?? 0);
         return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length,
-            modelChanged, modelChanged ? compiledModels.Sum(pair => pair.Mesh.TriangleIndices.Length / 3) : null,
+            anyModelChanged, anyModelChanged ? modelTriangles : null,
             materialWrite != null, lightWrite != null, jobjWrite != null, animationWrite != null);
 
         string Contained(string relative)
