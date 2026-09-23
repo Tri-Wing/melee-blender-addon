@@ -165,6 +165,9 @@ def preview_matrix(texture):
 
 
 def configure_preview(material, preview, directory, stage, light_objects=None):
+    from . import animations, animation_values
+    animation_values.remove(material)
+    animations.invalidate_material(material)
     if not preview:
         return
     color = preview.get('color', [0.45, 0.45, 0.45, 1])
@@ -841,10 +844,29 @@ def configure_color_preview(material, layer_name):
         configure_alpha_preview(material, json.loads(material['mme_alpha_preview']))
 
 
+def set_preview_render_method(material, settings, dithered=False):
+    blended = settings['blendMode'] != 0 and not dithered
+    if hasattr(material, 'surface_render_method'):
+        material.surface_render_method = 'BLENDED' if blended else 'DITHERED'
+    elif hasattr(material, 'blend_method'):
+        material.blend_method = 'BLEND' if blended else 'HASHED'
+
+
+def update_preview_dithering(scene, context):
+    materials = {slot.material for obj in scene.objects for slot in obj.material_slots
+                 if slot.material and slot.material.get('mme_alpha_preview')}
+    for material in materials:
+        set_preview_render_method(material, json.loads(material['mme_alpha_preview']),
+                                  scene.mme_dithered_transparency)
+
+
 def configure_alpha_preview(material, settings):
     """Static HSD alpha operations and common framebuffer blends, without DAT edits."""
     if not settings:
         return
+    from . import animations, animation_values
+    animation_values.remove(material)
+    animations.invalidate_material(material)
     material['mme_alpha_preview'] = json.dumps(settings)
     nodes, links = material.node_tree.nodes, material.node_tree.links
     for node in list(nodes):
@@ -942,11 +964,8 @@ def configure_alpha_preview(material, settings):
     # EEVEE's dithered path turns fractional alpha into visible screen-door noise.
     # Use forward blending for GX framebuffer blends, while keeping dithering for
     # opaque alpha-test materials whose shader output is already binary.
-    blended = mode != 0
-    if hasattr(material, 'surface_render_method'):
-        material.surface_render_method = 'BLENDED' if blended else 'DITHERED'
-    elif hasattr(material, 'blend_method'):
-        material.blend_method = 'BLEND' if blended else 'HASHED'
+    set_preview_render_method(material, settings,
+                              getattr(bpy.context.scene, 'mme_dithered_transparency', False))
 
 
 def color_transfer(material, socket, *, to_linear):

@@ -9,7 +9,7 @@ import bpy
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
-from melee_map_editor import animations, scene
+from melee_map_editor import animations, animation_values, scene
 from melee_map_editor.protocol import read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -22,6 +22,7 @@ def import_stage(temp, filename):
     directory = temp / filename.removesuffix('.dat')
     run(CLI, 'dotnet', 'extract', CORPUS / filename, '--session', directory)
     scene.import_session(bpy.context, directory)
+    bpy.context.scene.eevee.use_taa_reprojection = False
     return directory
 
 
@@ -40,11 +41,11 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     assert animations.active_action(armature)['mme_animation_slot'] == 0
     offset = material.node_tree.nodes['Stage Texture Offset U'].inputs[1]
     bpy.context.scene.frame_set(1)
-    start = offset.default_value
+    start = animation_values.value(offset, obj)
     bpy.context.scene.frame_set(600)
-    middle = offset.default_value
+    middle = animation_values.value(offset, obj)
     bpy.context.scene.frame_set(1200)
-    wrapped = offset.default_value
+    wrapped = animation_values.value(offset, obj)
     assert abs(start - middle) > .01
     assert abs(start - wrapped) < 1e-6
     scene.apply(bpy.context.scene, CLI, 'dotnet', temp / 'grgb-noop.dat')
@@ -81,9 +82,9 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     obj = next(obj for obj in bpy.context.scene.objects if obj.get('mme_id') == target['materialId'])
     alpha = obj.active_material.node_tree.nodes['Stage Material Alpha'].outputs[0]
     bpy.context.scene.frame_set(1)
-    opaque = alpha.default_value
+    opaque = animation_values.value(alpha, obj)
     bpy.context.scene.frame_set(41)
-    transparent = alpha.default_value
+    transparent = animation_values.value(alpha, obj)
     assert opaque > .99 and transparent < .01, (opaque, transparent)
 
     group = read(directory / 'models/group-006/group.json')
@@ -99,9 +100,9 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
         action for action in animations.actions(group_armature)
         if action.get('mme_animation_slot') == 6)
     bpy.context.scene.frame_set(1)
-    bright = tint.inputs[1].default_value[0]
+    bright = animation_values.value(tint.inputs[1], obj)[0]
     bpy.context.scene.frame_set(100)
-    dark = tint.inputs[1].default_value[0]
+    dark = animation_values.value(tint.inputs[1], obj)[0]
     assert bright > .2 and dark < 1e-6, (
         bright, dark, animations.active_action(group_armature).get('mme_animation_slot'),
         tint.get('mme_texture_index'), tint.inputs[1].is_linked)
@@ -109,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
         action for action in animations.actions(group_armature)
         if action.get('mme_animation_slot') == 0)
     animations.apply(bpy.context.scene)
-    restored = tint.inputs[1].default_value[0]
+    restored = animation_values.value(tint.inputs[1], obj)[0]
     assert abs(restored - bright) < 1e-6, (bright, restored)
 
     fresh = bpy.data.scenes.new('Texture palette animation')
@@ -156,9 +157,9 @@ with tempfile.TemporaryDirectory(prefix='mme-material-animation-') as raw:
     armature.animation_data.action = next(action for action in animations.actions(armature)
                                           if action.get('mme_animation_slot') == 0)
     bpy.context.scene.frame_set(1)
-    start = register.outputs[0].default_value[:3]
+    start = animation_values.value(register.outputs[0], obj)[:3]
     bpy.context.scene.frame_set(450)
-    middle = register.outputs[0].default_value[:3]
+    middle = animation_values.value(register.outputs[0], obj)[:3]
     assert all(abs(a - b) < 1e-6 for a, b in zip(start, (1, 0, 1))), start
     assert abs(middle[0] - 63 / 255) < 1e-6 and middle[1] == 0 and middle[2] == 1, middle
 

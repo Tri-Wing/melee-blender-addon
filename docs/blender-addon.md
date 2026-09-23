@@ -37,12 +37,15 @@ Blender with the repository add-on loaded automatically, run:
 ./scripts/launch_blender.sh
 # Or open an existing scene before loading the add-on:
 ./scripts/launch_blender.sh /path/to/stage.blend
+# Or immediately import a DAT into the startup scene:
+./scripts/launch_blender.sh ~/projects/melee-map-editor/example_assets/GrNLa.dat
 ```
 
 The launcher uses `blender` from your PATH (currently the Snap installation on
 this machine). Set `BLENDER_BIN=/path/to/blender` to choose another executable.
-It works from any working directory and forwards arguments to Blender; put any
-`.blend` path and normal Blender options after the launcher name. Avoid Blender's
+It works from any working directory. An optional first `.dat` argument is imported
+after the add-on loads; remaining arguments are forwarded to Blender. Without a
+DAT argument, `.blend` paths and normal Blender options work as before. Avoid Blender's
 `--` script-argument separator, since the launcher appends `--python` itself.
 It does not rebuild the backend; run `dotnet build MeleeMap.sln` after C# changes.
 
@@ -171,6 +174,15 @@ bones, rigid children, and weighted meshes.
 Material playback drives MOBJ ambient, diffuse, specular, and alpha values, plus
 TObj translation, scale, rotation, blend values, texture image/palette swaps, and
 konst/TEV0/TEV1 color registers used by supported custom TEV stages.
+For faster blended animation, turn off **Render Properties > Sampling > Viewport >
+Temporal Reprojection**. With that setting off, changing numeric values use
+object attributes instead of repeated shader-socket updates. Blending, color,
+alpha, UV, and TEV equations remain intact; image/palette swaps still change the
+sampled image. Reload the add-on to use this with an existing scene.
+Temporal reprojection smooths edges/noise across frames, so disabling it can
+change antialiasing. The add-on does not change the setting automatically:
+with it enabled, playback retains the original shader-socket path to avoid
+trails observed with animated attributes. Neither path changes DAT export.
 Indexed textures are decoded for the image and palette combinations reached by
 the timeline. Animated pixel-engine reference values and material animation
 editing/export are not implemented yet.
@@ -529,6 +541,12 @@ cross-stage inputs, retain the
 existing preview limitations.
 
 ## Alpha previews
+
+Enable **Dithered Transparency** in the **Melee Map** sidebar to use dithering
+for all stage transparency previews, including additive effects. This can speed
+up the viewport but may introduce visible noise or change overlapping effects.
+Disable it to restore normal blending. The setting defaults off, is saved with
+the Blender scene, and does not affect DAT export.
 
 Transparency uses the source material and pixel-processing settings:
 

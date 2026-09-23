@@ -8,12 +8,14 @@ from mathutils import Euler, Matrix, Vector
 
 from .protocol import StageError, digest, read
 from .transforms import AXES, joint_srt
+from . import animation_values
 
 
 _group_cache = {}
 _applied = {}
 _armature_cache = {}
 _material_cache = {}
+_owner_scope = None
 
 
 def clear_cache():
@@ -27,6 +29,8 @@ def invalidate_material(material):
     """Discard preview bindings after a material node tree is rebuilt."""
     _material_cache.pop(material.as_pointer(), None)
     _applied.clear()
+    for runtime in _armature_cache.values():
+        runtime.pop('material_frame', None)
 
 
 def _group(scene, armature):
@@ -302,14 +306,14 @@ def _material_runtime(material):
         'specular': [specular.inputs[1]] if specular else [],
         'diffuse': []
     }
-    if lighting and not lighting.inputs[1].is_linked:
+    if lighting and animation_values.controlled(lighting.inputs[1]):
         color_sockets['diffuse'].append(lighting.inputs[1])
-    if surface_node and not surface_node.inputs['Color'].is_linked:
+    if surface_node and animation_values.controlled(surface_node.inputs['Color']):
         color_sockets['diffuse'].append(surface_node.inputs['Color'])
-    if color_modulation and not color_modulation.inputs[1].is_linked:
+    if color_modulation and animation_values.controlled(color_modulation.inputs[1]):
         color_sockets['diffuse'].append(color_modulation.inputs[1])
     color_sockets['diffuse'].extend(node.inputs[1] for node in nodes
-        if node.name.startswith('Stage Diffuse Tint') and not node.inputs[1].is_linked)
+        if node.name.startswith('Stage Diffuse Tint') and animation_values.controlled(node.inputs[1]))
     if extension:
         color_sockets['diffuse'].append(extension.outputs[0])
     samplers = {node.get('mme_texture_index'): node for node in nodes
@@ -339,7 +343,8 @@ def _material_runtime(material):
         'color_sockets': color_sockets,
         'alpha': nodes.get('Stage Material Alpha'),
         'controls': controls, 'images': image_catalog,
-        'state': {}, 'slot': object()
+        'state': {}, 'slot': object(), 'owners': (),
+        'attributes': animation_values.bindings(material), 'value_bindings': {}
     }
     _material_cache[key] = cached
     return cached
@@ -349,7 +354,22 @@ def _assign(runtime, key, socket, value):
     if socket is None:
         return
     value = tuple(value) if isinstance(value, (tuple, list, Vector)) else value
+    attribute = runtime['attributes'].get(socket.as_pointer())
+    if attribute is not None:
+        animation_values.write(attribute, runtime['owners'], value)
+        runtime['value_bindings'][key] = attribute
+        runtime['state'][key] = value
+        return
     if runtime['state'].get(key) == value:
+        return
+    # Only controls observed changing become attributes. Static defaults stay
+    # constants; channels that start animating in later slots are handled here.
+    if key in runtime['state'] and runtime['owners']:
+        attribute = animation_values.create(socket, runtime['owners'], value)
+        runtime['attributes'][socket.as_pointer()] = attribute
+        runtime['value_bindings'][key] = attribute
+        runtime['signature'] = (*runtime['signature'][:-1], len(socket.id_data.nodes))
+        runtime['state'][key] = value
         return
     socket.default_value = value
     runtime['state'][key] = value
@@ -388,10 +408,18 @@ def _assign_image(runtime, index, image):
         sampler.image = image
 
 
-def _apply_material(material, target, source_frame, animation_slot):
+def _apply_material(material, target, source_frame, animation_slot, owners=()):
     runtime = _material_runtime(material)
     if runtime is None:
         return
+    if not owners and runtime['attributes']:
+        animation_values.remove(material)
+        invalidate_material(material)
+        runtime = _material_runtime(material)
+    if runtime['owners'] != owners:
+        runtime['owners'] = owners
+        for key, attribute in runtime['value_bindings'].items():
+            animation_values.write(attribute, owners, runtime['state'][key])
     preview, textures = runtime['preview'], runtime['textures']
     reset = runtime['slot'] != animation_slot
     frame = source_frame
@@ -492,13 +520,39 @@ def _apply_material(material, target, source_frame, animation_slot):
 
 
 def _apply_materials(runtime, action, source_frame):
+    if not runtime['animated_material_ids']:
+        return
     slot = action.get('mme_animation_slot') if action else None
+    # EEVEE reprojection can retain trails when numeric attributes animate.
+    # Preserve the socket path unless the user has disabled reprojection.
+    use_attributes = not runtime['scene'].eevee.use_taa_reprojection
+    frame_key = (action.as_pointer() if action else 0, slot, source_frame, use_attributes)
+    if runtime.get('material_frame') == frame_key:
+        return
+    runtime['material_frame'] = frame_key
     targets = runtime['material_targets'].get(slot, {})
     empty = {'endFrame': 0, 'loop': False, 'tracks': [], 'textures': []}
-    for material_id, materials in runtime['materials'].items():
+    current_scene = runtime['scene']
+    scope = _owner_scope if _owner_scope is not None and _owner_scope['scene'] == current_scene else {}
+    owners = scope.get('owners')
+    if owners is None:
+        owners = {}
+        for obj in current_scene.objects:
+            for material_slot in obj.material_slots:
+                if material_slot.material:
+                    owners.setdefault(material_slot.material, set()).add(obj)
+        scope['owners'] = owners
+    materials_by_id = {}
+    for material in owners:
+        material_id = material.get('mme_model_material_id') or material.get('mme_preview_model_id')
+        if material_id in runtime['animated_material_ids']:
+            materials_by_id.setdefault(material_id, []).append(material)
+    for material_id, materials in materials_by_id.items():
         target = targets.get(material_id, empty)
         for material in materials:
-            _apply_material(material, target, source_frame, slot)
+            _apply_material(material, target, source_frame, slot,
+                            tuple(sorted(owners[material], key=lambda obj: obj.as_pointer()))
+                            if use_attributes else ())
 
 
 def _armature_runtime(scene, armature, payload):
@@ -517,19 +571,10 @@ def _armature_runtime(scene, armature, payload):
                                             for target in animation['materials']}
                         for animation in payload.get('materialAnimations', [])}
     animated_ids = {material_id for targets in material_targets.values() for material_id in targets}
-    materials = {}
-    if animated_ids:
-        used = {slot.material for obj in scene.objects
-                if obj.get('mme_session_id') == scene.mme_session_id
-                for slot in getattr(obj, 'material_slots', []) if slot.material}
-        for material in used:
-            material_id = material.get('mme_model_material_id') or material.get('mme_preview_model_id')
-            if material_id in animated_ids:
-                materials.setdefault(material_id, []).append(material)
     cached = {
         'signature': signature, 'animated_bones': animated_bones,
         'joint_nodes': joint_nodes, 'material_targets': material_targets,
-        'materials': materials, 'fcurve_ids': {}
+        'scene': scene, 'animated_material_ids': animated_ids, 'fcurve_ids': {}
     }
     _armature_cache[key] = cached
     return cached
@@ -539,7 +584,8 @@ def _apply_armature(scene, armature):
     action = active_action(armature)
     source_frame = max(0.0, scene.frame_current_final - 1.0)
     slot = action.get('mme_animation_slot') if action else None
-    key = (action.as_pointer() if action else 0, slot, source_frame)
+    key = (action.as_pointer() if action else 0, slot, source_frame,
+           scene.eevee.use_taa_reprojection)
     if _applied.get(armature.as_pointer()) == key:
         return
     # Mark the state before touching matrices because those changes schedule a
@@ -576,13 +622,19 @@ def _apply_armature(scene, armature):
 
 
 def apply(scene):
+    global _owner_scope
     if not getattr(scene, 'mme_session', ''):
         return
-    for armature in scene.objects:
-        if (armature.type == 'ARMATURE' and armature.get('mme_role') == 'jobj-armature'
-                and armature.get('mme_session_id') == scene.mme_session_id
-                and armature.get('mme_animation_source')):
-            _apply_armature(scene, armature)
+    previous_scope = _owner_scope
+    _owner_scope = {'scene': scene}
+    try:
+        for armature in scene.objects:
+            if (armature.type == 'ARMATURE' and armature.get('mme_role') == 'jobj-armature'
+                    and armature.get('mme_session_id') == scene.mme_session_id
+                    and armature.get('mme_animation_source')):
+                _apply_armature(scene, armature)
+    finally:
+        _owner_scope = previous_scope
 
 
 def edits(scene, stage, groups):

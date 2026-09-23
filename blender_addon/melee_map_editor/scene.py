@@ -27,7 +27,8 @@ def collision_object(scene):
 def properties(item):
     preview_controls = {'mme_light_enabled', 'mme_light_intensity', 'mme_light_color'}
     return {key: item[key] for key in item.keys()
-            if key.startswith('mme_') and key != 'mme_dirty' and key not in preview_controls}
+            if key.startswith('mme_') and key != 'mme_dirty' and key not in preview_controls
+            and not (isinstance(item, bpy.types.Object) and key.startswith('mme_anim_'))}
 
 
 def inventory(scene, editable_id=None, editable_transform_ids=None):

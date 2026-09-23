@@ -371,6 +371,7 @@ class MME_PT_stage(bpy.types.Panel):
         if not s.mme_session:
             layout.label(text='Choose the CLI in add-on preferences.')
             return
+        layout.prop(s, 'mme_dithered_transparency')
         info = s.get('mme_stage_info')
         if info:
             import json
@@ -806,7 +807,8 @@ CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_O
            MME_OT_assign, MME_OT_topology, MME_OT_open_export, MME_PT_stage, MME_PT_edge,
            MME_PT_edge_raw, MME_TextureLayerProperties, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
-               'mme_collision_type', 'mme_collision_material', 'mme_collision_surface')
+               'mme_collision_type', 'mme_collision_material', 'mme_collision_surface',
+               'mme_dithered_transparency')
 
 
 def register():
@@ -847,6 +849,10 @@ def register():
     for name, label in flag_properties:
         setattr(bpy.types.Material, name, BoolProperty(name=label, update=material_properties.update, options=set()))
     bpy.types.Scene.mme_session = StringProperty(subtype='DIR_PATH')
+    bpy.types.Scene.mme_dithered_transparency = BoolProperty(
+        name='Dithered Transparency', default=False, options=set(),
+        description='Use faster, potentially noisier transparency for stage previews only; does not affect DAT export',
+        update=surface.update_preview_dithering)
     bpy.types.Scene.mme_session_id = StringProperty()
     bpy.types.Scene.mme_status = StringProperty(default='No stage imported')
     bpy.types.Scene.mme_export_directory = StringProperty(subtype='DIR_PATH')

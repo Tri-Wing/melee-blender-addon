@@ -82,3 +82,10 @@ def load():
 
 if __name__ == '__main__':
     load()
+    # The launcher passes data through the environment, never Python source.
+    # Consume it once so running this script again only reloads the add-on.
+    stage_path = os.environ.pop('MELEEMAP_IMPORT_DAT', '')
+    if stage_path:
+        result = bpy.ops.mme.import_stage('EXEC_DEFAULT', filepath=stage_path)
+        if result != {'FINISHED'}:
+            raise RuntimeError(f'Could not import stage DAT: {stage_path}')
