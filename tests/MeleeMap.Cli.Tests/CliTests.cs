@@ -35,4 +35,40 @@ public class CliTests
         Assert.Equal(1, Cli.Run(["inspect", Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".dat")], output, TextWriter.Null));
         Assert.Contains("IO_ERROR", output.ToString());
     }
+
+    [Fact]
+    public void ApplyIsByteIdenticalRepeatableAndFailurePreservingThroughCli()
+    {
+        string source = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+            "../../../../../example_assets/GrNLa.dat"));
+        Assert.True(File.Exists(source), "The primary CLI fixture is missing.");
+        string root = Path.Combine(Path.GetTempPath(), "mme-cli-transaction-"
+            + Guid.NewGuid().ToString("N"));
+        string session = Path.Combine(root, "session");
+        string output = Path.Combine(root, "out.dat");
+        Directory.CreateDirectory(root);
+        try
+        {
+            Assert.Equal(0, Run("extract", source, "--session", session));
+            Assert.Equal(0, Run("apply", session, "--output", output));
+            byte[] expected = File.ReadAllBytes(source);
+            Assert.Equal(expected, File.ReadAllBytes(output));
+
+            File.WriteAllText(output, "replace this output");
+            Assert.Equal(0, Run("apply", session, "--output", output));
+            Assert.Equal(expected, File.ReadAllBytes(output));
+
+            File.WriteAllText(Path.Combine(session, "edits/models.json"), "{}");
+            Assert.Equal(1, Run("apply", session, "--output", output));
+            Assert.Equal(expected, File.ReadAllBytes(output));
+            Assert.Empty(Directory.GetFiles(root, "*.tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+
+        static int Run(params string[] args) =>
+            Cli.Run(args, TextWriter.Null, TextWriter.Null);
+    }
 }

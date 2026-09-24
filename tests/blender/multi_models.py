@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
     assert infos == stage['editableMeshes']
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
-    full_infos = [i for i in infos if not i.get('positionsOnly')]
+    full_infos = [i for i in infos if modeling.allows(i, 'topologyReplacement')]
     chosen = full_infos[:2]
     for index, info in enumerate(chosen):
         obj = modeling.target_object(s, info)

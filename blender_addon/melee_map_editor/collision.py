@@ -2,7 +2,7 @@
 import math
 import uuid
 import bpy
-from .protocol import StageError, digest
+from .protocol import SESSION_PROTOCOL, StageError, digest
 
 CATEGORIES = ('floor', 'ceiling', 'right-wall', 'left-wall', 'dynamic')
 ATTRS = ('line', 'start', 'end', 'joint', 'category', 'high', 'low')
@@ -103,7 +103,7 @@ def serialize(obj, source):
         lines.append({'id': identity(source, 'lines', handle), 'vertex0Id': identity(source, 'vertices', start),
                       'vertex1Id': identity(source, 'vertices', end), 'jointId': source['joints'][joint-1]['id'],
                       'category': CATEGORIES[category], 'highFlags': high, 'lowFlags': low})
-    return {'protocolVersion': 2, 'coordinateSpace': 'game',
+    return {'protocolVersion': SESSION_PROTOCOL, 'coordinateSpace': 'game',
             'vertices': sorted(vertices, key=lambda x: x['id']), 'lines': sorted(lines, key=lambda x: x['id'])}
 
 

@@ -1,7 +1,7 @@
 """Blender armature adapter for supported static HSD JOBJ transforms."""
 import json
 from mathutils import Vector
-from .protocol import StageError
+from .protocol import SESSION_PROTOCOL, StageError
 from .transforms import AXES, vector
 
 
@@ -119,7 +119,7 @@ def edits(scene, stage, groups):
             'rotation': dict(zip('xyz', euler)),
             'scale': dict(zip('xyz', scales)),
             'translation': dict(zip('xyz', local.translation))})
-    return {'protocolVersion': 2, 'coordinateSpace': 'game-jobj-local', 'jobjs': result} if result else None
+    return {'protocolVersion': SESSION_PROTOCOL, 'coordinateSpace': 'game-jobj-local', 'jobjs': result} if result else None
 
 
 def update_dirty(scene, depsgraph):

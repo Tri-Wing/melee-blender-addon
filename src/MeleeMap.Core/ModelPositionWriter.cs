@@ -7,8 +7,21 @@ namespace MeleeMap.Core;
 /// <summary>Replace positions and corner colors, retaining other rendering attributes and material state.</summary>
 public static class ModelPositionWriter
 {
+    private const string Owner = "model-position";
+
     public static byte[] Write(ArchiveLayout source, EditableModel target, MeshData mesh)
     {
+        var builder = new ArchiveMutationBuilder(source);
+        Write(builder, target, mesh);
+        byte[] output = builder.Build();
+        Verify(new ArchiveLayout(output), source, target, mesh);
+        return output;
+    }
+
+    internal static void Write(ArchiveMutationBuilder builder, EditableModel target,
+        MeshData mesh)
+    {
+        var source = builder.BuildLayout();
         var original = GxMeshDecoder.Decode(source, target.PobjOffset);
         bool expanded = mesh.Positions.Length == original.TriangleIndices.Length
             && mesh.TriangleIndices.SequenceEqual(Enumerable.Range(0, mesh.Positions.Length));
@@ -104,36 +117,19 @@ public static class ModelPositionWriter
         }
         while (display.Length % 32 != 0) display.WriteByte(0);
         Require(display.Length / 32 <= short.MaxValue, "MODEL_GX_LIMIT", "Position replacement exceeds GX display-list limits.");
-        using var data = new MemoryStream(); data.Write(source.Bytes.AsSpan(32, source.DataSize));
-        int Append(byte[] bytes)
-        {
-            while (data.Position % 32 != 0) data.WriteByte(0);
-            int start = checked((int)data.Position); data.Write(bytes); return start;
-        }
-        int newAttrs = Append(descriptors), newDl = Append(display.ToArray());
-        byte[] payload = data.ToArray();
-        Put(payload, target.PobjOffset + 8, newAttrs);
-        Short(payload, target.PobjOffset + 14, checked((int)display.Length / 32));
-        Put(payload, target.PobjOffset + 16, newDl);
-        int countRelocations = source.Read(8);
-        var relocations = Enumerable.Range(0, countRelocations).Select(i => source.Read(32 + source.DataSize + i * 4)).ToList();
+        int newAttrs = builder.AppendAligned(descriptors);
+        int newDisplay = builder.AppendAligned(display.ToArray());
         for (int i = 0; i < attributes.Count; i++)
-            if (attributes[i].Name != 9 && !ReplaceColor(attributes[i].Name) && attributes[i].Buffer.HasValue) relocations.Add(newAttrs + i * 24 + 20);
-        using var result = new MemoryStream(); result.Write(source.Bytes.AsSpan(0, 32)); result.Write(payload);
-        foreach (int field in relocations) { byte[] value = new byte[4]; Put(value, 0, field); result.Write(value); }
-        result.Write(source.Bytes.AsSpan(32 + source.DataSize + countRelocations * 4));
-        byte[] output = result.ToArray(); Put(output, 0, output.Length); Put(output, 4, payload.Length); Put(output, 8, relocations.Count);
-        var parsed = new ArchiveLayout(output);
-        Require(source.Roots.SequenceEqual(parsed.Roots) && source.References.SequenceEqual(parsed.References),
-            "PRESERVATION_ROOTS", "Root inventory changed.");
-        for (int i = 0; i < source.DataSize; i++)
-        {
-            bool changed = (i >= target.PobjOffset + 8 && i < target.PobjOffset + 12)
-                || (i >= target.PobjOffset + 14 && i < target.PobjOffset + 20);
-            Require(changed || source.Bytes[32 + i] == output[32 + i], "PRESERVATION_PAYLOAD", "Unrelated archive data changed.");
-        }
-        Verify(parsed, source, target, mesh);
-        return output;
+            if (attributes[i].Name != 9 && !ReplaceColor(attributes[i].Name)
+                && attributes[i].Buffer.HasValue)
+                builder.SetPointer(newAttrs + i * 24 + 20,
+                    attributes[i].Buffer!.Value, Owner);
+        builder.PermitSourcePatch(target.PobjOffset + 8, 4, Owner);
+        builder.PermitSourcePatch(target.PobjOffset + 14, 6, Owner);
+        builder.SetPointer(target.PobjOffset + 8, newAttrs, Owner);
+        builder.PatchUInt16(target.PobjOffset + 14,
+            checked((int)display.Length / 32), Owner);
+        builder.SetPointer(target.PobjOffset + 16, newDisplay, Owner);
     }
 
     public static void Verify(ArchiveLayout archive, ArchiveLayout source, EditableModel target, MeshData expected, int? expectedMaterial = null)

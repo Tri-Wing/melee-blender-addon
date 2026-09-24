@@ -122,7 +122,7 @@ public class ApplyTests
     {
         using var session = new Session();
         File.WriteAllText(Path.Combine(session.Directory, "edits/collision.json"),
-            "{\"protocolVersion\":2,\"coordinateSpace\":\"game\",\"vertices\":[],\"lines\":[{}]}");
+            "{\"protocolVersion\":3,\"coordinateSpace\":\"game\",\"vertices\":[],\"lines\":[{}]}");
         Assert.Equal("SESSION_FORMAT", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.False(File.Exists(session.Output));
     }
@@ -132,7 +132,7 @@ public class ApplyTests
     {
         using var session = new Session(); var path = Path.Combine(session.Directory, "edits/shapes.json"); File.WriteAllText(path, "{}");
         Assert.Equal("EDIT_UNSUPPORTED", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code); File.Delete(path);
-        string manifest = Path.Combine(session.Directory, "stage.json"); var node = JsonNode.Parse(File.ReadAllText(manifest))!; node["protocolVersion"] = 1; File.WriteAllText(manifest, node.ToJsonString());
+        string manifest = Path.Combine(session.Directory, "stage.json"); var node = JsonNode.Parse(File.ReadAllText(manifest))!; node["protocolVersion"] = 2; File.WriteAllText(manifest, node.ToJsonString());
         Assert.Equal("SESSION_VERSION", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.False(File.Exists(session.Output));
     }
@@ -182,5 +182,101 @@ public class ApplyTests
         Assert.Equal("MODEL_ADDITION_TARGET", Assert.Throws<StageException>(() =>
             SessionApplier.Apply(session.Directory, session.Output)).Code);
         Assert.Equal(published, File.ReadAllBytes(session.Output));
+    }
+
+    [PrimaryFixtureFact]
+    public void ComposesAllEditDomainsDeterministicallyInOneTransaction()
+    {
+        using var session = new Session();
+        var json = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        using var manifest = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(session.Directory, "stage.json")));
+        var nodes = new List<ModelIdentityNode>();
+        foreach (var entry in manifest.RootElement.GetProperty("modelGroups").EnumerateArray())
+        {
+            using var group = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory,
+                entry.GetProperty("file").GetString()!)));
+            nodes.AddRange(group.RootElement.GetProperty("nodes")
+                .Deserialize<ModelIdentityNode[]>(new JsonSerializerOptions
+                    { PropertyNameCaseInsensitive = true })!);
+        }
+        var catalog = ModelIdentityCatalog.Restore(nodes);
+        var identity = ModelIdentity.Capture(session.Source.Layout, catalog);
+        var snapshot = ModelSourceSnapshot.Capture(session.Source.Layout, identity);
+
+        var collision = session.Edits();
+        collision.Vertices[0] = collision.Vertices[0] with
+            { Y = collision.Vertices[0].Y + 0.5f };
+        session.Write(collision);
+
+        var model = snapshot.EditableModels.First();
+        var mesh = snapshot.Models[model.Id].Geometry!;
+        var moved = new ModelEdit(model.Id,
+            mesh.Positions.Select(position => position with { X = position.X + 0.125f }).ToArray(),
+            mesh.TriangleIndices);
+        Write("models", new ModelEdits(SessionExtractor.ProtocolVersion,
+            "game-joint-local", [moved]));
+
+        var material = snapshot.EditableMaterialProperties.First();
+        Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion,
+            [new MaterialPropertyEdit(material.Id, Ambient: [17, 34, 51])]));
+
+        var light = StageLightingReader.Read(session.Source.Layout)
+            .LightSets.SelectMany(set => set.Lights).First();
+        Write("lights", new StageLightEdits(SessionExtractor.ProtocolVersion,
+            [new StageLightEdit(light.Id, Color: [12, 34, 56])]));
+
+        var jobj = JobjEditing.Select(session.Source.Layout, identity).First();
+        var reader = new ArchiveDataReader(session.Source.Layout);
+        Vector3Data Vector(int offset) => new(reader.Float(offset), reader.Float(offset + 4),
+            reader.Float(offset + 8));
+        Write("jobjs", new JobjTransformEdits(SessionExtractor.ProtocolVersion,
+            "game-jobj-local", [new JobjTransformEdit(jobj.Id,
+                Vector(jobj.SourceOffset + 0x14), Vector(jobj.SourceOffset + 0x20),
+                Vector(jobj.SourceOffset + 0x2C) with
+                    { Z = Vector(jobj.SourceOffset + 0x2C).Z + 0.25f })]));
+
+        var animation = Enumerable.Range(0, session.Source.Inspect().ModelGroups!.Value)
+            .SelectMany(group => StageJointAnimations.Read(session.Source, identity, group)
+                .SelectMany(set => set.Nodes.Where(node => node.Editable)
+                    .Select(node => (Group: group, set.Slot, Node: node))))
+            .First();
+        Write("animations", new JointAnimationEdits(SessionExtractor.ProtocolVersion,
+            "game-jobj-animation", [new JointAnimationNodeEdit(animation.Group,
+                animation.Slot, animation.Node.JobjId,
+                [new JointAnimationTrack("scale.x",
+                    [new JointAnimationKey(0, 1.125f, 0, "HSD_A_OP_LIN")])])]));
+
+        var additionTarget = ModelAddition.Select(session.Source, identity)
+            .First(target => target.Placement == ModelAddition.ExistingJobjPlacement);
+        string materialId = Guid.NewGuid().ToString("N");
+        var part = new ModelAdditionPart(Guid.NewGuid().ToString("N"), materialId,
+            [new(0, 0, 0), new(1, 0, 0), new(0, 1, 0)], [0, 1, 2],
+            [new(0, 0, 1), new(0, 0, 1), new(0, 0, 1)], null);
+        var additionMaterial = new ModelAdditionMaterial(materialId, "Constant",
+            new(1, 1, 1, 1), null, "repeat", "repeat", "linear", "linear",
+            ModelAdditionEditing.MaterialPreset);
+        Write("additions", new ModelAdditionEdits(SessionExtractor.ProtocolVersion,
+            ModelAddition.SchemaVersion, "game-joint-local",
+            [new(Guid.NewGuid().ToString("N"), "Composed addition",
+                additionTarget.Placement, additionTarget.Id, [part])],
+            [additionMaterial], []));
+
+        var result = SessionApplier.Apply(session.Directory, session.Output);
+        string repeatedOutput = Path.Combine(session.Root, "repeated.dat");
+        SessionApplier.Apply(session.Directory, repeatedOutput);
+
+        Assert.True(result.CollisionChanged);
+        Assert.True(result.ModelChanged);
+        Assert.True(result.MaterialChanged);
+        Assert.True(result.LightChanged);
+        Assert.True(result.JobjChanged);
+        Assert.True(result.AnimationChanged);
+        Assert.Equal(File.ReadAllBytes(session.Output), File.ReadAllBytes(repeatedOutput));
+        Assert.Empty(new StageArchive(session.Output).Validate());
+
+        void Write(string kind, object value) => File.WriteAllText(
+            Path.Combine(session.Directory, $"edits/{kind}.json"),
+            JsonSerializer.Serialize(value, json));
     }
 }

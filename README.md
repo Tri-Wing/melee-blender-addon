@@ -45,7 +45,7 @@ extraction, and static collision `apply`. `GrNLa` extracts all 93 polygon object
 (13,597 triangles), with a static joint/envelope preview in Blender.
 See [Blender installation and editing instructions](docs/blender-addon.md).
 
-Sessions now use protocol v2; re-extract old v1 sessions. Put collision changes in
+Sessions use protocol v3 / schema v2; re-extract older sessions. Put collision changes in
 `edits/collision.json`; `apply` with no edits produces a byte-identical DAT. Source
 and baseline hashes, protected model identities, and output validation gate each
 export. See [session protocol](docs/session-protocol.md) for an edit example and

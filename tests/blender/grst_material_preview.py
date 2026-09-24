@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='mme-grst-preview-') as tmp:
     source = next(m for name in group['meshes']
                   for m in [read(tmp / 'session/models/group-003' / name)] if m['ownerId'] == dobj['id'])
     info = next(i for i in stage['editableMeshes'] if i['id'] == source['id'])
-    assert not info['positionsOnly']
+    assert modeling.allows(info, 'topologyReplacement')
     assert source['texCoords0'] and source['colors0']
     assert source['id'] not in {m['id'] for m in stage['modelMaterials']}
     preview = next(m for m in stage['modelPreviews'] if m['id'] == source['id'])

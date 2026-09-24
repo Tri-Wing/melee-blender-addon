@@ -227,7 +227,7 @@ conversion must occur exactly once.
 
 ## Proposed session extension
 
-Keep session protocol v2 and add an explicit, versioned capability:
+Use the current session protocol and add an explicit, versioned capability:
 `capabilities.modelAddition: true`, `modelAdditionSchemaVersion: 2`, plus
 `modelAdditionTargets` containing placement modes, anchor JOBJ IDs, and
 eligibility information.

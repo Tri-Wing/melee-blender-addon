@@ -3,7 +3,7 @@ import json
 import math
 import bpy
 from mathutils import Vector
-from .protocol import StageError
+from .protocol import SESSION_PROTOCOL, StageError
 
 
 def preview_set(stage):
@@ -237,4 +237,4 @@ def edits(scene, stage):
                 raise StageError('Copies of one shared LOBJ have conflicting edits.')
             current[field] = value
     values = list(compiled.values())
-    return {'protocolVersion': 2, 'lights': values} if values else None
+    return {'protocolVersion': SESSION_PROTOCOL, 'lights': values} if values else None

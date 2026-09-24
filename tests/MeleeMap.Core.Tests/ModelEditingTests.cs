@@ -9,7 +9,7 @@ namespace MeleeMap.Core.Tests;
 public class ModelEditingTests
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-    private static ModelEdits Triangle(string id) => new(2, "game-joint-local", [new(id,
+    private static ModelEdits Triangle(string id) => new(SessionExtractor.ProtocolVersion, "game-joint-local", [new(id,
         [new(0, 0, 0), new(10, 0, 0), new(0, 10, 0)], [0, 1, 2])]);
 
     [Fact]
@@ -102,7 +102,7 @@ public class ModelEditingTests
     {
         using var session = new Fixture();
         var target = session.Target;
-        session.Write(new ModelEdits(2, "game-joint-local", [], [target.Id]));
+        session.Write(new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [], [target.Id]));
         var result = SessionApplier.Apply(session.Directory, session.Output);
         Assert.True(result.ModelChanged); Assert.Equal(0, result.ModelTriangles);
 
@@ -126,9 +126,9 @@ public class ModelEditingTests
         using var session = new Fixture();
         var target = session.Target;
         foreach (var edits in new[] {
-            new ModelEdits(2, "game-joint-local", [], [target.Id, target.Id]),
-            new ModelEdits(2, "game-joint-local", [Triangle(target.Id).Meshes[0]], [target.Id]),
-            new ModelEdits(2, "game-joint-local", [], [Guid.NewGuid().ToString("N")]) })
+            new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [], [target.Id, target.Id]),
+            new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [Triangle(target.Id).Meshes[0]], [target.Id]),
+            new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [], [Guid.NewGuid().ToString("N")]) })
         {
             session.Write(edits);
             Assert.Equal("MODEL_DELETE_TARGET",
@@ -154,13 +154,16 @@ public class ModelEditingTests
         var moved = new ModelEdit(targets[1].Id,
             original.Positions.Select(position => position with { X = position.X + 1 }).ToArray(),
             original.TriangleIndices);
-        ModelEditing.Compile(new(2, "game-joint-local", [moved]), targets[1], original);
+        ModelEditing.Compile(new(SessionExtractor.ProtocolVersion, "game-joint-local", [moved]), targets[1], original);
         var topology = Triangle(targets[1].Id);
         var compiled = ModelEditing.Compile(topology, targets[1], original);
 
-        var split = ModelDobjSplitter.Write(source.Layout, identity, [targets[1].Id]);
-        var splitLayout = new ArchiveLayout(split.Bytes);
+        var splitPlan = ModelGraphPlanner.Plan(identity, [targets[1].Id], []);
+        var splitBuilder = new ArchiveMutationBuilder(source.Layout);
+        var split = ModelGraphEditor.Apply(splitBuilder, identity, splitPlan);
+        var splitLayout = splitBuilder.BuildLayout();
         var splitIdentity = ModelIdentity.Capture(splitLayout, catalog);
+        ModelGraphVerifier.Verify(splitPlan, splitIdentity);
         var splitTargets = ModelEditing.SelectAll(splitLayout, splitIdentity)
             .Where(target => targets.Any(originalTarget => originalTarget.Id == target.Id))
             .ToDictionary(target => target.Id);
@@ -168,7 +171,7 @@ public class ModelEditingTests
         var second = splitTargets[targets[1].Id];
         Assert.False(first.SharesDobj); Assert.False(second.SharesDobj);
         Assert.Equal(targets[0].DobjOffset, first.DobjOffset);
-        Assert.Equal(split.DobjOffsets[targets[1].Id], second.DobjOffset);
+        Assert.Equal(split.GeneratedDobjOffsets[targets[1].Id], second.DobjOffset);
         Assert.NotEqual(first.DobjOffset, second.DobjOffset);
         Assert.Equal(0, first.PobjIndex); Assert.Equal(0, second.PobjIndex);
         var splitReader = new ArchiveDataReader(splitLayout);
@@ -184,7 +187,7 @@ public class ModelEditingTests
 
         foreach (var target in targets)
         {
-            var deleted = new ArchiveLayout(ModelDeletionWriter.Write(source.Layout, target));
+            var deleted = ApplyGraph(source.Layout, identity, catalog, [], [target.Id]);
             identity.WithoutPobjs([target.Id]).RequireUnchanged(
                 ModelIdentity.Capture(deleted, catalog));
             var survivors = ModelEditing.SelectAll(deleted, ModelIdentity.Capture(deleted, catalog))
@@ -194,11 +197,22 @@ public class ModelEditingTests
             Assert.Equal(0, survivors[0].PobjIndex);
         }
 
-        ArchiveLayout bothDeleted = source.Layout;
-        foreach (var target in targets.OrderByDescending(target => target.PobjIndex))
-            bothDeleted = new(ModelDeletionWriter.Write(bothDeleted, target));
+        var bothDeleted = ApplyGraph(source.Layout, identity, catalog, [],
+            targets.Select(target => target.Id));
         identity.WithoutPobjs(targets.Select(target => target.Id)).RequireUnchanged(
             ModelIdentity.Capture(bothDeleted, catalog));
+    }
+
+    private static ArchiveLayout ApplyGraph(ArchiveLayout source,
+        ModelIdentitySnapshot identity, ModelIdentityCatalog catalog,
+        IEnumerable<string> splitIds, IEnumerable<string> deletedIds)
+    {
+        var plan = ModelGraphPlanner.Plan(identity, splitIds, deletedIds);
+        var builder = new ArchiveMutationBuilder(source);
+        ModelGraphEditor.Apply(builder, identity, plan);
+        var output = builder.BuildLayout();
+        ModelGraphVerifier.Verify(plan, ModelIdentity.Capture(output, catalog));
+        return output;
     }
 
     [GrGdFixtureFact]
@@ -283,7 +297,7 @@ public class ModelEditingTests
                     && target.DobjIndex == 2).OrderBy(target => target.PobjIndex).ToArray();
             Assert.Contains(MaterialProperties.Select(source.Layout, identity),
                 material => material.Id == targets[1].Id);
-            var edits = new MaterialPropertyEdits(2,
+            var edits = new MaterialPropertyEdits(SessionExtractor.ProtocolVersion,
                 [new MaterialPropertyEdit(targets[1].Id, Ambient: [1, 2, 3])]);
             File.WriteAllText(Path.Combine(directory, "edits/materials.json"),
                 JsonSerializer.Serialize(edits, Json));
@@ -325,7 +339,7 @@ public class ModelEditingTests
         var lines = c.GetProperty("lines").EnumerateArray().Select(l => new CollisionEditLine(l.GetProperty("id").GetString()!,
             l.GetProperty("vertex0Id").GetString()!, l.GetProperty("vertex1Id").GetString()!, l.GetProperty("jointId").GetString()!,
             l.GetProperty("category").GetString()!, l.GetProperty("highFlags").GetUInt16(), l.GetProperty("lowFlags").GetUInt16())).ToArray();
-        File.WriteAllText(Path.Combine(session.Directory, "edits/collision.json"), JsonSerializer.Serialize(new CollisionEdits(2, "game", vertices, lines), Json));
+        File.WriteAllText(Path.Combine(session.Directory, "edits/collision.json"), JsonSerializer.Serialize(new CollisionEdits(SessionExtractor.ProtocolVersion, "game", vertices, lines), Json));
         var result = SessionApplier.Apply(session.Directory, session.Output);
         Assert.True(result.CollisionChanged && result.ModelChanged);
         Assert.Contains(new CollisionVertex(vertices[0].X, vertices[0].Y), CollisionData.Read(new StageArchive(session.Output).Layout).Vertices);
@@ -344,8 +358,10 @@ public class ModelEditingTests
         Assert.True(targets.Length > 1);
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(session.Directory, "stage.json")));
         Assert.Equal(targets.Select(t => t.Id), manifest.RootElement.GetProperty("editableMeshes")
-            .EnumerateArray().Where(t => !t.GetProperty("positionsOnly").GetBoolean()).Select(t => t.GetProperty("id").GetString()));
-        var edits = new ModelEdits(2, "game-joint-local", targets.Select(t => Triangle(t.Id).Meshes[0]).ToArray());
+            .EnumerateArray().Where(t => t.GetProperty("operationCapabilities")
+                .GetProperty("topologyReplacement").GetProperty("allowed").GetBoolean())
+            .Select(t => t.GetProperty("id").GetString()));
+        var edits = new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", targets.Select(t => Triangle(t.Id).Meshes[0]).ToArray());
         session.Write(edits);
         var result = SessionApplier.Apply(session.Directory, session.Output);
         Assert.Equal(targets.Length, result.ModelTriangles);
@@ -385,7 +401,7 @@ public class ModelEditingTests
             originals[i].Positions.Select(p => p with { Y = p.Y + 1.25f }).ToArray(), originals[i].TriangleIndices)).ToArray();
         // Mix the two paths in the same transaction.
         meshes[^1] = Triangle(targets[^1].Id).Meshes[0];
-        session.Write(new(2, "game-joint-local", meshes));
+        session.Write(new(SessionExtractor.ProtocolVersion, "game-joint-local", meshes));
         SessionApplier.Apply(session.Directory, session.Output);
         var output = new StageArchive(session.Output);
         for (int i = 0; i < targets.Length - 1; i++)
@@ -411,7 +427,7 @@ public class ModelEditingTests
         Vector3Data[] points = [new(0, 0, 0), new(2, 0, 0), new(2, 2, 0), new(0, 2, 0)];
         int[] indices = [0, 1, 2, 0, 0, 1, 0, 2, 3];
         Vector2Data[] uvs = [new(0, 0), new(1, 0), new(1, 1), new(9, 9), new(9, 9), new(9, 9), new(0.25f, 0), new(1, 1), new(0, 1)];
-        var edit = new ModelEdits(2, "game-joint-local", [new(session.Target.Id, points, indices, material.Id, uvs)]);
+        var edit = new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [new(session.Target.Id, points, indices, material.Id, uvs)]);
         session.Write(edit);
         SessionApplier.Apply(session.Directory, session.Output);
         var output = new StageArchive(session.Output);
@@ -449,7 +465,7 @@ public class ModelEditingTests
         var target = targets.Single(t => t.Id == material.Id);
         var original = GxMeshDecoder.Decode(session.Source.Layout, target.PobjOffset);
         var uv = original.TriangleIndices.Select(i => original.TexCoords0![i] with { X = original.TexCoords0[i].X + 0.125f }).ToArray();
-        var edit = new ModelEdits(2, "game-joint-local", [new(target.Id, original.Positions, original.TriangleIndices, material.Id, uv)]);
+        var edit = new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [new(target.Id, original.Positions, original.TriangleIndices, material.Id, uv)]);
         session.Write(edit); SessionApplier.Apply(session.Directory, session.Output);
         var output = new StageArchive(session.Output);
         int culling = new ArchiveDataReader(session.Source.Layout).UShort(target.PobjOffset + 12) & 0xC000;
@@ -460,15 +476,18 @@ public class ModelEditingTests
     }
 
     [PrimaryFixtureFact]
-    public void OldSessionsRemainCollisionOnlyAndTargetsAreRecomputed()
+    public void OldSessionSchemaRequiresFreshExtraction()
     {
-        using var session = new Fixture(); session.Write(Triangle(session.Target.Id));
+        using var session = new Fixture();
         string path = Path.Combine(session.Directory, "stage.json"); var manifest = JsonNode.Parse(File.ReadAllText(path))!;
-        manifest.AsObject().Remove("editableMeshes"); manifest.AsObject().Remove("editableMesh"); File.WriteAllText(path, manifest.ToJsonString());
-        Assert.Equal("MODEL_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
-        File.Delete(Path.Combine(session.Directory, "edits/models.json"));
-        SessionApplier.Apply(session.Directory, session.Output);
-        Assert.Equal(session.Source.Layout.Bytes, File.ReadAllBytes(session.Output));
+        manifest["protocolVersion"] = 2;
+        manifest["schemaVersion"] = 1;
+        File.WriteAllText(path, manifest.ToJsonString());
+        var error = Assert.Throws<StageException>(() =>
+            SessionApplier.Apply(session.Directory, session.Output));
+        Assert.Equal("SESSION_VERSION", error.Code);
+        Assert.Contains("re-extract", error.Message);
+        Assert.False(File.Exists(session.Output));
     }
 
     [PrimaryFixtureFact]
@@ -480,19 +499,24 @@ public class ModelEditingTests
         Assert.DoesNotContain(ModelMaterials.Select(session.Source.Layout, targets), m => m.Id == target.Id);
         var original = GxMeshDecoder.Decode(session.Source.Layout, target.PobjOffset);
         var move = new ModelEdit(target.Id, original.Positions.Select(p => p with { X = p.X + 2 }).ToArray(), original.TriangleIndices);
-        session.Write(new(2, "game-joint-local", [move]));
+        session.Write(new(SessionExtractor.ProtocolVersion, "game-joint-local", [move]));
         SessionApplier.Apply(session.Directory, session.Output);
         var saved = File.ReadAllBytes(session.Output);
         string path = Path.Combine(session.Directory, "stage.json");
         var manifest = JsonNode.Parse(File.ReadAllText(path))!;
-        foreach (var entry in manifest["editableMeshes"]!.AsArray()) entry!["positionsOnly"] = false;
+        foreach (var entry in manifest["editableMeshes"]!.AsArray())
+        {
+            entry!["operationCapabilities"]!["topologyReplacement"]!["allowed"] = true;
+            entry["operationCapabilities"]!["materialAssignment"]!["allowed"] = true;
+            entry["operationCapabilities"]!["uvEditing"]!["allowed"] = true;
+        }
         File.WriteAllText(path, manifest.ToJsonString());
         var reversed = original.TriangleIndices.Reverse().ToArray();
         foreach (var invalid in new[] { Triangle(target.Id).Meshes[0], move with { TriangleIndices = reversed },
             move with { UseGreyMaterial = true }, move with { SourceMaterialId = session.Target.Id },
             move with { TexCoords = [new(0, 0)] } })
         {
-            session.Write(new(2, "game-joint-local", [invalid]));
+            session.Write(new(SessionExtractor.ProtocolVersion, "game-joint-local", [invalid]));
             Assert.Equal("MODEL_POSITION_ONLY", Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
             Assert.Equal(saved, File.ReadAllBytes(session.Output));
         }
@@ -518,8 +542,11 @@ public class ModelEditingTests
                 nodes.AddRange(group.RootElement.GetProperty("nodes").Deserialize<ModelIdentityNode[]>(Json)!);
             }
             Catalog = ModelIdentityCatalog.Restore(nodes); Identity = ModelIdentity.Capture(Source.Layout, Catalog);
-            Target = ModelEditing.Select(Source.Layout, Identity)!; Assert.NotNull(Target);
-            Assert.Equal(Target.Id, manifest.RootElement.GetProperty("editableMesh").GetProperty("id").GetString());
+            Target = ModelSourceSnapshot.Capture(Source.Layout, Identity).EditableModels
+                .First(target => target.GroupIndex == 3 && target.JobjIndex == 1
+                    && target.DobjIndex == 0 && target.PobjIndex == 0);
+            Assert.Contains(manifest.RootElement.GetProperty("editableMeshes").EnumerateArray(),
+                entry => entry.GetProperty("id").GetString() == Target.Id);
         }
         public void Write(ModelEdits edits) => File.WriteAllText(Path.Combine(Directory, "edits/models.json"), JsonSerializer.Serialize(edits, Json));
         public void Dispose() => System.IO.Directory.Delete(Root, true);

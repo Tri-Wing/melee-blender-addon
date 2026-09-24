@@ -117,7 +117,7 @@ def fingerprint(obj, protect_all=False):
                        for f in mesh.polygons] if mesh.uv_layers.active else None
     if protect_all:
         return digest({'slots': slots, 'materials': assignments, 'uvs': coordinates})
-    # Untagged Blender materials retain the legacy grey export behavior.
+    # Untagged Blender materials select grey export.
     return digest({'materials': assignments, 'uvs': coordinates}) if any(assignments) else digest(None)
 
 

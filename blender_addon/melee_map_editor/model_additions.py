@@ -9,7 +9,7 @@ import bpy
 import bmesh
 from mathutils import Matrix
 
-from .protocol import StageError
+from .protocol import SESSION_PROTOCOL, StageError
 from .transforms import AXES
 from . import lighting, surface
 
@@ -752,6 +752,6 @@ def edits(scene, stage):
         'images': len(image_records), 'textureBytes': sum(len(value) for value in assets.values()),
         'imageDimensions': [f"{image['width']}×{image['height']}" for image in image_records],
         'warnings': sorted(set(warnings))})
-    return {'protocolVersion': 2, 'modelAdditionSchemaVersion': 2,
+    return {'protocolVersion': SESSION_PROTOCOL, 'modelAdditionSchemaVersion': 2,
         'coordinateSpace': 'game-joint-local', 'additions': addition_records,
         'materials': material_records, 'images': image_records}, assets

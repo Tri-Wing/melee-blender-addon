@@ -18,7 +18,7 @@ public class VertexColorEditingTests
         var colors = original.TriangleIndices.Select(i => original.Colors0![i]).ToArray();
         colors[0] = new(.1f, .3f, .5f, .7f);
         var edit = new ModelEdit(target.Id, original.Positions, original.TriangleIndices, Colors0: colors);
-        f.Write("models", new ModelEdits(2, "game-joint-local", [edit]));
+        f.Write("models", new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [edit]));
         Assert.True(SessionApplier.Apply(f.Session, f.Output).ModelChanged);
         byte[] saved = File.ReadAllBytes(f.Output);
         var output = new StageArchive(f.Output);
@@ -36,7 +36,7 @@ public class VertexColorEditingTests
             edit with { TriangleIndices = original.TriangleIndices.Reverse().ToArray() }
         })
         {
-            f.Write("models", new ModelEdits(2, "game-joint-local", [invalid]));
+            f.Write("models", new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [invalid]));
             Assert.Throws<StageException>(() => SessionApplier.Apply(f.Session, f.Output));
             Assert.Equal(saved, File.ReadAllBytes(f.Output));
         }
@@ -52,7 +52,7 @@ public class VertexColorEditingTests
         Assert.True(definition.UseVertexColor);
         Assert.True(definition.CanToggleVertexColor);
         uint renderFlags = definition.RenderFlags | (1u << 2) | (1u << 29);
-        f.Write("materials", new MaterialPropertyEdits(2,
+        f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion,
             [new(target.Id, [24, 80, 160], .375f, UseVertexColor: false,
                 RenderFlags: renderFlags, TransparencyMode: 1, AlphaSource: 1)]));
         Assert.True(SessionApplier.Apply(f.Session, f.Output).MaterialChanged);

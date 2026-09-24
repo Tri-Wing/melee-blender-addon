@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-grgd-') as temporary:
                          if info['groupIndex'] == 2 and info['jobjIndex'] == 7
                          and info['dobjIndex'] == 2), key=lambda info: info['pobjIndex'])
     assert len(multi_pobj) == 2
-    assert all(not info['positionsOnly'] and info['sharesDobj'] for info in multi_pobj)
+    assert all(modeling.allows(info, 'topologyReplacement') for info in multi_pobj)
     split_obj = modeling.target_object(bpy.context.scene, multi_pobj[1])
     assert split_obj.name.startswith(
         'Editable Model - Group 002 JOBJ 007 DOBJ 002 POBJ 001')
@@ -85,9 +85,8 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-grgd-') as temporary:
     retained = next(info for info in same_joint if info['dobjIndex'] == 2)
     separated = max(same_joint, key=lambda info: info['dobjIndex'])
     separated_mesh = read(temporary / 'split-reimport' / separated['file'])
-    assert retained['pobjIndex'] == 0 and not retained['sharesDobj']
+    assert retained['pobjIndex'] == 0
     assert separated['dobjIndex'] != 2 and separated['pobjIndex'] == 0
-    assert not separated['sharesDobj']
     assert len(separated_mesh['positions']) == 3
     assert len(separated_mesh['triangleIndices']) == 3
 

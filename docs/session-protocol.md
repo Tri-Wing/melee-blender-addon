@@ -1,7 +1,7 @@
-# Session protocol v2
+# Session protocol v3
 
-The CLI's process-result envelope remains version 1. Editing sessions use version
-2; older sessions must be re-extracted before `apply`.
+The CLI's process-result envelope remains version 1. Editing sessions use protocol
+3 and manifest schema 2. Older sessions must be re-extracted before `apply`.
 
 ```sh
 meleemap extract <input.dat> --session <new-directory>
@@ -47,7 +47,7 @@ The addition document is strictly validated using this shape:
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "modelAdditionSchemaVersion": 2,
   "coordinateSpace": "game-joint-local",
   "additions": [{
@@ -99,8 +99,8 @@ contains no special addition tag.
 
 ## Manifest and protected identity
 
-`stage.json` declares `protocolVersion: 2`, `assetType: "melee-stage"`,
-`schemaVersion: 1`, source filename/hash/DAT version, public roots and external
+`stage.json` declares `protocolVersion: 3`, `assetType: "melee-stage"`,
+`schemaVersion: 2`, source filename/hash/DAT version, public roots and external
 references, group count/file inventory, capabilities, warnings, deferred meshes,
 and `baselineFiles` containing SHA-256 hashes of every extracted JSON payload.
 Paths are relative to the session. `selectedMesh` retains the first decoded mesh
@@ -161,7 +161,7 @@ Dynamic lines/attachments are read-only.
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "coordinateSpace": "game",
   "vertices": [
     { "id": "<existing-or-new-UUID>", "x": 0.0, "y": 0.0 }
@@ -215,6 +215,23 @@ and unrelated raw data bytes remain unchanged. Old buffers remain in the archive
 output size therefore grows. This narrow path is separate from HSDRaw's general
 preservation round-trip writer and avoids relocating model/opaque structures.
 
+Model edits use a shared checked archive mutation builder. Geometry, material,
+split/delete, and addition paths allocate through that builder; model-list
+membership is written by one graph editor. Pointer changes add or remove their
+internal relocation entries at the same time, while external-reference chain
+fields remain distinct and are preserved with the public root/reference tail.
+Only explicitly declared source fields may be patched. Detached descriptors remain
+in the data section, but obsolete list links and their relocations are cleared so
+fresh extraction does not reinterpret a deleted or moved POBJ as shared.
+
+Apply composes collision, static light, JOBJ transform, and joint-animation
+domains in memory before executing the complete model plan. Model graph changes,
+geometry, material copy-on-write, and additions then share one builder. The
+temporary DAT is reloaded once and every domain is verified against its validated
+request before the destination is replaced. With no edit documents, apply
+requires byte-for-byte equality with `source.dat`; repeated exports always begin
+from that immutable snapshot rather than the previous output.
+
 ## Example: move one vertex
 
 After extraction, run this with the session path, then call `apply`:
@@ -226,7 +243,7 @@ from pathlib import Path
 session = Path("/tmp/GrNLa-session")
 source = json.loads((session / "collision/collision.json").read_text())
 edit = {
-    "protocolVersion": 2,
+    "protocolVersion": 3,
     "coordinateSpace": "game",
     "vertices": [{"id": v["id"], **v["position"]} for v in source["vertices"]],
     "lines": [
@@ -245,26 +262,32 @@ required for the POC acceptance criteria. The [Blender add-on](blender-addon.md)
 now creates these edits from an imported scene; it leaves baseline files intact
 and removes its temporary edit payload after each apply attempt.
 
-## Model edits (additive v2 capability)
+## Model edits and capabilities
 
 New sessions set `capabilities.modelEdit` and list supported rigid targets in
 `editableMeshes`. Each entry contains `id`, `groupIndex`, `jobjIndex`, `dobjIndex`,
-`pobjIndex`, `positionsOnly`, `sharesDobj`, baseline `file`, topology-replacement
+`pobjIndex`, baseline `file`, topology-replacement
 `representation: "opaque-grey-flat-shaded"`, and
-`maxTriangles: 14000`. Mesh payloads also contain `editable`, `readOnlyReason`, and optional `texCoords0`
+`maxTriangles: 14000`. Each editable entry and mesh payload also includes
+`operationCapabilities`, with separate `allowed`, `reasonCode`, and `reason`
+values for vertex movement, topology replacement, UV editing, vertex-color
+editing, material assignment, material-property editing, and whole-object
+deletion. These permissions are derived from the immutable source graph and
+animation/material facts; clients cannot enable an operation by changing the
+manifest. Mesh payloads also contain `editable`, `readOnlyReason`, and optional `texCoords0`
 (one game-space UV per decoded vertex). `modelMaterials` advertises reusable
 static opaque materials by donor mesh ID, display name, source MOBJ offset, and
 `usesUv`. Source offsets are informational; apply recomputes the catalog.
-The legacy `editableMesh` field remains as a single-target compatibility alias.
-Old sessions with only this alias remain single-target; sessions without either
-field remain collision-only. `selectedMesh` is only a preview selection.
+`editableMeshes` is the only editable-model declaration. `selectedMesh` is only
+a preview selection and cannot authorize an edit. A missing capability map or an
+older singular declaration is a version error requiring a fresh DAT import.
 
 `edits/models.json` uses this shape (`protocolVersion`, `coordinateSpace`, and
 `meshes` are required):
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "coordinateSpace": "game-joint-local",
   "meshes": [{
     "id": "<editableMeshes entry id>",
@@ -293,9 +316,9 @@ values at shared vertex indices support seams. Mixed-material faces must be
 resolved by the adapter before submission; this protocol has one material per
 editable DOBJ.
 
-`sharesDobj` reports that the source POBJ is one member of a multi-POBJ DOBJ.
-It is informational; apply recomputes the relationship. Position-only edits keep
-that source structure. Before a topology, material-assignment, or material-property
+Apply derives DOBJ sharing directly from the protected source graph; it is not a
+client-supplied permission or manifest flag. Vertex-only edits keep that source
+structure. Before a topology, material-assignment, or material-property
 edit, apply moves the affected POBJ into an appended one-POBJ DOBJ under the same
 JOBJ. The new DOBJ initially retains the shared source MOBJ, after which normal
 copy-on-write material processing can change it without affecting siblings. If
@@ -367,7 +390,7 @@ corresponding `group.json` joint records include `editable` and a
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "coordinateSpace": "game-jobj-local",
   "jobjs": [{
     "id": "<editableJobjs entry id>",
@@ -427,7 +450,7 @@ When native curves change, Blender emits `edits/animations.json`:
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "coordinateSpace": "game-jobj-animation",
   "nodes": [
     {
@@ -481,7 +504,7 @@ all original material animation descriptors and buffers byte-for-byte.
 ### Read-only texture preview assets
 
 New `modelMaterials` entries include `preview: { color, texture, textures, warning }`.
-`texture` remains the first-layer compatibility alias. `textures` stores the
+`texture` is the first-layer convenience view. `textures` stores the
 ordered TObj layers; each contains its `file`, dimensions, wrap modes, repeats,
 source SRT, color operation/blend, UV-channel index, `coordinateType`, and
 `lightmapFlags`. A texture's optional `tev` object stores a custom ADD/SUB color
@@ -491,8 +514,8 @@ coordinates from the camera-space surface normal. The lightmap field preserves
 the HSD diffuse, specular, ambient, extension, and shadow routing bits (`0x10`
 through `0x100`).
 Decoded top-left BGRA TGA files live under `models/textures/` and participate in
-`baselineFiles` hashes alongside model/collision JSON. Existing sessions without
-preview fields remain valid. Preview assets never supply DAT texture data.
+`baselineFiles` hashes alongside model/collision JSON. Preview assets never
+supply DAT texture data.
 
 The reader accepts tiled GX I4/I8/IA4/IA8/RGB565/RGB5A3/RGBA8/CI4/CI8/CI14X2/CMPR
 images, checks data/palette bounds, decodes padded tiles and crops to logical
@@ -506,15 +529,16 @@ visual aids and are not used by apply.
 
 ### Animated-material rigid meshes
 
-Each `editableMeshes` entry now includes an additive `positionsOnly` boolean
-(default false for older sessions). When true, edits must retain the original
-vertex count and ordered triangle indices and omit `sourceMaterialId`,
+For meshes whose source material is animated, `vertexMovement` and
+`wholeObjectDeletion` remain allowed while topology, UV, material assignment,
+and material-property capabilities carry denial reasons. Edits must retain the
+original vertex count and ordered triangle indices and omit `sourceMaterialId`,
 `texCoords`, and `useGreyMaterial` (or leave the latter false). The backend
-recomputes this restriction from the immutable source, independently of the
-manifest. Violations fail with `MODEL_POSITION_ONLY` before output is written.
-The position writer preserves every non-position vertex attribute, source
-material pointer and animation record. These meshes are excluded from the
-reusable static material catalog. Existing sessions keep their declared targets.
+recomputes the restriction from immutable source facts; changing capability JSON
+cannot grant it. Violations fail with `MODEL_POSITION_ONLY` before output is
+written. The position writer preserves every non-position vertex attribute,
+source material pointer, and animation record. These meshes are excluded from
+the reusable static material catalog.
 
 `modelPreviews` contains base-material previews for imported meshes outside the
 export material catalog, keyed by mesh ID. This includes static vertex-color
@@ -558,7 +582,7 @@ three-byte `color`, game-space `position`, and game-space `interest` fields:
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "lights": [
     {"id": "group-003-light-001", "enabled": true,
      "color": [180, 220, 255], "position": {"x": 0, "y": -20, "z": 0}}
@@ -652,15 +676,16 @@ ambient/specular RGB, shininess, material alpha, independent alpha source,
 MOBJ render flags, the editable flag mask, standard transparency mode, and an
 ordered `textures` list. Each texture entry records its source offset, lightmap
 role, coordinate source, color/alpha operations, blend value, and blend-edit
-permission. The legacy first-layer `textureBlend` fields remain for compatibility. Legacy
-sessions without this catalog retain their old permissions.
+permission. The scalar `textureBlend` field is the first-layer convenience value;
+the ordered `textures` list is authoritative for multilayer materials. Sessions
+without the current catalog are rejected by the session version check.
 
 `edits/materials.json` accepts only the current protocol and a nonempty material
 list, for example:
 
 ```json
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "materials": [
     {"id": "<source-mesh-id>", "ambient": [64, 64, 70],
      "diffuse": [30, 100, 210], "specular": [255, 255, 255],

@@ -8,7 +8,8 @@ public sealed record ExtractionResult(string SessionDirectory, int ModelGroups, 
 
 public static class SessionExtractor
 {
-    public const int ProtocolVersion = 2;
+    public const int ProtocolVersion = 3;
+    public const int SchemaVersion = 2;
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
 
     /// <summary>Extract a complete identity/collision session and every supported polygon.
@@ -24,10 +25,14 @@ public static class SessionExtractor
         var lighting = StageLightingReader.Read(stage.Layout);
         var atmosphere = StageAtmosphereReader.Read(stage.Layout, lighting.PreviewSetId);
         var camera = StageCameraReader.Read(stage.Layout);
-        var editableModels = ModelEditing.SelectAll(stage.Layout, identity, out var readOnlyReasons);
+        var modelSnapshot = ModelSourceSnapshot.Capture(stage.Layout, identity);
+        var editableModels = modelSnapshot.EditableModels.ToArray();
+        var readOnlyReasons = modelSnapshot.Models.Values
+            .Where(model => model.ReadOnlyReason != null)
+            .ToDictionary(model => model.Pobj.Id, model => model.ReadOnlyReason!,
+                StringComparer.Ordinal);
         var editableJobjs = JobjEditing.Select(stage.Layout, identity, out var jobjReadOnlyReasons);
         var modelAdditionTargets = ModelAddition.Select(stage, identity);
-        var editable = ModelEditing.Select(stage.Layout, identity) ?? editableModels.FirstOrDefault();
         var reader = new ArchiveDataReader(stage.Layout);
         var meshes = new List<(ModelIdentityNode Node, MeshData Mesh)>();
         var deferredMeshes = new List<object>();
@@ -101,6 +106,7 @@ public static class SessionExtractor
                     pobjIndex = node.Index, sourceOffset = node.SourceOffset, coordinateSpace = "game", representation = "untextured-grey",
                     pobjFlags = reader.UShort(node.SourceOffset + 12),
                     editable = editableModels.Any(t => t.Id == node.Id),
+                    operationCapabilities = modelSnapshot.Models[node.Id].Capabilities,
                     readOnlyReason = mesh.Envelopes != null ? "Envelope geometry editing is not supported yet."
                         : mesh.BoundJobjSourceOffset != null ? "Shared-joint binding is not supported yet."
                         : readOnlyReasons.GetValueOrDefault(node.Id),
@@ -135,7 +141,7 @@ public static class SessionExtractor
                     readOnly = true, source = a
                 })
             });
-            var previewMaterials = ModelMaterials.Select(stage.Layout, editableModels).Select(material => new
+            var previewMaterials = modelSnapshot.Materials.Select(material => new
             {
                 material.Id, material.Name, material.MobjOffset, material.UsesUv,
                 preview = TexturePreview.Extract(stage.Layout, material, temporary),
@@ -143,7 +149,7 @@ public static class SessionExtractor
             }).ToArray();
             // Preview-only materials never enter the reusable export material catalog.
             var catalogIds = previewMaterials.Select(m => m.Id).ToHashSet();
-            var editableMaterialProperties = MaterialProperties.Select(stage.Layout, identity);
+            var editableMaterialProperties = modelSnapshot.EditableMaterialProperties;
             var editableMaterialIds = editableMaterialProperties.Select(material => material.Id).ToHashSet();
             var editableModelsById = editableModels.ToDictionary(model => model.Id);
             var nodesById = identity.Nodes.ToDictionary(n => n.Id);
@@ -172,7 +178,7 @@ public static class SessionExtractor
                 .Select(path => new { file = Path.GetRelativePath(temporary, path).Replace('\\', '/'), sha256 = SessionApplier.Hash(File.ReadAllBytes(path)) }).ToArray();
             Write("stage.json", new
             {
-                protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = 1,
+                protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = SchemaVersion,
                 source = new { file = "source.dat", filename = info.Filename, sha256 = info.Sha256, datVersion = info.DatVersion },
                 publicRoots = info.Roots, externalReferences = info.References,
                 lighting, atmosphere, camera,
@@ -210,11 +216,9 @@ public static class SessionExtractor
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
-                    e.DobjIndex, e.PobjIndex, e.PositionsOnly, e.SharesDobj, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
+                    e.DobjIndex, e.PobjIndex, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
+                    operationCapabilities = modelSnapshot.Models[e.Id].Capabilities,
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),
-                editableMesh = editable == null ? null : new { editable.Id, editable.GroupIndex, editable.JobjIndex,
-                    editable.DobjIndex, editable.PobjIndex, editable.PositionsOnly, editable.SharesDobj, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
-                    representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles },
                 selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings, baselineFiles
             });
             Directory.Move(temporary, directory);

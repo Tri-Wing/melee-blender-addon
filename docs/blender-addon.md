@@ -79,7 +79,8 @@ again. It does not move or delete an installed ZIP, create symlinks, or save a
 machine-specific repository path in your preferences. Keep the loader open in
 the Text Editor for quick access. Saving your `.blend` before reloading unfinished
 code is useful: a Python error can leave the add-on disabled until you fix it and
-run the loader again. Large scene-schema changes may still require re-importing.
+run the loader again. Session or scene-schema changes require a fresh DAT import;
+the add-on reports this instead of migrating older scenes.
 
 Backend C# changes still need `dotnet build MeleeMap.sln`; the CLI runs as a new
 process on each operation, so it does not need a Blender restart. To test the
@@ -305,9 +306,10 @@ model is rejected.
 
 1. Reload the add-on or launch with `scripts/launch_blender.sh`. The development
    backend must be rebuilt after C# updates (`dotnet build MeleeMap.sln`).
-2. **Import the DAT into a new Blender scene.** Existing scenes retain their old
-   protection rules. To carry over collision work, export your current stage
-   first, then import that edited DAT. Keep the old `.blend` and session as needed.
+2. **Import the DAT into a new Blender scene.** Protocol v3/schema v2 sessions
+   carry per-model operation capabilities. Older sessions and saved scene
+   bookkeeping are not migrated. To carry over work, export it with its matching
+   build first, then import that edited DAT.
 3. Select an **Editable Model**, then click **Edit Selected Model** to enter
    Edit Mode. The sidebar displays the selected model's edit status.
 4. Move vertices. For fully editable models, use native Blender mesh tools to add/delete faces and replace
@@ -327,16 +329,11 @@ and parenting unchanged. Material slots brought in by Join are accepted; all
 joined geometry can use a supported stage material or the grey fallback. Separate objects are
 not exported until joined into the supported model.
 
-Scenes already imported with an editable model can use this Join fix after
-reloading the add-on; no re-import is required. Older collision-only scenes still
-need the new-scene import described above to enable model editing.
-
 **Moving vertices without changing topology preserves the source appearance in
 game:** material, textures, UVs, vertex colors, normals, transparency, and culling
-remain intact. This works with existing editable scenes after reloading the
-add-on and rebuilding/updating the backend; no re-import is needed. Source normals
-are retained exactly rather than recalculated, so large shape changes may need
-future normal-editing support. Supported stage materials now have texture previews.
+remain intact. Source normals are retained exactly rather than recalculated, so
+large shape changes may need future normal-editing support. Supported stage
+materials have texture previews.
 
 **Changing topology** (adding/joining shapes, deleting faces, splitting or merging
 vertices, or changing indexed faces) exports generated flat normals and back-face

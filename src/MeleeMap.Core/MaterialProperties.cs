@@ -24,14 +24,19 @@ public sealed record MaterialPropertyWrite(byte[] Bytes, Dictionary<string, int>
 /// <summary>Copy-on-write static material properties, leaving source/shared/animated data intact.</summary>
 public static class MaterialProperties
 {
+    private const string Owner = "model-material";
     // Texture bits, source selectors and undocumented bits remain protected.
     public const uint EditableRenderFlagsMask = 0xBF00100C;
 
     public static EditableMaterialProperties[] Select(ArchiveLayout archive, ModelIdentitySnapshot identity)
+        => Select(archive, ModelSourceSnapshot.Capture(archive, identity).EditableModels);
+
+    internal static EditableMaterialProperties[] Select(ArchiveLayout archive,
+        IEnumerable<EditableModel> editableModels)
     {
         var r = new ArchiveDataReader(archive);
         var result = new List<EditableMaterialProperties>();
-        foreach (var target in ModelEditing.SelectAll(archive, identity).Where(t => !t.PositionsOnly))
+        foreach (var target in editableModels.Where(t => !t.PositionsOnly))
         {
             int mobj = r.Pointer(target.DobjOffset + 8)!.Value;
             int? material = r.Pointer(mobj + 12), texture = r.Pointer(mobj + 8), pixel = r.Pointer(mobj + 20);
@@ -86,18 +91,19 @@ public static class MaterialProperties
         return result.ToArray();
     }
 
-    public static MaterialPropertyWrite Write(ArchiveLayout source, ArchiveLayout current,
-        ModelIdentitySnapshot identity, ModelIdentitySnapshot bindingIdentity,
-        MaterialPropertyEdits edits, string[] declaredIds,
-        IReadOnlyDictionary<string, string?> assignments)
+    public static IReadOnlyDictionary<string, EditableMaterialProperties> Validate(
+        MaterialPropertyEdits edits, IEnumerable<string> declaredIds,
+        IReadOnlyDictionary<string, string?> assignments,
+        IEnumerable<EditableMaterialProperties> editableMaterials)
     {
         Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.Materials is { Length: > 0 },
             "MATERIAL_EDIT_FORMAT", "Material edits require the current protocol and at least one material.");
-        var eligible = Select(source, identity).ToDictionary(m => m.Id);
-        var seen = new HashSet<string>();
+        var eligible = editableMaterials.ToDictionary(material => material.Id, StringComparer.Ordinal);
+        var declared = declaredIds.ToHashSet(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var edit in edits.Materials)
         {
-            Require(edit != null && edit.Id != null && seen.Add(edit.Id) && declaredIds.Contains(edit.Id)
+            Require(edit != null && edit.Id != null && seen.Add(edit.Id) && declared.Contains(edit.Id)
                 && eligible.ContainsKey(edit.Id), "MATERIAL_EDIT_TARGET", "Material is unsupported, animated, duplicated, or absent from this session.");
             var target = eligible[edit!.Id];
             Require(edit.Diffuse != null || edit.Alpha.HasValue || edit.TextureBlend.HasValue || edit.UseVertexColor.HasValue
@@ -137,18 +143,37 @@ public static class MaterialProperties
                 "MATERIAL_ALPHA_SOURCE", "Alpha source must be compatibility, material, vertex, or material times vertex.");
             Require(assignments.Values.Contains(edit.Id), "MATERIAL_NOT_USED", "Edited material is no longer used by exported geometry. Assign a supported stage material or retain the original topology.");
         }
-        using var data = new MemoryStream(); data.Write(current.Bytes.AsSpan(32, current.DataSize));
-        int oldCount = current.Read(8);
-        var relocations = Enumerable.Range(0, oldCount).Select(i => current.Read(32 + current.DataSize + i * 4)).ToList();
-        var blocks = new Dictionary<int, byte[]>();
+        return eligible;
+    }
+
+    public static MaterialPropertyWrite Write(ArchiveLayout source, ArchiveLayout current,
+        ModelIdentitySnapshot identity, ModelIdentitySnapshot bindingIdentity,
+        MaterialPropertyEdits edits, string[] declaredIds,
+        IReadOnlyDictionary<string, string?> assignments,
+        IReadOnlyList<EditableModel>? sourceTargets = null)
+    {
+        var builder = new ArchiveMutationBuilder(current);
+        return Write(source, builder, identity, bindingIdentity, edits, declaredIds,
+            assignments, sourceTargets);
+    }
+
+    internal static MaterialPropertyWrite Write(ArchiveLayout source,
+        ArchiveMutationBuilder builder, ModelIdentitySnapshot identity,
+        ModelIdentitySnapshot bindingIdentity, MaterialPropertyEdits edits,
+        string[] declaredIds, IReadOnlyDictionary<string, string?> assignments,
+        IReadOnlyList<EditableModel>? sourceTargets = null)
+    {
+        sourceTargets ??= ModelEditing.SelectAll(source, identity);
+        var eligible = Validate(edits, declaredIds, assignments,
+            Select(source, sourceTargets));
+        var writtenBlocks = new List<(int Offset, int Length)>();
         int Copy(int offset, int size, Action<byte[]> change)
         {
-            while (data.Position % 4 != 0) data.WriteByte(0);
-            int at = checked((int)data.Position);
-            var block = source.Bytes.AsSpan(32 + offset, size).ToArray();
-            change(block); data.Write(block); blocks.Add(at, block);
-            foreach (int field in source.Pointers.Keys.Where(f => f >= offset && f < offset + size))
-                relocations.Add(at + field - offset);
+            int at = builder.AppendCopy(source, offset, size, 4);
+            var block = builder.ReadBytes(at, size);
+            change(block);
+            builder.PatchBytes(at, block, Owner);
+            writtenBlocks.Add((at, size));
             return at;
         }
         var materials = new Dictionary<string, int>();
@@ -185,14 +210,16 @@ public static class MaterialProperties
                 int? next = null;
                 for (int i = original.Textures.Length - 1; i >= 0; i--)
                 {
-                    int nextValue = next ?? 0, index = i;
+                    int index = i;
                     next = Copy(original.Textures[i].Offset, 0x5C, block =>
-                    {
-                        Put(block, 4, nextValue);
-                        Put(block, 0x44, BitConverter.SingleToInt32Bits(blends[index]));
-                    });
+                        Put(block, 0x44, BitConverter.SingleToInt32Bits(blends[index])));
+                    if (i + 1 < original.Textures.Length)
+                        builder.SetPointer(next.Value + 4,
+                            // The following layer was copied in the previous iteration.
+                            tex!.Value, Owner);
+                    else builder.ClearPointer(next.Value + 4, Owner);
+                    tex = next;
                 }
-                tex = next;
             }
             bool depthFlagsChanged = edit.RenderFlags.HasValue
                 && ((edit.RenderFlags.Value ^ original.RenderFlags) & ((1u << 27) | (1u << 29))) != 0;
@@ -211,8 +238,6 @@ public static class MaterialProperties
                         && (finalFlags & (1u << 30)) != 0) ? 4 : 7);
                     return value;
                 }
-                while (data.Position % 4 != 0) data.WriteByte(0);
-                int at = checked((int)data.Position);
                 byte[] block = pixel.HasValue
                     ? source.Bytes.AsSpan(32 + pixel.Value, 12).ToArray()
                     : DefaultPixel();
@@ -231,36 +256,34 @@ public static class MaterialProperties
                         _ => ((byte)3, (byte)1, (byte)1)
                     };
                 }
-                data.Write(block); blocks.Add(at, block); pixel = at;
+                int at = builder.AppendAligned(block, 4);
+                writtenBlocks.Add((at, block.Length));
+                pixel = at;
             }
             int mobj = Copy(original.MobjOffset, 24, block =>
-            {
-                Put(block, 4, unchecked((int)finalFlags));
-                Put(block, 12, mat);
-                if (tex.HasValue) Put(block, 8, tex.Value);
-                if (pixel.HasValue) Put(block, 20, pixel.Value);
-            });
-            if (pixel.HasValue && !source.Pointers.ContainsKey(original.MobjOffset + 20))
-                relocations.Add(mobj + 20);
+                Put(block, 4, unchecked((int)finalFlags)));
+            builder.SetPointer(mobj + 12, mat, Owner);
+            if (tex.HasValue) builder.SetPointer(mobj + 8, tex.Value, Owner);
+            else builder.ClearPointer(mobj + 8, Owner);
+            if (pixel.HasValue) builder.SetPointer(mobj + 20, pixel.Value, Owner);
+            else builder.ClearPointer(mobj + 20, Owner);
             materials.Add(edit.Id, mobj);
         }
-        byte[] payload = data.ToArray(); var bindings = new Dictionary<string, int>(); var fields = new HashSet<int>();
+        var bindings = new Dictionary<string, int>();
         var bindingNodes = bindingIdentity.Nodes.ToDictionary(node => node.Id);
-        foreach (var target in ModelEditing.SelectAll(source, identity))
+        foreach (var target in sourceTargets)
             if (assignments.TryGetValue(target.Id, out string? id) && id != null && materials.TryGetValue(id, out int mobj))
             {
                 var pobj = bindingNodes[target.Id];
                 int dobjOffset = bindingNodes[pobj.OwnerId!].SourceOffset;
-                Put(payload, dobjOffset + 8, mobj); bindings.Add(target.Id, mobj);
-                fields.Add(dobjOffset + 8);
+                if (dobjOffset < builder.OriginalDataSize)
+                    builder.PermitSourcePatch(dobjOffset + 8, 4, Owner);
+                builder.SetPointer(dobjOffset + 8, mobj, Owner);
+                bindings.Add(target.Id, mobj);
             }
-        using var stream = new MemoryStream(); stream.Write(current.Bytes.AsSpan(0, 32)); stream.Write(payload);
-        foreach (int field in relocations) { byte[] value = new byte[4]; Put(value, 0, field); stream.Write(value); }
-        stream.Write(current.Bytes.AsSpan(32 + current.DataSize + oldCount * 4));
-        byte[] bytes = stream.ToArray(); Put(bytes, 0, bytes.Length); Put(bytes, 4, payload.Length); Put(bytes, 8, relocations.Count);
-        for (int i = 0; i < current.DataSize; i++)
-            Require(fields.Any(f => i >= f && i < f + 4) || bytes[32 + i] == current.Bytes[32 + i],
-                "MATERIAL_PRESERVATION", "Material writing changed unrelated source data.");
+        var blocks = writtenBlocks.ToDictionary(block => block.Offset,
+            block => builder.ReadBytes(block.Offset, block.Length));
+        byte[] bytes = builder.Build();
         var output = new MaterialPropertyWrite(bytes, bindings, blocks);
         Verify(new ArchiveLayout(bytes), bindingIdentity, output);
         return output;

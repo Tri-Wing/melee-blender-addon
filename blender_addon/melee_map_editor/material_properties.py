@@ -4,7 +4,7 @@ import math
 import struct
 from pathlib import Path
 from . import surface
-from .protocol import StageError
+from .protocol import SESSION_PROTOCOL, StageError
 
 TRANSPARENCY = {'OPAQUE': 0, 'ALPHA': 1, 'ADDITIVE': 2, 'SUBTRACT': 3, 'CUSTOM': 4}
 ALPHA_SOURCES = {'COMPATIBILITY': 0, 'MATERIAL': 1, 'VERTEX': 2, 'MULTIPLY': 3}
@@ -29,22 +29,6 @@ def byte(value):
 def initialize(material, entry, definition, directory, stage):
     definition = dict(definition)
     preview = entry.get('preview', {})
-    if 'useVertexColor' not in definition:
-        definition['useVertexColor'] = preview.get('useVertexColor', not definition.get('canEditDiffuse', True))
-        definition['canToggleVertexColor'] = definition['useVertexColor']
-    preview_alpha = preview.get('alpha', {})
-    if 'alphaSource' not in definition:
-        definition['alphaSource'] = (3 if preview_alpha.get('vertex') and preview_alpha.get('multiplyMaterial') else
-                                     2 if preview_alpha.get('vertex') else 1)
-    if 'transparencyMode' not in definition:
-        blend = preview_alpha.get('blendMode')
-        source = preview_alpha.get('sourceFactor')
-        destination = preview_alpha.get('destinationFactor')
-        definition['transparencyMode'] = (0 if blend == 0 else 1 if blend == 1 and source == 4 and destination == 5
-                                          else 2 if blend == 1 and source in (1, 4) and destination == 1
-                                          else 3 if blend == 3 else 4)
-        definition['renderFlags'] = None
-        definition['editableRenderFlagsMask'] = 0
     material['mme_material_definition'] = json.dumps(definition)
     material['mme_material_preview'] = json.dumps(entry['preview'])
     material['mme_material_directory'] = str(directory)
@@ -93,53 +77,6 @@ def initialize(material, entry, definition, directory, stage):
 
 def definition(material):
     info = json.loads(material.get('mme_material_definition', 'null')) if material else None
-    if info and 'useVertexColor' not in info:
-        preview = json.loads(material.get('mme_material_preview', '{}'))
-        info['useVertexColor'] = preview.get('useVertexColor', not info.get('canEditDiffuse', True))
-        info['canToggleVertexColor'] = info['useVertexColor']
-        material['mme_material_definition'] = json.dumps(info)
-    if info and 'transparencyMode' not in info:
-        preview = json.loads(material.get('mme_material_preview', '{}'))
-        alpha = preview.get('alpha', {})
-        blend, source, destination = (alpha.get(key) for key in ('blendMode', 'sourceFactor', 'destinationFactor'))
-        info['transparencyMode'] = (0 if blend == 0 else 1 if blend == 1 and source == 4 and destination == 5
-                                    else 2 if blend == 1 and source in (1, 4) and destination == 1
-                                    else 3 if blend == 3 else 4)
-        info['renderFlags'] = None
-        info['editableRenderFlagsMask'] = 0
-        material['mme_material_definition'] = json.dumps(info)
-    if info and 'alphaSource' not in info:
-        preview = json.loads(material.get('mme_material_preview', '{}'))
-        alpha = preview.get('alpha', {})
-        info['alphaSource'] = (3 if alpha.get('vertex') and alpha.get('multiplyMaterial') else
-                               2 if alpha.get('vertex') else 1)
-        material['mme_material_definition'] = json.dumps(info)
-    if info and not material.get('mme_vertex_mode_initialized'):
-        material['mme_material_updating'] = True
-        try:
-            material.mme_use_vertex_color = info['useVertexColor']
-            material['mme_vertex_mode_initialized'] = True
-        finally:
-            material['mme_material_updating'] = False
-    if info and not material.get('mme_alpha_source_initialized'):
-        material['mme_material_updating'] = True
-        try:
-            material.mme_alpha_source = next(name for name, value in ALPHA_SOURCES.items()
-                                             if value == info['alphaSource'])
-            material['mme_alpha_source_initialized'] = True
-        finally:
-            material['mme_material_updating'] = False
-    if info and not material.get('mme_render_settings_initialized'):
-        material['mme_material_updating'] = True
-        try:
-            material.mme_transparency = next(name for name, value in TRANSPARENCY.items()
-                                             if value == info['transparencyMode'])
-            if info['renderFlags'] is not None:
-                for name, bit in RENDER_FLAGS:
-                    setattr(material, name, bool(info['renderFlags'] & (1 << bit)))
-            material['mme_render_settings_initialized'] = True
-        finally:
-            material['mme_material_updating'] = False
     return info
 
 
@@ -212,8 +149,8 @@ def edits(scene, stage):
         if material.get('mme_material_error'):
             raise StageError(f"{material.name}: {material['mme_material_error']}")
         source = declared[key]
-        source_use_vertex_color = source.get('useVertexColor', baseline['useVertexColor'])
-        source_can_toggle = source.get('canToggleVertexColor', baseline['canToggleVertexColor'])
+        source_use_vertex_color = source['useVertexColor']
+        source_can_toggle = source['canToggleVertexColor']
         rgb = [byte(c) for c in material.mme_diffuse]
         ambient = [byte(c) for c in material.mme_ambient]
         specular = [byte(c) for c in material.mme_specular]
@@ -230,19 +167,19 @@ def edits(scene, stage):
             raise StageError('Material shininess must be finite and between zero and 128.')
         value = {'id': key}
         alpha_source = ALPHA_SOURCES[material.mme_alpha_source]
-        source_alpha_source = source.get('alphaSource', baseline['alphaSource'])
+        source_alpha_source = source['alphaSource']
         if alpha_source != source_alpha_source:
             if alpha_source in (2, 3) and not baseline['canToggleVertexColor']:
                 raise StageError('Vertex alpha requires an imported Stage Color 0 channel.')
             value['alphaSource'] = alpha_source
         transparency = TRANSPARENCY[material.mme_transparency]
-        source_transparency = source.get('transparencyMode', baseline['transparencyMode'])
+        source_transparency = source['transparencyMode']
         if transparency != source_transparency:
             if transparency == 4:
                 raise StageError('Custom transparency can be preserved but not created from a standard mode.')
             value['transparencyMode'] = transparency
-        source_flags = source.get('renderFlags', baseline.get('renderFlags'))
-        editable_mask = source.get('editableRenderFlagsMask', baseline.get('editableRenderFlagsMask', 0))
+        source_flags = source['renderFlags']
+        editable_mask = source['editableRenderFlagsMask']
         if source_flags is not None and editable_mask:
             render_flags = source_flags
             for name, bit in RENDER_FLAGS:
@@ -287,4 +224,4 @@ def edits(scene, stage):
         values_by_id[key] = value
     changed = [value for value in values_by_id.values() if len(value) > 1]
     changed.sort(key=lambda value: value['id'])
-    return {'protocolVersion': 2, 'materials': changed} if changed else None
+    return {'protocolVersion': SESSION_PROTOCOL, 'materials': changed} if changed else None

@@ -50,7 +50,7 @@ public class StageLightingTests
             StageLight Pick(string type) => before.LightSets.SelectMany(set => set.Lights).First(light => light.Type == type);
             var ambient = Pick("ambient"); var infinite = Pick("infinite");
             var point = Pick("point"); var spot = Pick("spot");
-            var edits = new StageLightEdits(2, [
+            var edits = new StageLightEdits(SessionExtractor.ProtocolVersion, [
                 new(ambient.Id, false, [12, 34, 56]),
                 new(infinite.Id, Position: new(1.25f, -2.5f, 3.75f)),
                 new(point.Id, Position: new(10, 20, 30)),
@@ -61,7 +61,7 @@ public class StageLightingTests
                 string material = manifest.RootElement.GetProperty("editableMaterialProperties").EnumerateArray()
                     .First(entry => entry.GetProperty("canEditDiffuse").GetBoolean()).GetProperty("id").GetString()!;
                 File.WriteAllText(Path.Combine(session, "edits/materials.json"),
-                    JsonSerializer.Serialize(new MaterialPropertyEdits(2, [new(material, [11, 22, 33])]), Json));
+                    JsonSerializer.Serialize(new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, [new(material, [11, 22, 33])]), Json));
             }
             var result = SessionApplier.Apply(session, output);
             Assert.True(result.LightChanged); Assert.False(result.CollisionChanged);
@@ -94,11 +94,11 @@ public class StageLightingTests
         string[] declared = lights.Select(light => light.Id).ToArray();
         void Reject(StageLightEdits edits, string code) => Assert.Equal(code,
             Assert.Throws<StageException>(() => StageLightEditing.Write(source.Layout, source.Layout, edits, declared)).Code);
-        Reject(new(2, []), "LIGHT_EDIT_FORMAT");
-        Reject(new(2, [new("missing", true)]), "LIGHT_EDIT_TARGET");
-        Reject(new(2, [new(ambient.Id, Color: [0, 1])]), "LIGHT_COLOR");
-        Reject(new(2, [new(ambient.Id, Position: new(1, 2, 3))]), "LIGHT_POSITION");
-        Reject(new(2, [new(ambient.Id)]), "LIGHT_EDIT_FORMAT");
-        Reject(new(2, [new(ambient.Id, Color: [0, 1, 256])]), "LIGHT_COLOR");
+        Reject(new(SessionExtractor.ProtocolVersion, []), "LIGHT_EDIT_FORMAT");
+        Reject(new(SessionExtractor.ProtocolVersion, [new("missing", true)]), "LIGHT_EDIT_TARGET");
+        Reject(new(SessionExtractor.ProtocolVersion, [new(ambient.Id, Color: [0, 1])]), "LIGHT_COLOR");
+        Reject(new(SessionExtractor.ProtocolVersion, [new(ambient.Id, Position: new(1, 2, 3))]), "LIGHT_POSITION");
+        Reject(new(SessionExtractor.ProtocolVersion, [new(ambient.Id)]), "LIGHT_EDIT_FORMAT");
+        Reject(new(SessionExtractor.ProtocolVersion, [new(ambient.Id, Color: [0, 1, 256])]), "LIGHT_COLOR");
     }
 }

@@ -3,25 +3,15 @@ import json
 from pathlib import Path
 import bpy
 import bmesh
-from .protocol import StageError, digest, read
+from .protocol import StageError, SESSION_PROTOCOL, digest, read
 from . import surface
 
-
-def target_info(scene):
-    return json.loads(scene.get('mme_editable_mesh', 'null'))
-
-
 def stage_targets(stage):
-    if 'editableMeshes' in stage:
-        return stage['editableMeshes']
-    return [stage['editableMesh']] if stage.get('editableMesh') else []
+    return stage['editableMeshes']
 
 
 def targets(scene):
-    if 'mme_editable_meshes' in scene:
-        return json.loads(scene['mme_editable_meshes'])
-    info = target_info(scene)
-    return [info] if info else []
+    return json.loads(scene.get('mme_editable_meshes', '[]'))
 
 
 def target_ids(scene):
@@ -29,21 +19,55 @@ def target_ids(scene):
 
 
 def baselines(scene):
-    if 'mme_model_baselines' in scene:
-        return json.loads(scene['mme_model_baselines'])
-    info = target_info(scene)
-    return {info['id']: scene.get('mme_model_baseline')} if info else {}
+    return json.loads(scene.get('mme_model_baselines', '{}'))
+
+
+def capability(info, operation):
+    value = info.get('operationCapabilities', {}).get(operation)
+    if not isinstance(value, dict) or not isinstance(value.get('allowed'), bool):
+        raise StageError('Model capabilities are missing or obsolete. Re-import the DAT.')
+    return value
+
+
+def allows(info, operation):
+    return capability(info, operation)['allowed']
+
+
+def require_operation(info, operation):
+    value = capability(info, operation)
+    if not value['allowed']:
+        raise StageError(value.get('reason') or
+                         f'{operation} is unavailable for this model. Re-import the DAT.')
+
+
+def appearance_locked(info):
+    return not allows(info, 'materialAssignment') or not allows(info, 'uvEditing')
+
+
+def resolve(scene, obj=None, info=None, operation=None):
+    infos = targets(scene)
+    if info is not None:
+        info = next((candidate for candidate in infos
+                     if candidate['id'] == info.get('id')), None)
+    elif obj is not None:
+        info = next((candidate for candidate in infos
+                     if candidate['id'] == obj.get('mme_id')), None)
+    if info is None and obj is None:
+        info = infos[0] if infos else None
+    if info is None:
+        raise StageError('This scene has no editable model target. Re-import the DAT.')
+    matches = target_matches(scene, info)
+    if len(matches) != 1 or matches[0].type != 'MESH':
+        raise StageError('The editable model object is missing or duplicated. Undo the change.')
+    if obj is not None and matches[0] is not obj:
+        raise StageError('The selected object is not this editable model target.')
+    if operation:
+        require_operation(info, operation)
+    return info, matches[0]
 
 
 def target_object(scene, info=None):
-    info = info or target_info(scene)
-    if not info:
-        raise StageError('This scene has no editable model target. Re-import with the updated backend.')
-    objects = [o for o in scene.objects if o.get('mme_session_id') == scene.mme_session_id
-               and o.get('mme_id') == info['id']]
-    if len(objects) != 1 or objects[0].type != 'MESH':
-        raise StageError('The editable model object is missing or duplicated. Undo the change.')
-    return objects[0]
+    return resolve(scene, info=info)[1]
 
 
 def target_matches(scene, info):
@@ -75,10 +99,7 @@ def color_fingerprint(obj):
 def edits(scene, stage):
     infos = targets(scene)
     declared = stage_targets(stage)
-    # Saved legacy scenes remain restricted to their original permissions.
-    if 'mme_editable_meshes' not in scene:
-        declared = [stage['editableMesh']] if stage.get('editableMesh') else []
-    if infos and infos != declared:
+    if infos != declared:
         raise StageError('Editable model identities changed. Re-import the stage.')
     baseline = baselines(scene)
     appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
@@ -88,23 +109,26 @@ def edits(scene, stage):
     for info in infos:
         matches = target_matches(scene, info)
         if not matches:
+            require_operation(info, 'wholeObjectDeletion')
             deleted_ids.append(info['id'])
             continue
         if len(matches) != 1 or matches[0].type != 'MESH':
             raise StageError('The editable model object is duplicated or has an invalid type. Undo the change.')
         obj = matches[0]
         changed = (fingerprint(obj) != baseline.get(info['id'])
-                   or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
+                   or surface.fingerprint(obj, appearance_locked(info))
+                   != appearance_baseline.get(info['id'], digest(None)))
         obj['mme_dirty'] = changed
         if changed or color_fingerprint(obj) != color_baseline.get(info['id']):
             source = read(Path(bpy.path.abspath(scene.mme_session)) / info['file'])
             edit = mesh_edit(obj, info, source, stage,
-                             surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
+                             surface.fingerprint(obj, appearance_locked(info))
+                             != appearance_baseline.get(info['id'], digest(None)))
             changed = changed or 'colors0' in edit or 'colors1' in edit
             obj['mme_dirty'] = changed
             if changed:
                 meshes.append(edit)
-    return ({'protocolVersion': 2, 'coordinateSpace': 'game-joint-local',
+    return ({'protocolVersion': SESSION_PROTOCOL, 'coordinateSpace': 'game-joint-local',
              'meshes': meshes, 'deletedIds': deleted_ids}
             if meshes or deleted_ids else None)
 
@@ -129,8 +153,11 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                          and len(mesh.polygons) * 3 == len(original_indices)
                          and all(list(face.vertices) == display_indices[i * 3:i * 3 + 3]
                                  for i, face in enumerate(mesh.polygons)))
-        if info.get('positionsOnly') and (not same_topology or appearance_changed):
-            raise StageError('This model has animated materials: move vertices only. Undo topology, UV or material assignment changes before export.')
+        require_operation(info, 'vertexMovement')
+        if not same_topology:
+            require_operation(info, 'topologyReplacement')
+        if appearance_changed:
+            require_operation(info, 'materialAssignment')
         material = surface.assigned_material(mesh, stage or {})
         result = {'id': info['id'], 'positions': positions,
                   'triangleIndices': original_indices if same_topology else
@@ -156,8 +183,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                        for color, index in zip(colors, original_indices)
                        for value, component in zip(color, ('r', 'g', 'b', 'a'))))
             if changed:
-                if info.get('positionsOnly'):
-                    raise StageError('This animated model supports vertex movement only. Undo vertex color changes before export.')
+                require_operation(info, 'vertexColorEditing')
                 if not same_topology or appearance_changed:
                     raise StageError('Vertex color export requires the original topology, UVs and material assignment.')
                 result[key] = [dict(zip(('r', 'g', 'b', 'a'), color)) for color in colors]
@@ -168,6 +194,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         if material:
             result['sourceMaterialId'] = material['id']
             if material['usesUv']:
+                require_operation(info, 'uvEditing')
                 uv = mesh.uv_layers.active
                 if uv is None:
                     raise StageError('This stage material needs a UV map. Unwrap the model in Blender before exporting.')
@@ -206,7 +233,8 @@ def update_dirty(scene, depsgraph):
             continue
         try:
             changed = (fingerprint(obj) != baseline.get(info['id'])
-                   or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
+                   or surface.fingerprint(obj, appearance_locked(info))
+                   != appearance_baseline.get(info['id'], digest(None)))
             if info['id'] in color_baseline:
                 changed = changed or color_fingerprint(obj) != color_baseline[info['id']]
         except ValueError:

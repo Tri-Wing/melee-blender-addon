@@ -32,6 +32,20 @@ public class SessionTests
             using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "stage.json")));
             var root = manifest.RootElement;
             Assert.Equal(SessionExtractor.ProtocolVersion, root.GetProperty("protocolVersion").GetInt32());
+            Assert.Equal(SessionExtractor.SchemaVersion, root.GetProperty("schemaVersion").GetInt32());
+            Assert.False(root.TryGetProperty("editableMesh", out _));
+            var editableMeshes = root.GetProperty("editableMeshes").EnumerateArray().ToArray();
+            Assert.NotEmpty(editableMeshes);
+            Assert.All(editableMeshes, editable =>
+            {
+                Assert.False(editable.TryGetProperty("positionsOnly", out _));
+                Assert.False(editable.TryGetProperty("sharesDobj", out _));
+                var operations = editable.GetProperty("operationCapabilities");
+                foreach (var operation in new[] { "vertexMovement", "topologyReplacement", "uvEditing",
+                    "vertexColorEditing", "materialAssignment", "materialPropertyEditing",
+                    "wholeObjectDeletion" })
+                    Assert.True(operations.TryGetProperty(operation, out _), operation);
+            });
             Assert.True(root.GetProperty("capabilities").GetProperty("allModelGeometry").GetBoolean());
             Assert.True(root.GetProperty("capabilities").GetProperty("modelAddition").GetBoolean());
             Assert.DoesNotContain("model-addition-export",

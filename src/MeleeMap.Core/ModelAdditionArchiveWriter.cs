@@ -49,21 +49,22 @@ public static class ModelAdditionArchiveWriter
     public static ModelAdditionWrite Write(ArchiveLayout source, ModelIdentitySnapshot identity,
         ValidatedModelAdditionBatch batch)
     {
+        var builder = new ArchiveMutationBuilder(source);
+        return Write(builder, source, identity, ModelAdditionPlanner.Plan(batch));
+    }
+
+    internal static ModelAdditionWrite Write(ArchiveMutationBuilder builder,
+        ArchiveLayout additionBase, ModelIdentitySnapshot identity,
+        PlannedModelAdditions planned)
+    {
+        var batch = planned.Source;
+        var source = additionBase;
         var sourceReader = new ArchiveDataReader(source);
         var nodes = identity.Nodes;
         var byId = nodes.ToDictionary(node => node.Id);
-        using var data = new MemoryStream();
-        data.Write(source.Bytes.AsSpan(32, source.DataSize));
-        var relocations = Enumerable.Range(0, source.Read(8))
-            .Select(index => source.Read(32 + source.DataSize + index * 4)).ToHashSet();
 
-        int Append(byte[] value, int alignment = 32)
-        {
-            while (data.Position % alignment != 0) data.WriteByte(0);
-            int offset = checked((int)data.Position);
-            data.Write(value);
-            return offset;
-        }
+        int Append(byte[] value, int alignment = 32) =>
+            builder.AppendAligned(value, alignment);
 
         var imageCache = new Dictionary<ImageKey, BuiltImage>();
         var imagesById = new Dictionary<string, BuiltImage>(StringComparer.Ordinal);
@@ -86,7 +87,7 @@ public static class ModelAdditionArchiveWriter
                 Short(image, 6, definition.Height);
                 Put(image, 8, (int)GXTexFmt.RGBA8);
                 int descriptor = Append(image);
-                relocations.Add(descriptor);
+                builder.SetPointer(descriptor, pixels, "model-addition");
                 built = new(descriptor, pixels, encoded, validated);
                 imageCache.Add(key, built);
             }
@@ -142,8 +143,10 @@ public static class ModelAdditionArchiveWriter
                     Put(tobj, 0x4C, image.Descriptor);
                     Put(tobj, 0x54, lodOffset.Value);
                     tobjOffset = Append(tobj);
-                    relocations.Add(tobjOffset.Value + 0x4C);
-                    relocations.Add(tobjOffset.Value + 0x54);
+                    builder.SetPointer(tobjOffset.Value + 0x4C,
+                        image.Descriptor, "model-addition");
+                    builder.SetPointer(tobjOffset.Value + 0x54,
+                        lodOffset.Value, "model-addition");
                 }
                 byte[] mobj = new byte[0x18];
                 Put(mobj, 4, (diffuse ? RenderDiffuse : RenderConstant)
@@ -151,8 +154,11 @@ public static class ModelAdditionArchiveWriter
                 if (tobjOffset.HasValue) Put(mobj, 8, tobjOffset.Value);
                 Put(mobj, 0x0C, colorOffset);
                 int mobjOffset = Append(mobj);
-                if (tobjOffset.HasValue) relocations.Add(mobjOffset + 8);
-                relocations.Add(mobjOffset + 0x0C);
+                if (tobjOffset.HasValue)
+                    builder.SetPointer(mobjOffset + 8, tobjOffset.Value,
+                        "model-addition");
+                builder.SetPointer(mobjOffset + 0x0C, colorOffset,
+                    "model-addition");
                 built = new(mobjOffset, colorOffset, tobjOffset, lodOffset, image?.Descriptor);
                 materialCache.Add(key, built);
             }
@@ -164,41 +170,30 @@ public static class ModelAdditionArchiveWriter
 
         var pending = new List<(string AdditionId, string PartId, int ChunkIndex,
             string TargetId, string Placement, int Dobj, int Pobj, int Material, MeshData Mesh)>();
-        foreach (var addition in batch.Edits.Additions)
+        foreach (var chunk in planned.Chunks)
         {
-            var target = batch.Targets[addition.TargetJobjId];
-            foreach (var part in addition.Parts)
-            {
-                int material = materialsById[part.MaterialId].Mobj;
-                var triangles = NondegenerateTriangles(part);
-                int chunkIndex = 0;
-                foreach (var range in triangles.Chunk(MaxTrianglesPerChunk))
-                {
-                    var mesh = Mesh(part, range);
-                    int attrs = Append(Attributes(mesh.TexCoords0 != null));
-                    byte[] display = Display(mesh);
-                    int dl = Append(display);
-                    byte[] pobj = new byte[0x18];
-                    Put(pobj, 8, attrs);
-                    Short(pobj, 0x0C, 0x4001); // Back-face culling, HSD_MTX_RIGID.
-                    Short(pobj, 0x0E, display.Length / 32);
-                    Put(pobj, 0x10, dl);
-                    int pobjOffset = Append(pobj);
-                    relocations.Add(pobjOffset + 8);
-                    relocations.Add(pobjOffset + 0x10);
-                    byte[] dobj = new byte[0x10];
-                    Put(dobj, 8, material);
-                    Put(dobj, 0x0C, pobjOffset);
-                    int dobjOffset = Append(dobj);
-                    relocations.Add(dobjOffset + 8);
-                    relocations.Add(dobjOffset + 0x0C);
-                    pending.Add((addition.Id, part.Id, chunkIndex++, addition.TargetJobjId,
-                        target.Placement,
-                        dobjOffset, pobjOffset, material, mesh));
-                }
-            }
+            int material = materialsById[chunk.MaterialId].Mobj;
+            var mesh = chunk.Mesh;
+            int attrs = Append(Attributes(mesh.TexCoords0 != null));
+            byte[] display = Display(mesh);
+            int dl = Append(display);
+            byte[] pobj = new byte[0x18];
+            Put(pobj, 8, attrs);
+            Short(pobj, 0x0C, 0x4001); // Back-face culling, HSD_MTX_RIGID.
+            Short(pobj, 0x0E, display.Length / 32);
+            Put(pobj, 0x10, dl);
+            int pobjOffset = Append(pobj);
+            builder.SetPointer(pobjOffset + 8, attrs, "model-addition");
+            builder.SetPointer(pobjOffset + 0x10, dl, "model-addition");
+            byte[] dobj = new byte[0x10];
+            Put(dobj, 8, material);
+            Put(dobj, 0x0C, pobjOffset);
+            int dobjOffset = Append(dobj);
+            builder.SetPointer(dobjOffset + 8, material, "model-addition");
+            builder.SetPointer(dobjOffset + 0x0C, pobjOffset, "model-addition");
+            pending.Add((chunk.AdditionId, chunk.PartId, chunk.ChunkIndex,
+                chunk.TargetId, chunk.Placement, dobjOffset, pobjOffset, material, mesh));
         }
-        Require(pending.Count > 0, "MODEL_ADDITION_EMPTY", "No nondegenerate addition geometry remains.");
 
         var jobjWrites = new List<ModelAdditionJobjWrite>();
         foreach (var addition in batch.Edits.Additions.Where(edit =>
@@ -209,28 +204,17 @@ public static class ModelAdditionArchiveWriter
             var target = batch.Targets[addition.TargetJobjId];
             byte[] jobj = new byte[0x40];
             Put(jobj, 4, JobjLighting | JobjOpaque);
-            Put(jobj, 0x10, chunks[0].Dobj);
             Float(jobj, 0x20, 1);
             Float(jobj, 0x24, 1);
             Float(jobj, 0x28, 1);
             int jobjOffset = Append(jobj);
-            relocations.Add(jobjOffset + 0x10);
+            ModelGraphEditor.SetGeneratedDobjList(builder, jobjOffset,
+                chunks.Select(chunk => chunk.Dobj).ToArray(), "model-addition");
             jobjWrites.Add(new(addition.Id, addition.TargetJobjId,
                 target.AnchorJobjId, jobjOffset, chunks[0].Dobj));
         }
 
-        byte[] payload = data.ToArray();
         var patchedFields = new List<int>();
-
-        void LinkDobj((string AdditionId, string PartId, int ChunkIndex, string TargetId,
-            string Placement, int Dobj, int Pobj, int Material, MeshData Mesh)[] linked)
-        {
-            for (int index = 0; index + 1 < linked.Length; index++)
-            {
-                Put(payload, linked[index].Dobj + 4, linked[index + 1].Dobj);
-                relocations.Add(linked[index].Dobj + 4);
-            }
-        }
 
         foreach (var group in pending.GroupBy(chunk => chunk.TargetId))
         {
@@ -238,81 +222,63 @@ public static class ModelAdditionArchiveWriter
             var chunks = group.ToArray();
             if (definition.Placement == ModelAddition.ExistingJobjPlacement)
             {
-                var target = byId[group.Key];
-                var existing = nodes.Where(node => node.Kind == "dobj" && node.OwnerId == target.Id)
-                    .OrderBy(node => node.Index).ToArray();
-                int sourceField = existing.Length == 0 ? target.SourceOffset + 0x10
-                    : existing[^1].SourceOffset + 4;
-                Require(sourceReader.Pointer(sourceField) == null, "MODEL_ADDITION_DOBJ_TAIL",
-                    "Attachment DOBJ tail changed after eligibility validation.");
-                Put(payload, sourceField, chunks[0].Dobj);
-                relocations.Add(sourceField);
+                int sourceField = ModelGraphEditor.AppendDobjList(builder, identity,
+                    group.Key, chunks.Select(chunk => chunk.Dobj).ToArray(), "model-addition");
                 patchedFields.Add(sourceField);
-                LinkDobj(chunks);
                 continue;
             }
 
             var anchor = byId[definition.AnchorJobjId];
             var children = nodes.Where(node => node.OwnerId == anchor.Id && node.Kind.EndsWith("jobj"))
                 .OrderBy(node => node.Index).ToArray();
-            int childField = children.Length == 0 ? anchor.SourceOffset + 8
-                : children[^1].SourceOffset + 12;
-            Require(sourceReader.Pointer(childField) == null, "MODEL_ADDITION_JOBJ_TAIL",
-                "Model-group JOBJ child tail changed after eligibility validation.");
             var additions = jobjWrites.Where(jobj => jobj.TargetId == group.Key).ToArray();
             Require(additions.Length > 0, "MODEL_ADDITION_JOBJ", "New-chain target has no generated JOBJ.");
-            Put(payload, childField, additions[0].JobjOffset);
-            relocations.Add(childField);
+            int childField = ModelGraphEditor.AppendJobjChildren(builder, identity,
+                definition.AnchorJobjId, additions.Select(addition => addition.JobjOffset).ToArray(),
+                "model-addition");
             patchedFields.Add(childField);
-            for (int index = 0; index + 1 < additions.Length; index++)
-            {
-                Put(payload, additions[index].JobjOffset + 12, additions[index + 1].JobjOffset);
-                relocations.Add(additions[index].JobjOffset + 12);
-            }
             int flagsField = anchor.SourceOffset + 4;
             int flags = sourceReader.Int(flagsField);
             if ((flags & JobjRootOpaque) == 0)
             {
                 Require(children.Length == 0, "MODEL_ADDITION_JOBJ_FLAGS",
                     "Cannot enable opaque traversal for an existing child hierarchy.");
-                Put(payload, flagsField, flags | JobjRootOpaque);
+                builder.PermitSourcePatch(flagsField, 4, "model-addition");
+                builder.PatchInt32(flagsField, flags | JobjRootOpaque,
+                    "model-addition");
                 patchedFields.Add(flagsField);
             }
-            foreach (var addition in additions)
-                LinkDobj(chunks.Where(chunk => chunk.AdditionId == addition.AdditionId).ToArray());
         }
 
-        using var result = new MemoryStream();
-        result.Write(source.Bytes.AsSpan(0, 32));
-        result.Write(payload);
-        foreach (int field in relocations.Order()) Int(result, field);
-        int oldRelocations = source.Read(8);
-        result.Write(source.Bytes.AsSpan(32 + source.DataSize + oldRelocations * 4));
-        byte[] output = result.ToArray();
-        Put(output, 0, output.Length);
-        Put(output, 4, payload.Length);
-        Put(output, 8, relocations.Count);
+        byte[] output = builder.Build();
 
         var chunksWritten = pending.Select(chunk => new ModelAdditionChunkWrite(chunk.AdditionId,
             chunk.PartId, chunk.ChunkIndex, chunk.TargetId, chunk.Placement, chunk.Dobj, chunk.Pobj,
             chunk.Material, chunk.Mesh.TriangleIndices.Length / 3, chunk.Mesh)).ToArray();
         var write = new ModelAdditionWrite(output, chunksWritten, jobjWrites.ToArray(), materialWrites.ToArray(),
             imageWrites.ToArray(), patchedFields.ToArray());
-        Verify(source, identity, write);
+        Verify(source, new ArchiveLayout(output), identity, write);
         return write;
     }
 
     public static void Verify(ArchiveLayout source, ModelIdentitySnapshot identity,
-        ModelAdditionWrite expected)
+        ModelAdditionWrite expected) => Verify(source, new ArchiveLayout(expected.Bytes),
+            identity, expected);
+
+    public static void Verify(ArchiveLayout source, ArchiveLayout archive,
+        ModelIdentitySnapshot identity, ModelAdditionWrite expected,
+        bool verifyPreservation = true)
     {
-        var archive = new ArchiveLayout(expected.Bytes);
         Require(source.Roots.SequenceEqual(archive.Roots) && source.References.SequenceEqual(archive.References),
             "MODEL_ADDITION_ROOTS", "Root or external-reference inventory changed while adding models.");
-        var allowed = expected.PatchedSourceFields.ToHashSet();
-        for (int offset = 0; offset < source.DataSize; offset++)
-            Require(allowed.Any(field => offset >= field && offset < field + 4)
-                || source.Bytes[32 + offset] == expected.Bytes[32 + offset],
-                "MODEL_ADDITION_PRESERVATION", "Unrelated original archive bytes changed while adding models.");
+        if (verifyPreservation)
+        {
+            var allowed = expected.PatchedSourceFields.ToHashSet();
+            for (int offset = 0; offset < source.DataSize; offset++)
+                Require(allowed.Any(field => offset >= field && offset < field + 4)
+                    || source.Bytes[32 + offset] == archive.Bytes[32 + offset],
+                    "MODEL_ADDITION_PRESERVATION", "Unrelated original archive bytes changed while adding models.");
+        }
 
         var catalog = ModelIdentityCatalog.Restore(identity.Nodes);
         var extended = ModelIdentity.Capture(archive, catalog);
@@ -463,43 +429,6 @@ public static class ModelAdditionArchiveWriter
         }
     }
 
-    private static List<int> NondegenerateTriangles(ModelAdditionPart part)
-    {
-        var result = new List<int>();
-        for (int triangle = 0; triangle < part.TriangleIndices.Length / 3; triangle++)
-        {
-            int corner = triangle * 3;
-            var a = part.Positions[part.TriangleIndices[corner]];
-            var b = part.Positions[part.TriangleIndices[corner + 1]];
-            var c = part.Positions[part.TriangleIndices[corner + 2]];
-            double ux = (double)b.X - a.X, uy = (double)b.Y - a.Y, uz = (double)b.Z - a.Z;
-            double vx = (double)c.X - a.X, vy = (double)c.Y - a.Y, vz = (double)c.Z - a.Z;
-            double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-            if (nx * nx + ny * ny + nz * nz > 0) result.Add(triangle);
-        }
-        return result;
-    }
-
-    private static MeshData Mesh(ModelAdditionPart part, int[] triangles)
-    {
-        var positions = new Vector3Data[triangles.Length * 3];
-        var normals = new Vector3Data[positions.Length];
-        var texCoords = part.TexCoords0 == null ? null : new Vector2Data[positions.Length];
-        for (int triangle = 0; triangle < triangles.Length; triangle++)
-        {
-            int sourceCorner = triangles[triangle] * 3;
-            for (int corner = 0; corner < 3; corner++)
-            {
-                int output = triangle * 3 + corner;
-                positions[output] = part.Positions[part.TriangleIndices[sourceCorner + corner]];
-                normals[output] = part.CornerNormals[sourceCorner + corner];
-                if (texCoords != null) texCoords[output] = part.TexCoords0![sourceCorner + corner];
-            }
-        }
-        return new(positions, normals, Enumerable.Range(0, positions.Length).ToArray(),
-            TexCoords0: texCoords);
-    }
-
     private static byte[] Attributes(bool textured)
     {
         int count = textured ? 3 : 2;
@@ -565,10 +494,4 @@ public static class ModelAdditionArchiveWriter
         BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(offset, 2), checked((ushort)value));
     private static void Float(byte[] bytes, int offset, float value) =>
         Put(bytes, offset, BitConverter.SingleToInt32Bits(value));
-    private static void Int(Stream stream, int value)
-    {
-        Span<byte> bytes = stackalloc byte[4];
-        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
-        stream.Write(bytes);
-    }
 }

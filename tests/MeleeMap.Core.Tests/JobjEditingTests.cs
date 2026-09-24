@@ -25,7 +25,7 @@ public class JobjEditingTests
             Read(target.SourceOffset + 0x20),
             Read(target.SourceOffset + 0x2C) with { X = Read(target.SourceOffset + 0x2C).X + 3.5f });
         var written = JobjEditing.Write(source.Layout, source.Layout, identity,
-            new(2, "game-jobj-local", [edit]), [target.Id]);
+            new(SessionExtractor.ProtocolVersion, "game-jobj-local", [edit]), [target.Id]);
         var output = new ArchiveLayout(written.Bytes);
         JobjEditing.Verify(output, identity, written);
         for (int i = 0; i < source.Layout.Bytes.Length; i++)
@@ -61,7 +61,7 @@ public class JobjEditingTests
             var translation = Vec("translation") with { Y = Vec("translation").Y + 7 };
             var edit = new JobjTransformEdit(id, Vec("rotation"), Vec("scale"), translation);
             File.WriteAllText(Path.Combine(session, "edits/jobjs.json"),
-                JsonSerializer.Serialize(new JobjTransformEdits(2, "game-jobj-local", [edit]), Json));
+                JsonSerializer.Serialize(new JobjTransformEdits(SessionExtractor.ProtocolVersion, "game-jobj-local", [edit]), Json));
             var result = SessionApplier.Apply(session, output);
             Assert.True(result.JobjChanged);
             Assert.False(result.CollisionChanged || result.ModelChanged || result.MaterialChanged || result.LightChanged);
@@ -71,10 +71,10 @@ public class JobjEditingTests
             Assert.Equal(translation.Y, new ArchiveDataReader(new StageArchive(output).Layout).Float(reloaded.SourceOffset + 0x30));
 
             File.WriteAllText(Path.Combine(session, "edits/jobjs.json"),
-                JsonSerializer.Serialize(new JobjTransformEdits(2, "game-jobj-local", [edit with { Id = Guid.NewGuid().ToString("N") }]), Json));
+                JsonSerializer.Serialize(new JobjTransformEdits(SessionExtractor.ProtocolVersion, "game-jobj-local", [edit with { Id = Guid.NewGuid().ToString("N") }]), Json));
             Assert.Equal("JOBJ_EDIT_TARGET", Assert.Throws<StageException>(() => SessionApplier.Apply(session, output)).Code);
             File.WriteAllText(Path.Combine(session, "edits/jobjs.json"),
-                JsonSerializer.Serialize(new JobjTransformEdits(2, "game-jobj-local", [edit with { Scale = edit.Scale with { X = 0 } }]), Json));
+                JsonSerializer.Serialize(new JobjTransformEdits(SessionExtractor.ProtocolVersion, "game-jobj-local", [edit with { Scale = edit.Scale with { X = 0 } }]), Json));
             Assert.Equal("JOBJ_ZERO_SCALE", Assert.Throws<StageException>(() => SessionApplier.Apply(session, output)).Code);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }

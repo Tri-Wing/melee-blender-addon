@@ -187,7 +187,9 @@ class MME_OT_edit_model(bpy.types.Operator):
                              and active.get('mme_session_id') == context.scene.mme_session_id), None)
             if active and active.get('mme_role') == 'pobj' and selected is None:
                 raise StageError(active.get('mme_read_only_reason', 'This model is read-only in this session.'))
-            obj = modeling.target_object(context.scene, selected or (infos[0] if infos else None))
+            info, obj = modeling.resolve(context.scene,
+                                         info=selected or (infos[0] if infos else None),
+                                         operation='vertexMovement')
             if context.mode != 'OBJECT':
                 bpy.ops.object.mode_set(mode='OBJECT')
             for collection in bpy.data.collections:
@@ -199,9 +201,8 @@ class MME_OT_edit_model(bpy.types.Operator):
             context.view_layer.objects.active = obj
             context.tool_settings.mesh_select_mode = (True, False, False)
             bpy.ops.object.mode_set(mode='EDIT')
-            info = next(i for i in modeling.targets(context.scene) if i['id'] == obj.get('mme_id'))
             context.scene.mme_status = (f'Editing {obj.name}. Move vertices only; animated materials are preserved.'
-                                        if info.get('positionsOnly') else
+                                        if not modeling.allows(info, 'topologyReplacement') else
                                         f'Editing {obj.name}. Vertex moves preserve appearance; new faces use the assigned material.')
         return execute_safely(self, context, action)
 
@@ -284,11 +285,10 @@ class MME_OT_model_material(bpy.types.Operator):
     def execute(self, context):
         def action():
             obj = context.active_object
-            if not obj or obj.get('mme_session_id') != context.scene.mme_session_id or obj.get('mme_id') not in modeling.target_ids(context.scene):
+            if not obj or obj.get('mme_session_id') != context.scene.mme_session_id:
                 raise StageError('Select an editable model first.')
-            info = next(i for i in modeling.targets(context.scene) if i['id'] == obj.get('mme_id'))
-            if info.get('positionsOnly'):
-                raise StageError('This model has animated materials. Only vertex movement is supported.')
+            _, obj = modeling.resolve(context.scene, obj=obj,
+                                      operation='materialAssignment')
             if self.material_id == 'GREY':
                 material = bpy.data.materials.new('Melee Export Grey')
                 material.diffuse_color = (0.45, 0.45, 0.45, 1)
@@ -479,19 +479,20 @@ class MME_PT_models(MME_PT_sidebar, bpy.types.Panel):
         row = layout.row()
         row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
         row.operator('mme.edit_model', icon='EDITMODE_HLT')
-        positions_only = False
+        can_assign_material = False
         if selected:
             target = next(info for info in editable if info['id'] == active.get('mme_id'))
-            positions_only = target.get('positionsOnly', False)
+            can_assign_material = modeling.allows(target, 'materialAssignment')
             state = 'edited' if active.get('mme_dirty') else 'unchanged'
             layout.label(text=f'Selected: {state}')
-            if positions_only:
-                layout.label(text='Animated material: move vertices only', icon='INFO')
+            if not modeling.allows(target, 'topologyReplacement'):
+                _wrapped_labels(layout, modeling.capability(target, 'topologyReplacement').get(
+                    'reason', 'Topology replacement is unavailable.'))
         elif active and active.get('mme_role') == 'pobj':
             layout.label(text='Selected model is read-only', icon='LOCKED')
             _wrapped_labels(layout, active.get('mme_read_only_reason', 'Read-only in this session.'))
         row = layout.row()
-        row.enabled = bool(selected) and not positions_only
+        row.enabled = bool(selected) and can_assign_material
         row.operator('mme.model_material', icon='MATERIAL')
         if not s.get('mme_model_materials'):
             layout.label(text='Re-import to load stage materials', icon='INFO')
@@ -919,20 +920,9 @@ def update_animation(scene_arg, depsgraph=None):
 def load_animation(_):
     animations.clear_cache()
     try:
-        scene.ensure_model_deletion_guard(bpy.context.scene)
         animations.apply(bpy.context.scene)
     except (StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
         pass
-
-
-def migrate_model_deletion_guards():
-    """Run after registration, when Blender's startup data restriction is lifted."""
-    try:
-        for current_scene in bpy.data.scenes:
-            scene.ensure_model_deletion_guard(current_scene)
-    except (AttributeError, StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
-        pass
-    return None
 
 
 class MME_TextureLayerProperties(bpy.types.PropertyGroup):
@@ -1092,16 +1082,12 @@ def register():
     bpy.app.handlers.depsgraph_update_post.append(update_dirty)
     bpy.app.handlers.frame_change_post.append(update_animation)
     bpy.app.handlers.load_post.append(load_animation)
-    if not bpy.app.timers.is_registered(migrate_model_deletion_guards):
-        bpy.app.timers.register(migrate_model_deletion_guards, first_interval=0.0)
     if not bpy.app.background:
         _draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_collision, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
     global _draw_handle
-    if bpy.app.timers.is_registered(migrate_model_deletion_guards):
-        bpy.app.timers.unregister(migrate_model_deletion_guards)
     if _draw_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handle, 'WINDOW')
         _draw_handle = None

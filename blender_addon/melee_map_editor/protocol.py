@@ -4,6 +4,12 @@ import json
 from pathlib import Path
 import subprocess
 
+SESSION_PROTOCOL = 3
+SESSION_SCHEMA = 2
+MODEL_OPERATIONS = ('vertexMovement', 'topologyReplacement', 'uvEditing',
+                    'vertexColorEditing', 'materialAssignment',
+                    'materialPropertyEditing', 'wholeObjectDeletion')
+
 
 class StageError(RuntimeError):
     pass
@@ -44,8 +50,17 @@ def run(cli, dotnet, *args):
 def load_session(directory):
     directory = Path(directory).resolve()
     stage = read(directory / 'stage.json')
-    if stage.get('protocolVersion') != 2:
-        raise StageError('This add-on requires session protocol 2. Re-import the DAT.')
+    if (stage.get('protocolVersion'), stage.get('schemaVersion')) != (SESSION_PROTOCOL, SESSION_SCHEMA):
+        raise StageError(f'This add-on requires session protocol {SESSION_PROTOCOL}, schema {SESSION_SCHEMA}. Rebuild/update and re-import the DAT.')
+    if not isinstance(stage.get('editableMeshes'), list) or 'editableMesh' in stage:
+        raise StageError('This session uses an obsolete model manifest. Re-import the DAT.')
+    for info in stage['editableMeshes']:
+        capabilities = info.get('operationCapabilities')
+        if not isinstance(capabilities, dict) or any(
+                not isinstance(capabilities.get(operation), dict)
+                or not isinstance(capabilities[operation].get('allowed'), bool)
+                for operation in MODEL_OPERATIONS):
+            raise StageError('This session has missing model capabilities. Re-import the DAT.')
     if stage['coordinates']['blenderFromGame'] != '(X, -Z, Y)':
         raise StageError('Unsupported session coordinate transform.')
     for entry in stage['baselineFiles']:

@@ -20,7 +20,7 @@ def rejects(action):
     try:
         action()
     except StageError as error:
-        assert 'animated materials' in str(error), str(error)
+        assert 'material animation' in str(error).lower(), str(error)
     else:
         raise AssertionError('Expected position-only restriction')
 
@@ -32,7 +32,8 @@ with tempfile.TemporaryDirectory(prefix='mme-animated-') as tmp:
     stage = read(directory / 'stage.json')
     scene.import_session(bpy.context, directory)
     s = bpy.context.scene
-    infos = [i for i in modeling.targets(s) if i.get('positionsOnly')]
+    infos = [i for i in modeling.targets(s)
+             if not modeling.allows(i, 'topologyReplacement')]
     assert len(infos) == 45 and len(modeling.targets(s)) == 90
     previews = {m['id']: m for m in stage['modelPreviews']}
     assert {i['id'] for i in infos} <= set(previews)

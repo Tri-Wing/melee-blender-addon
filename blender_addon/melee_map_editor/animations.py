@@ -6,7 +6,7 @@ from pathlib import Path
 import bpy
 from mathutils import Euler, Matrix, Vector
 
-from .protocol import StageError, digest, read
+from .protocol import SESSION_PROTOCOL, StageError, digest, read
 from .transforms import AXES, joint_srt
 from . import animation_values
 
@@ -715,7 +715,7 @@ def edits(scene, stage, groups):
                         tracks.append({'channel': f'{field}.{name}', 'keys': keys})
                 result.append({'groupIndex': group['index'], 'slot': slot,
                                'jobjId': jobj_id, 'tracks': tracks})
-    return {'protocolVersion': 2, 'coordinateSpace': 'game-jobj-animation',
+    return {'protocolVersion': SESSION_PROTOCOL, 'coordinateSpace': 'game-jobj-animation',
             'nodes': result} if result else None
 
 

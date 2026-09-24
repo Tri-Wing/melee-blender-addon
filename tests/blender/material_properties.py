@@ -65,7 +65,8 @@ with tempfile.TemporaryDirectory(prefix='mme-property-panel-') as tmp:
         assert 'conflicting' in str(error)
     other.data.materials[0] = material
     bpy.data.materials.remove(copied)
-    animated = next(i for i in stage['editableMeshes'] if i.get('positionsOnly'))
+    animated = next(i for i in stage['editableMeshes']
+                    if not modeling.allows(i, 'materialPropertyEditing'))
     assert material_properties.definition(modeling.target_object(s, animated).active_material) is None
     bpy.ops.wm.save_as_mainfile(filepath=str(tmp / 'properties.blend'))
     bpy.ops.wm.open_mainfile(filepath=str(tmp / 'properties.blend'))

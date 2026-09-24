@@ -168,44 +168,7 @@ def protected_inventory_matches(scene, editable_id, editable_transform_ids=None)
                     return True
         except (TypeError, ValueError, KeyError):
             pass
-    inventories = [current]
-    if editable_transform_ids:
-        # Saved scenes from before JOBJ editing included every object transform.
-        # Match that old inventory without granting those scenes new permissions.
-        legacy = inventory(scene, editable_id)
-        if digest(legacy) == expected:
-            return True
-        inventories.append(legacy)
-    # Older .blend files included the target's material slots in their guard.
-    # All imported previews share one material. Try the surviving preview slot
-    # lists against the OLD hash; never rebaseline hierarchy or other geometry.
-    if not isinstance(editable_id, str):
-        return False
-    candidates = {tuple(m.name if m else None for m in obj.data.materials)
-                  for obj in scene.objects if obj.type == 'MESH'
-                  and obj.get('mme_session_id') == scene.mme_session_id
-                  and obj.get('mme_role') == 'pobj'}
-    for candidate in inventories:
-        target = next((row for row in candidate['objects']
-                       if row['props']['mme_id'] == editable_id), None)
-        if target is not None:
-            for materials in candidates:
-                target['editableMaterials'] = list(materials)
-                if digest(candidate) == expected:
-                    return True
     return False
-
-
-def ensure_model_deletion_guard(scene):
-    """Upgrade an intact older .blend so native editable-model deletion is available."""
-    if not scene.mme_session or scene.get('mme_guard_inventory') or not scene.get('mme_guard'):
-        return
-    editable_ids = modeling.target_ids(scene)
-    if not editable_ids:
-        return
-    current = inventory(scene, editable_ids, jobjs.target_ids(scene))
-    if digest(current) == scene['mme_guard']:
-        scene['mme_guard_inventory'] = json.dumps(current)
 
 
 def import_session(context, directory):
@@ -463,8 +426,6 @@ def import_session(context, directory):
             scene.frame_set(1)
         animations.apply(scene)
         context.view_layer.update()
-        editable = stage.get('editableMesh')
-        scene['mme_editable_mesh'] = json.dumps(editable)
         editable_models = modeling.stage_targets(stage)
         scene['mme_editable_meshes'] = json.dumps(editable_models)
         scene['mme_editable_jobjs'] = json.dumps(editable_jobjs)
@@ -477,15 +438,14 @@ def import_session(context, directory):
         for info in editable_models:
             target = modeling.target_object(scene, info)
             target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
-            if info.get('positionsOnly'):
+            if not modeling.allows(info, 'topologyReplacement'):
                 target.name = target.name.replace('Editable Model', 'Vertex Editable Model', 1)
             baselines[info['id']] = modeling.fingerprint(target)
         scene['mme_model_baselines'] = json.dumps(baselines)
         scene['mme_color_baselines'] = json.dumps({info['id']: modeling.color_fingerprint(modeling.target_object(scene, info)) for info in editable_models})
-        scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(modeling.target_object(scene, info), info.get('positionsOnly', False)) for info in editable_models})
-        # Preserve the single-target helpers for older saved scenes/scripts.
-        if editable:
-            scene['mme_model_baseline'] = baselines[editable['id']]
+        scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(
+            modeling.target_object(scene, info), modeling.appearance_locked(info))
+            for info in editable_models})
         guard = inventory(scene, modeling.target_ids(scene), jobjs.target_ids(scene))
         scene['mme_guard_inventory'] = json.dumps(guard)
         scene['mme_guard'] = digest(guard)
@@ -537,9 +497,8 @@ def import_session(context, directory):
 def prepare(scene):
     directory = session(scene)
     stage = load_session(directory)
-    editable = modeling.target_info(scene)
-    ids = modeling.target_ids(scene) if 'mme_editable_meshes' in scene else (editable['id'] if editable else None)
-    if not protected_inventory_matches(scene, ids, jobjs.target_ids(scene)):
+    if not protected_inventory_matches(scene, modeling.target_ids(scene),
+                                       jobjs.target_ids(scene)):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
     obj = collision_object(scene)

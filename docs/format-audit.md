@@ -352,7 +352,7 @@ joined cube geometry, and culling correction have user-confirmed in-game results
 Multi-target output still needs an in-game check. Automated coverage exercises
 all eligible backend targets in one batch, duplicate/unsupported/invalid targets,
 untouched mesh preservation, two Blender joins, multi-object Edit Mode, collision
-combined with model edits, save/reopen, and legacy scene/session permissions.
+combined with model edits, save/reopen, and current capability-based permissions.
 
 
 ### Appearance-preserving vertex edits

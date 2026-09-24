@@ -127,6 +127,7 @@ public class ModelAdditionEditingTests
         var write = ModelAdditionArchiveWriter.Write(fixture.Source.Layout, fixture.Identity, batch);
         var repeated = ModelAdditionArchiveWriter.Write(fixture.Source.Layout, fixture.Identity, batch);
         var output = new StageArchive("added.dat", write.Bytes);
+        var planned = ModelAdditionPlanner.Plan(batch);
 
         Assert.Equal(write.Bytes, repeated.Bytes);
         Assert.Single(write.Chunks);
@@ -140,6 +141,18 @@ public class ModelAdditionEditingTests
         Assert.Equal(fixture.Identity.Nodes.Count(node => node.Kind == "dobj"
             && node.OwnerId == fixture.Target.Id) + 1,
             extended.Nodes.Count(node => node.Kind == "dobj" && node.OwnerId == fixture.Target.Id));
+        ModelAdditionVerifier.Verify(fixture.Source.Layout, output.Layout,
+            fixture.Identity, planned);
+        var wrongPositions = planned.Chunks[0].Mesh.Positions
+            .Select(position => position with { X = position.X + 10 }).ToArray();
+        var wrong = planned with
+        {
+            Chunks = [planned.Chunks[0] with
+                { Mesh = planned.Chunks[0].Mesh with { Positions = wrongPositions } }]
+        };
+        Assert.Equal("MODEL_ADDITION_PLAN_MISMATCH",
+            Assert.Throws<StageException>(() => ModelAdditionVerifier.Verify(
+                fixture.Source.Layout, output.Layout, fixture.Identity, wrong)).Code);
     }
 
     [PrimaryFixtureFact]

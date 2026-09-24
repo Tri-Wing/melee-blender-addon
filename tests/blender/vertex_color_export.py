@@ -1,5 +1,4 @@
 """Real GrSt vertex color/alpha, corner seams, panel fill, save/reload and DAT roundtrip."""
-import json
 import os
 from pathlib import Path
 import sys
@@ -27,27 +26,14 @@ with tempfile.TemporaryDirectory(prefix='mme-color-export-') as tmp:
     source = read(tmp / 'session' / info['file'])
     scene.apply(s, CLI, 'dotnet', tmp / 'noop.dat')
     assert (tmp / 'noop.dat').read_bytes() == (CORPUS / 'GrSt.dat').read_bytes()
-    # Old saved scenes lacking color fingerprints retain byte-identical no-op export.
-    color_baselines = s.pop('mme_color_baselines')
-    assert modeling.edits(s, stage) is None
-    s['mme_color_baselines'] = color_baselines
     material = obj.active_material
     assert material.mme_use_vertex_color
-    # Add-on reloads migrate material definitions saved by the preceding build.
-    legacy_definition = json.loads(material['mme_material_definition'])
-    legacy_definition.pop('useVertexColor')
-    legacy_definition.pop('canToggleVertexColor')
-    material['mme_material_definition'] = json.dumps(legacy_definition)
-    material.pop('mme_vertex_mode_initialized')
-    material['mme_material_updating'] = True
-    material.mme_use_vertex_color = False
-    material.mme_alpha_source = 'MATERIAL'
-    material['mme_material_updating'] = False
     from melee_map_editor import material_properties
     assert material_properties.definition(material)['useVertexColor']
     assert material.mme_use_vertex_color
     definition = material_properties.definition(material)
     material.mme_use_vertex_color = False
+    material.mme_alpha_source = 'MATERIAL'
     material.mme_transparency = 'ALPHA'
     material.mme_diffuse_lighting = True
     material.mme_no_depth_write = True

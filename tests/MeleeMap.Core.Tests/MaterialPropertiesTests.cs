@@ -30,7 +30,7 @@ public class MaterialPropertiesTests
             Assert.Equal(new[] { 0x10, 0x20 }, definition.GetProperty("textures").EnumerateArray()
                 .Select(texture => texture.GetProperty("lightmapFlags").GetInt32()));
             File.WriteAllText(Path.Combine(session, "edits/materials.json"), JsonSerializer.Serialize(
-                new MaterialPropertyEdits(2, [new(id, Ambient: [64, 32, 16], Specular: [10, 20, 30],
+                new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, [new(id, Ambient: [64, 32, 16], Specular: [10, 20, 30],
                     Shininess: 77, TextureBlends: [.25f, .75f])]), Json));
 
             SessionApplier.Apply(session, output);
@@ -58,11 +58,11 @@ public class MaterialPropertiesTests
         var before = MaterialProperties.Select(f.Source.Layout, f.Identity).Single(m => m.Id == target.Id);
         var original = GxMeshDecoder.Decode(f.Source.Layout, target.PobjOffset);
         var other = all.First(t => !t.PositionsOnly && t.Id != target.Id);
-        var model = new ModelEdits(2, "game-joint-local", [
+        var model = new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [
             new(target.Id, original.Positions.Select(p => p with { X = p.X + 1 }).ToArray(), original.TriangleIndices),
             new(other.Id, [new(0,0,0), new(10,0,0), new(0,10,0)], [0,1,2], target.Id, [new(0,0),new(1,0),new(0,1)])]);
         f.Write("models", model);
-        f.Write("materials", new MaterialPropertyEdits(2, [new(target.Id, [20, 80, 140], .375f, .75f)]));
+        f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, [new(target.Id, [20, 80, 140], .375f, .75f)]));
         var applied = SessionApplier.Apply(f.Session, f.Output);
         Assert.True(applied.MaterialChanged); Assert.True(applied.ModelChanged);
         var output = new StageArchive(f.Output); var r = new ArchiveDataReader(output.Layout);
@@ -80,13 +80,40 @@ public class MaterialPropertiesTests
     }
 
     [PrimaryFixtureFact]
+    public void DeletedMaterialDonorStillSuppliesEverySurvivingAssignedConsumer()
+    {
+        using var f = new Fixture();
+        var all = ModelEditing.SelectAll(f.Source.Layout, f.Identity);
+        var donor = all.Single(t => t.GroupIndex == 3 && t.JobjIndex == 3 && t.DobjIndex == 3);
+        var consumer = all.First(t => !t.PositionsOnly && t.Id != donor.Id
+            && !t.SharesDobj);
+        var replacement = new ModelEdit(consumer.Id,
+            [new(0, 0, 0), new(10, 0, 0), new(0, 10, 0)], [0, 1, 2],
+            donor.Id, [new(0, 0), new(1, 0), new(0, 1)]);
+        f.Write("models", new ModelEdits(SessionExtractor.ProtocolVersion, "game-joint-local", [replacement], [donor.Id]));
+        f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion,
+            [new MaterialPropertyEdit(donor.Id, Ambient: [9, 8, 7])]));
+
+        SessionApplier.Apply(f.Session, f.Output);
+        var output = new StageArchive(f.Output);
+        var r = new ArchiveDataReader(output.Layout);
+        int mobj = r.Pointer(consumer.DobjOffset + 8)!.Value;
+        int material = r.Pointer(mobj + 12)!.Value;
+        Assert.Equal(new byte[] { 9, 8, 7 },
+            Enumerable.Range(0, 3).Select(index => r.Byte(material + index)).ToArray());
+        var catalog = ModelIdentityCatalog.Restore(f.Identity.Nodes);
+        Assert.DoesNotContain(ModelIdentity.Capture(output.Layout, catalog).Nodes,
+            node => node.Id == donor.Id);
+    }
+
+    [PrimaryFixtureFact]
     public void InvalidBatchAndForgedAnimatedPermissionsNeverOverwriteOutput()
     {
         using var f = new Fixture();
         var targets = ModelEditing.SelectAll(f.Source.Layout, f.Identity);
         var target = targets.Single(t => t.GroupIndex == 3 && t.JobjIndex == 3 && t.DobjIndex == 3);
         var valid = new MaterialPropertyEdit(target.Id, [10,20,30]);
-        f.Write("materials", new MaterialPropertyEdits(2, [valid]));
+        f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, [valid]));
         SessionApplier.Apply(f.Session, f.Output); byte[] saved = File.ReadAllBytes(f.Output);
         var animated = targets.First(t => t.PositionsOnly);
         string path = Path.Combine(f.Session, "stage.json"); var manifest = JsonNode.Parse(File.ReadAllText(path))!;
@@ -111,7 +138,7 @@ public class MaterialPropertiesTests
         };
         foreach (var (values, code) in invalid)
         {
-            f.Write("materials", new MaterialPropertyEdits(2, values));
+            f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, values));
             Assert.Equal(code, Assert.Throws<StageException>(() => SessionApplier.Apply(f.Session, f.Output)).Code);
             Assert.Equal(saved, File.ReadAllBytes(f.Output));
         }
@@ -122,7 +149,7 @@ public class MaterialPropertiesTests
     {
         using var f = new Fixture();
         var target = ModelEditing.SelectAll(f.Source.Layout, f.Identity).Single(t => t.GroupIndex == 3 && t.JobjIndex == 3 && t.DobjIndex == 3);
-        f.Write("materials", new MaterialPropertyEdits(2, [new(target.Id, TextureBlend: .1f)]));
+        f.Write("materials", new MaterialPropertyEdits(SessionExtractor.ProtocolVersion, [new(target.Id, TextureBlend: .1f)]));
         var result = SessionApplier.Apply(f.Session, f.Output);
         Assert.True(result.MaterialChanged); Assert.False(result.ModelChanged); Assert.False(result.CollisionChanged);
         var output = new StageArchive(f.Output);
