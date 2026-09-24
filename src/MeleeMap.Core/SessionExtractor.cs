@@ -8,7 +8,7 @@ public sealed record ExtractionResult(string SessionDirectory, int ModelGroups, 
 
 public static class SessionExtractor
 {
-    public const int ProtocolVersion = 3;
+    public const int ProtocolVersion = 4;
     public const int SchemaVersion = 2;
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
 
@@ -25,6 +25,7 @@ public static class SessionExtractor
         var lighting = StageLightingReader.Read(stage.Layout);
         var atmosphere = StageAtmosphereReader.Read(stage.Layout, lighting.PreviewSetId);
         var camera = StageCameraReader.Read(stage.Layout);
+        var gameplay = StageGameplayEditing.Read(stage.Layout);
         var modelSnapshot = ModelSourceSnapshot.Capture(stage.Layout, identity);
         var editableModels = modelSnapshot.EditableModels.ToArray();
         var readOnlyReasons = modelSnapshot.Models.Values
@@ -181,7 +182,7 @@ public static class SessionExtractor
                 protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = SchemaVersion,
                 source = new { file = "source.dat", filename = info.Filename, sha256 = info.Sha256, datVersion = info.DatVersion },
                 publicRoots = info.Roots, externalReferences = info.References,
-                lighting, atmosphere, camera,
+                lighting, atmosphere, camera, gameplay,
                 modelGroupCount = groups.Length,
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
@@ -193,6 +194,10 @@ public static class SessionExtractor
                     jobjAnimationEdit = jointAnimationsByGroup.Values.SelectMany(animations => animations)
                         .SelectMany(animation => animation.Nodes).Any(node => node.Editable),
                     lightEdit = lighting.LightSets.Any(set => set.Lights.Length > 0),
+                    gameplayPointEdit = gameplay.EditablePoints.Length > 0,
+                    gameplayBoundsEdit = gameplay.EditableBounds.Length > 0,
+                    gameplayItemSpawnTopologyEdit = gameplay.Sets.Any(set =>
+                        set.ItemSpawnTopologyEditable),
                     materialAnimationPreview = materialAnimationsByGroup.Values.Any(animations => animations.Length > 0),
                     textureImageAnimationPreview = materialAnimationsByGroup.Values.SelectMany(animations => animations)
                         .SelectMany(animation => animation.Materials).SelectMany(material => material.Textures)
@@ -208,6 +213,11 @@ public static class SessionExtractor
                     "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
+                editableGameplayPoints = gameplay.EditablePoints.Select(point => new
+                {
+                    point.Id, point.SetIndex, point.EntryIndex, point.Kind,
+                    point.Player
+                }),
                 editableJointAnimations = jointAnimationsByGroup.SelectMany(pair => pair.Value.SelectMany(animation =>
                     animation.Nodes.Where(node => node.Editable).Select(node => new
                     {

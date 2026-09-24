@@ -226,8 +226,13 @@ public class ApplyTests
         Write("lights", new StageLightEdits(SessionExtractor.ProtocolVersion,
             [new StageLightEdit(light.Id, Color: [12, 34, 56])]));
 
-        var jobj = JobjEditing.Select(session.Source.Layout, identity).First();
         var reader = new ArchiveDataReader(session.Source.Layout);
+        int mapHead = session.Source.Layout.Roots.Single(root =>
+            root.Name == "map_head").Offset;
+        int generalSets = reader.Array(mapHead, reader.Int(mapHead + 4), 12);
+        int generalRoot = reader.Pointer(generalSets)!.Value;
+        var jobj = JobjEditing.Select(session.Source.Layout, identity).First(target =>
+            target.SourceOffset != generalRoot);
         Vector3Data Vector(int offset) => new(reader.Float(offset), reader.Float(offset + 4),
             reader.Float(offset + 8));
         Write("jobjs", new JobjTransformEdits(SessionExtractor.ProtocolVersion,
@@ -246,6 +251,18 @@ public class ApplyTests
                 animation.Slot, animation.Node.JobjId,
                 [new JointAnimationTrack("scale.x",
                     [new JointAnimationKey(0, 1.125f, 0, "HSD_A_OP_LIN")])])]));
+
+        var gameplaySnapshot = StageGameplayEditing.Read(session.Source.Layout);
+        var gameplay = gameplaySnapshot.EditablePoints.First(point =>
+            point.Kind == "player-spawn");
+        var gameplaySet = gameplaySnapshot.Sets[gameplay.SetIndex];
+        int itemType = Enumerable.Range(0x7F, 0x15).First(type =>
+            gameplaySet.Points.All(point => point.TypeId != type));
+        Write("gameplay", new GameplayEdits(SessionExtractor.ProtocolVersion,
+            "game", [new GameplayPointEdit(gameplay.Id,
+                gameplay.Position with { X = gameplay.Position.X + 0.75f })],
+            [new GameplayItemSpawnAddition(Guid.NewGuid().ToString("N"),
+                gameplay.SetIndex, itemType, new(3, 4, 0))], []));
 
         var additionTarget = ModelAddition.Select(session.Source, identity)
             .First(target => target.Placement == ModelAddition.ExistingJobjPlacement);
@@ -272,6 +289,7 @@ public class ApplyTests
         Assert.True(result.LightChanged);
         Assert.True(result.JobjChanged);
         Assert.True(result.AnimationChanged);
+        Assert.True(result.GameplayChanged);
         Assert.Equal(File.ReadAllBytes(session.Output), File.ReadAllBytes(repeatedOutput));
         Assert.Empty(new StageArchive(session.Output).Validate());
 

@@ -49,6 +49,10 @@ public sealed class ModelIdentitySnapshot
     public IReadOnlyList<ModelIdentityNode> Nodes { get; }
     internal ModelIdentitySnapshot(List<ModelIdentityNode> nodes) => Nodes = nodes.AsReadOnly();
 
+    internal ModelIdentitySnapshot WithoutSourceOffsets(IReadOnlySet<int> offsets) =>
+        offsets.Count == 0 ? this : new(Nodes.Where(node =>
+            !offsets.Contains(node.SourceOffset)).ToList());
+
     public ModelIdentitySnapshot WithoutPobjs(IEnumerable<string> ids)
     {
         var removed = ids.ToHashSet(StringComparer.Ordinal);

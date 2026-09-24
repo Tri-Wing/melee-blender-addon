@@ -47,7 +47,7 @@ The addition document is strictly validated using this shape:
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "modelAdditionSchemaVersion": 2,
   "coordinateSpace": "game-joint-local",
   "additions": [{
@@ -99,7 +99,7 @@ contains no special addition tag.
 
 ## Manifest and protected identity
 
-`stage.json` declares `protocolVersion: 3`, `assetType: "melee-stage"`,
+`stage.json` declares `protocolVersion: 4`, `assetType: "melee-stage"`,
 `schemaVersion: 2`, source filename/hash/DAT version, public roots and external
 references, group count/file inventory, capabilities, warnings, deferred meshes,
 and `baselineFiles` containing SHA-256 hashes of every extracted JSON payload.
@@ -161,7 +161,7 @@ Dynamic lines/attachments are read-only.
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "coordinateSpace": "game",
   "vertices": [
     { "id": "<existing-or-new-UUID>", "x": 0.0, "y": 0.0 }
@@ -206,6 +206,46 @@ attachments. Collision buffers with external/interior references are also refuse
 until alias-aware editing exists. A no-edit apply remains available and returns
 byte-identical source contents even for read-only collision.
 
+## Gameplay point edits
+
+`stage.json.gameplay.sets` publishes typed general points, boundary pairs, and an
+`itemSpawnTopologyEditable` capability for each set. Melee's ordinary item-spawn
+slots are types `0x7F` through `0x93`, for a maximum of 21 per set.
+`edits/gameplay.json` contains position changes plus item-spawn additions and
+deletions:
+
+```json
+{
+  "protocolVersion": 4,
+  "coordinateSpace": "game",
+  "points": [
+    {"id": "<existing-point-id>", "position": {"x": 0, "y": 10, "z": 0}}
+  ],
+  "additions": [
+    {
+      "id": "<new-UUID>",
+      "setIndex": 0,
+      "typeId": 135,
+      "position": {"x": 15, "y": 20, "z": 0}
+    }
+  ],
+  "deletions": ["<existing-item-point-id>"]
+}
+```
+
+All three operation arrays are required; untouched arrays are empty. Additions
+must use unique UUIDs and fill the lowest item-spawn slots made available by the
+source and any deletions in the same transaction. Only editable item spawns can
+be deleted; player spawns, respawns, and boundary corners remain fixed-inventory
+records. Topology editing requires an identity general-point root and unique
+source item types.
+
+The writer appends ordinary scale-one JOBJs, appends a replacement point-record
+array, and patches only the set count/pointer and final child link. Deleted point
+records are omitted while their old JOBJ bytes remain preserved and unreferenced
+by gameplay. Reload verification checks the exact point records, new JOBJ fields,
+positions, and coexistence with model-graph edits.
+
 ## Preservation write path
 
 Static collision apply uses an append-only writer: it appends new leaf buffers,
@@ -226,7 +266,9 @@ fresh extraction does not reinterpret a deleted or moved POBJ as shared.
 
 Apply composes collision, static light, JOBJ transform, and joint-animation
 domains in memory before executing the complete model plan. Model graph changes,
-geometry, material copy-on-write, and additions then share one builder. The
+geometry, material copy-on-write, and additions then share one builder. Gameplay
+topology runs afterward so its general-point JOBJs cannot invalidate model
+planning; final verification explicitly accounts for those leaf JOBJs. The
 temporary DAT is reloaded once and every domain is verified against its validated
 request before the destination is replaced. With no edit documents, apply
 requires byte-for-byte equality with `source.dat`; repeated exports always begin
@@ -243,7 +285,7 @@ from pathlib import Path
 session = Path("/tmp/GrNLa-session")
 source = json.loads((session / "collision/collision.json").read_text())
 edit = {
-    "protocolVersion": 3,
+    "protocolVersion": 4,
     "coordinateSpace": "game",
     "vertices": [{"id": v["id"], **v["position"]} for v in source["vertices"]],
     "lines": [
@@ -287,7 +329,7 @@ older singular declaration is a version error requiring a fresh DAT import.
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "coordinateSpace": "game-joint-local",
   "meshes": [{
     "id": "<editableMeshes entry id>",
@@ -390,7 +432,7 @@ corresponding `group.json` joint records include `editable` and a
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "coordinateSpace": "game-jobj-local",
   "jobjs": [{
     "id": "<editableJobjs entry id>",
@@ -450,7 +492,7 @@ When native curves change, Blender emits `edits/animations.json`:
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "coordinateSpace": "game-jobj-animation",
   "nodes": [
     {
@@ -582,7 +624,7 @@ three-byte `color`, game-space `position`, and game-space `interest` fields:
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "lights": [
     {"id": "group-003-light-001", "enabled": true,
      "color": [180, 220, 255], "position": {"x": 0, "y": -20, "z": 0}}
@@ -685,7 +727,7 @@ list, for example:
 
 ```json
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "materials": [
     {"id": "<source-mesh-id>", "ambient": [64, 64, 70],
      "diffuse": [30, 100, 210], "specular": [255, 255, 255],

@@ -105,25 +105,35 @@ reload workflow headlessly:
    be moved, renamed, or deleted without affecting DAT export.
    The scene World uses the selected group fog color, matching the clear color
    Melee displays behind all stage geometry. This atmosphere is also preview-only.
-3. Expand **Collision** and choose **Enter Collision Editing**. Front view
+3. In the Outliner, expand **Melee Stage → Gameplay** and select a spawn or
+   boundary guide. Player spawn points are colored diamond outlines (P1 red, P2
+   blue, P3 yellow, P4 green), respawns use smaller diamond outlines, camera
+   bounds are cyan, and the blast zone is red. These guides use the same
+   always-visible viewport line rendering as collision rather than filled faces
+   or materials. Move a marker with Blender's Move tool. Move a rectangle to
+   shift it, or scale it on Blender X/Z to change its width and height. The Item
+   panel provides exact numeric transforms. Expand **Gameplay Tools** to see the
+   selected set's item-spawn count or add a spawn with a viewport click. Select
+   an item-spawn marker and use Blender's normal Delete command to remove it.
+4. Expand **Collision** and choose **Enter Collision Editing**. Front view
    (`Numpad 1`) looks onto the gameplay plane. Move vertices along Blender X and
    Z; keep Blender Y at zero.
    Use the dedicated topology tools below to add or reconnect collision. Native
    vertex/edge deletion is supported. Object transforms and modifiers are rejected.
-4. Select edges to assign a collision type or named surface type, or toggle
+5. Select edges to assign a collision type or named surface type, or toggle
    drop-through and ledge-grab bits. Assigning a type also orients its endpoints
    for the game: floors left-to-right, ceilings right-to-left, right walls down,
    and left walls up. Solid floors are dark green and drop-through floors bright green.
    Ceilings are red, right walls blue, left walls amber, and dynamic collision
    purple. White crosses mark lines with ledge-grab set. Blender's Overlays toggle controls this
    visualization. Unknown source flag bits remain protected.
-5. Under **Validate & Export**, choose **Validate Stage**, then **Export Stage
+6. Under **Validate & Export**, choose **Validate Stage**, then **Export Stage
    DAT**. The filename defaults to the imported DAT name.
    Both actions check the source/session hashes, protected scene content,
    collision compilation, and output reload. Blender asks for confirmation when
    replacing an existing file. Replacement happens only after validation succeeds;
    failed exports leave the previous file intact.
-6. Use **Open Export Directory** to find the result for manual insertion/testing.
+7. Use **Open Export Directory** to find the result for manual insertion/testing.
 
 Vertex changes and property assignments can be exported while still in Edit
 Mode. An untouched scene exports a byte-identical copy of the input DAT. The
@@ -135,6 +145,34 @@ attachments, or collision warnings are imported read-only for collision; a
 no-edit export preserves them. `GrGb.dat` is covered by the read-only smoke test.
 Other stages may contain unsupported preview transforms/bindings and are not yet
 certified. Missing extracted meshes are reported in the sidebar.
+
+## Gameplay points and boundaries
+
+The **Gameplay** collection represents typed `map_head` general points as scene
+objects instead of raw numbers. The current writable subset includes player
+spawns, respawns, all 21 item-spawn types, camera bounds, and blast zones.
+Stages with more than one general-point set receive a separate collection and
+guides for each set. **Gameplay Tools** targets the selected guide's set, falling
+back to the numeric target-set field when no guide is selected. **Add Item
+Spawn** assigns the lowest unused slot, then projects the viewport click onto the
+same depth plane as the set's existing item markers. Blender's normal Delete
+command removes imported editable item markers and cancels newly added markers;
+there is no separate deletion button. The count is capped at Melee's 21 runtime
+slots per set.
+
+Boundary guides are reconstructed from their two source corner points. Their
+orientation is retained even when a source stage stores the corners in an
+unusual order. Export rejects zero-size rectangles and, on stages whose original
+blast zone contains the camera bounds, rejects edits that break that containment.
+Marker scale and all gameplay-guide rotation are visual structure rather than
+stage data and must remain unchanged.
+
+For safety, points are writable only when their general-point root is an identity
+transform and the point is a direct child of that root. A transformed, nested,
+or shared JOBJ remains read-only with an explanation in the sidebar. This avoids
+guessing how stage-specific hierarchies convert local translations into runtime
+positions. Facing direction and match-camera tuning are not editable in this
+first Phase 1 slice.
 
 ## Add an external model
 

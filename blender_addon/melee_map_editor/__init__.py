@@ -13,7 +13,7 @@ from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProp
                        FloatVectorProperty, IntProperty, StringProperty)
 from bpy_extras import view3d_utils
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import animations, atmosphere, camera, collision, scene, topology, materials, inspector, modeling, model_additions, surface, material_properties, jobjs
+from . import animations, atmosphere, camera, collision, gameplay, scene, topology, materials, inspector, modeling, model_additions, surface, material_properties, jobjs
 from .protocol import StageError, read, run
 
 
@@ -463,6 +463,86 @@ class MME_OT_place_collision_vertex(bpy.types.Operator):
         return {'CANCELLED'} if cancelled else {'FINISHED'}
 
 
+class MME_OT_place_item_spawn(bpy.types.Operator):
+    bl_idname = 'mme.place_item_spawn'
+    bl_label = 'Add Item Spawn'
+    bl_description = 'Click in the viewport to add an item spawn on the gameplay plane'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        try:
+            if context.mode != 'OBJECT':
+                raise StageError('Switch to Object Mode before adding an item spawn.')
+            if context.area is None or context.area.type != 'VIEW_3D':
+                raise StageError('Add item spawns from a 3D View.')
+            stage = read(scene.session(context.scene) / 'stage.json')
+            self._set_index = gameplay.set_index(context.scene, stage,
+                                                  context.active_object)
+            self._type_id = gameplay.item_spawn_slot(context.scene,
+                                                      self._set_index)
+            if self._type_id is None:
+                raise StageError('This general-point set already uses all 21 item-spawn slots.')
+            source_set = next(entry for entry in stage['gameplay']['sets']
+                              if entry['index'] == self._set_index)
+            if not source_set.get('itemSpawnTopologyEditable'):
+                raise StageError(source_set.get('itemSpawnTopologyReadOnlyReason')
+                                 or 'Item-spawn topology editing is unavailable.')
+            self._plane_y = gameplay.plane_y(context.scene, self._set_index)
+            self._window_region = next((region for region in context.area.regions
+                                        if region.type == 'WINDOW'), None)
+            if self._window_region is None or context.space_data.region_3d is None:
+                raise StageError('The 3D viewport is unavailable for placement.')
+        except (StageError, OSError, ValueError, KeyError, RuntimeError,
+                StopIteration) as exc:
+            context.scene.mme_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        context.window.cursor_modal_set('CROSSHAIR')
+        context.window_manager.modal_handler_add(self)
+        context.scene.mme_status = ('Click in the 3D viewport to add item spawn '
+                                    f'{self._type_id - gameplay.FIRST_ITEM_SPAWN + 1}; '
+                                    'Esc or right-click cancels.')
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            return self._finish(context, cancelled=True)
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE',
+                          'WHEELINMOUSE', 'WHEELOUTMOUSE'}:
+            return {'PASS_THROUGH'}
+        if event.type != 'LEFTMOUSE' or event.value != 'PRESS':
+            return {'RUNNING_MODAL'}
+        region = self._window_region
+        if not (region.x <= event.mouse_x < region.x + region.width
+                and region.y <= event.mouse_y < region.y + region.height):
+            context.scene.mme_status = 'Click inside the 3D viewport, or press Esc to cancel.'
+            return {'RUNNING_MODAL'}
+        try:
+            coordinate = (event.mouse_x - region.x, event.mouse_y - region.y)
+            origin = view3d_utils.region_2d_to_origin_3d(
+                region, context.space_data.region_3d, coordinate)
+            direction = view3d_utils.region_2d_to_vector_3d(
+                region, context.space_data.region_3d, coordinate)
+            location = gameplay.project_to_plane(origin, direction, self._plane_y)
+            stage = read(scene.session(context.scene) / 'stage.json')
+            obj = gameplay.add_item_spawn(context.scene, stage, self._set_index,
+                                           self._type_id, location)
+            context.scene.mme_gameplay_set_index = self._set_index
+            context.scene.mme_status = (f'Added {obj.name}. Validate before exporting.')
+            self.report({'INFO'}, context.scene.mme_status)
+            return self._finish(context)
+        except (StageError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            context.scene.mme_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return self._finish(context, cancelled=True)
+
+    def _finish(self, context, cancelled=False):
+        context.window.cursor_modal_restore()
+        if context.area:
+            context.area.tag_redraw()
+        return {'CANCELLED'} if cancelled else {'FINISHED'}
+
+
 class MME_OT_open_export(bpy.types.Operator):
     bl_idname = 'mme.open_export_directory'
     bl_label = 'Open Export Directory'
@@ -685,10 +765,55 @@ class MME_PT_jobj_animation(MME_PT_sidebar, bpy.types.Panel):
             layout.label(text=f'{editable_actions} actions have editable JOBJ curves')
 
 
+class MME_PT_gameplay(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Gameplay Tools'
+    bl_idname = 'MME_PT_gameplay'
+    bl_order = 5
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session)
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene
+        try:
+            stage = read(scene.session(s) / 'stage.json')
+            sets = (stage.get('gameplay') or {}).get('sets', [])
+            if not sets:
+                layout.label(text='No general-point sets', icon='LOCKED')
+                return
+            indexes = {entry['index'] for entry in sets}
+            if len(sets) > 1:
+                layout.prop(s, 'mme_gameplay_set_index', text='Target Set')
+            try:
+                index = gameplay.set_index(s, stage, context.active_object)
+            except StageError:
+                index = sets[0]['index']
+            source_set = next(entry for entry in sets if entry['index'] == index)
+            count = len(gameplay.item_objects(s, index))
+            layout.label(text=f'Item Spawns · Set {index}: {count} / 21')
+            row = layout.row()
+            row.enabled = bool(source_set.get('itemSpawnTopologyEditable')) \
+                and count < 21 and context.mode == 'OBJECT'
+            row.operator('mme.place_item_spawn', icon='ADD')
+            if context.mode != 'OBJECT':
+                layout.label(text='Switch to Object Mode to edit item spawns', icon='INFO')
+            elif not source_set.get('itemSpawnTopologyEditable'):
+                _wrapped_labels(layout,
+                    source_set.get('itemSpawnTopologyReadOnlyReason')
+                    or 'Item-spawn topology editing is unavailable.')
+            elif count >= 21:
+                layout.label(text='All item-spawn slots are in use', icon='INFO')
+        except (StageError, OSError, ValueError, KeyError, StopIteration) as exc:
+            _wrapped_labels(layout, str(exc))
+
+
 class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Collision'
     bl_idname = 'MME_PT_collision'
-    bl_order = 5
+    bl_order = 6
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -752,7 +877,7 @@ class MME_PT_collision_legend(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_export(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Validate & Export'
     bl_idname = 'MME_PT_export'
-    bl_order = 6
+    bl_order = 7
 
     @classmethod
     def poll(cls, context):
@@ -772,7 +897,7 @@ class MME_PT_export(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_diagnostics(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Diagnostics'
     bl_idname = 'MME_PT_diagnostics'
-    bl_order = 7
+    bl_order = 8
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -883,6 +1008,7 @@ class MME_PT_edge_raw(MME_PT_sidebar, bpy.types.Panel):
 
 
 _draw_handle = None
+_gameplay_draw_handle = None
 
 
 def draw_collision():
@@ -1101,19 +1227,22 @@ class MME_PT_material(bpy.types.Panel):
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_add_models,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
-           MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex, MME_OT_open_export,
+           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation,
+           MME_OT_model_material,
+           MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex,
+           MME_OT_place_item_spawn, MME_OT_open_export,
            MME_PT_stage, MME_PT_viewport, MME_PT_models, MME_PT_import_models,
-           MME_PT_import_report, MME_PT_jobj_animation, MME_PT_collision,
+           MME_PT_import_report, MME_PT_jobj_animation, MME_PT_gameplay,
+           MME_PT_collision,
            MME_PT_collision_legend, MME_PT_edge, MME_PT_edge_raw, MME_PT_export,
            MME_PT_diagnostics, MME_TextureLayerProperties, MME_PT_material)
 SCENE_PROPS = ('mme_session', 'mme_session_id', 'mme_status', 'mme_export_directory',
                'mme_collision_type', 'mme_collision_material', 'mme_collision_surface',
-               'mme_dithered_transparency')
+               'mme_dithered_transparency', 'mme_gameplay_set_index')
 
 
 def register():
-    global _draw_handle
+    global _draw_handle, _gameplay_draw_handle
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Material.mme_diffuse = FloatVectorProperty(name='Diffuse Color', subtype='COLOR', size=3, min=0, max=1,
@@ -1160,6 +1289,9 @@ def register():
     bpy.types.Scene.mme_collision_type = EnumProperty(name='Type', items=[
         (x, x.replace('-', ' ').title(), '') for x in collision.CATEGORIES[:-1]])
     bpy.types.Scene.mme_collision_material = IntProperty(name='Surface ID', min=0, max=255)
+    bpy.types.Scene.mme_gameplay_set_index = IntProperty(
+        name='General-point set', min=0, max=255, default=0,
+        description='Target general-point set when no gameplay guide is selected')
     bpy.types.Scene.mme_collision_surface = EnumProperty(name='Surface',
         description='Collision surface response (friction and contact effects)',
         items=materials.ITEMS, get=materials.get_surface, set=materials.set_surface)
@@ -1168,13 +1300,18 @@ def register():
     bpy.app.handlers.load_post.append(load_animation)
     if not bpy.app.background:
         _draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_collision, (), 'WINDOW', 'POST_VIEW')
+        _gameplay_draw_handle = bpy.types.SpaceView3D.draw_handler_add(
+            gameplay.draw, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
-    global _draw_handle
+    global _draw_handle, _gameplay_draw_handle
     if _draw_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handle, 'WINDOW')
         _draw_handle = None
+    if _gameplay_draw_handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_gameplay_draw_handle, 'WINDOW')
+        _gameplay_draw_handle = None
     if update_dirty in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(update_dirty)
     if update_animation in bpy.app.handlers.frame_change_post:

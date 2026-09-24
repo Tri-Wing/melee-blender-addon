@@ -37,6 +37,9 @@ public class CorpusTests
                     archive.Validate();
                     var lighting = StageLightingReader.Read(archive.Layout);
                     StageAtmosphereReader.Read(archive.Layout, lighting.PreviewSetId);
+                    var gameplay = StageGameplayEditing.Read(archive.Layout);
+                    Assert.Equal(gameplay.Points.Length,
+                        gameplay.Points.Select(point => point.Id).Distinct().Count());
                     var identities = new ModelIdentityCatalog();
                     var before = ModelIdentity.Capture(archive.Layout, identities);
                     var editableJobjs = JobjEditing.Select(archive.Layout, before);

@@ -1,6 +1,7 @@
 # Melee Map Editor
 
-Linux-first Blender stage editor, with a working Blender collision editing preview. See
+Linux-first Blender stage editor with writable collision, player/item spawn
+points, camera bounds, and blast-zone guides. See
 [the implementation plan](docs/blender-addon-plan.md) and
 [format audit / implementation status](docs/format-audit.md).
 

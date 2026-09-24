@@ -10,14 +10,16 @@ namespace MeleeMap.Core;
 public static class ModelAdditionVerifier
 {
     public static void Verify(ArchiveLayout additionBase, ArchiveLayout archive,
-        ModelIdentitySnapshot identity, PlannedModelAdditions plan)
+        ModelIdentitySnapshot identity, PlannedModelAdditions plan,
+        IReadOnlySet<int>? ignoredJobjOffsets = null)
     {
         Require(additionBase.Roots.SequenceEqual(archive.Roots)
             && additionBase.References.SequenceEqual(archive.References),
             "MODEL_ADDITION_PLAN_MISMATCH",
             "The planned addition changed public roots or external references.");
         var catalog = ModelIdentityCatalog.Restore(identity.Nodes);
-        var actual = ModelIdentity.Capture(archive, catalog);
+        var actual = ModelIdentity.Capture(archive, catalog)
+            .WithoutSourceOffsets(ignoredJobjOffsets ?? new HashSet<int>());
         var actualById = actual.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
         var originalIds = identity.Nodes.Select(node => node.Id)
             .ToHashSet(StringComparer.Ordinal);

@@ -8,7 +8,8 @@ namespace MeleeMap.Core;
 
 public sealed record ApplyResult(string Output, string Sha256, bool CollisionChanged, int CollisionVertices,
     int CollisionLines, bool ModelChanged, int? ModelTriangles, bool MaterialChanged = false,
-    bool LightChanged = false, bool JobjChanged = false, bool AnimationChanged = false);
+    bool LightChanged = false, bool JobjChanged = false, bool AnimationChanged = false,
+    bool GameplayChanged = false);
 
 public static class SessionApplier
 {
@@ -86,12 +87,14 @@ public static class SessionApplier
         string lightPath = Path.Combine(directory, "edits/lights.json");
         string jobjPath = Path.Combine(directory, "edits/jobjs.json");
         string animationPath = Path.Combine(directory, "edits/animations.json");
+        string gameplayPath = Path.Combine(directory, "edits/gameplay.json");
         string additionPath = Path.Combine(directory, "edits/additions.json");
         string additionAssets = Path.Combine(directory, "edits/addition-assets");
         string[] editFiles = Directory.GetFiles(Path.Combine(directory, "edits"), "*", SearchOption.AllDirectories);
         foreach (string edit in editFiles)
             Require(edit == editPath || edit == modelPath || edit == materialPath || edit == lightPath
                 || edit == jobjPath || edit == animationPath || edit == additionPath
+                || edit == gameplayPath
                 || edit.StartsWith(additionAssets + Path.DirectorySeparatorChar, StringComparison.Ordinal),
                 "EDIT_UNSUPPORTED", $"Unsupported edit file {Path.GetRelativePath(directory, edit)}.");
         Require(File.Exists(additionPath) || !editFiles.Any(edit =>
@@ -168,8 +171,20 @@ public static class SessionApplier
             Require(edits != null, "ANIMATION_EDIT_FORMAT", "Empty JOBJ animation edit document.");
             animationRequest = new(edits!, declared);
         }
+        GameplayEditRequest? gameplayRequest = null;
+        if (File.Exists(gameplayPath))
+        {
+            var declared = m.TryGetProperty("editableGameplayPoints", out var list)
+                ? list.EnumerateArray().Select(entry =>
+                    entry.GetProperty("id").GetString()!).ToArray() : [];
+            var edits = JsonSerializer.Deserialize<GameplayEdits>(
+                File.ReadAllText(gameplayPath), Json);
+            Require(edits != null, "GAMEPLAY_EDIT_FORMAT",
+                "Empty gameplay edit document.");
+            gameplayRequest = new(edits!, declared);
+        }
         var transactionPlan = new StageEditTransactionPlan(collision, changed, modelPlan,
-            lightRequest, jobjRequest, animationRequest);
+            lightRequest, jobjRequest, animationRequest, gameplayRequest);
         var execution = StageEditTransaction.Execute(source, catalog, modelBaseline,
             transactionPlan);
         byte[] bytes = execution.Bytes;
@@ -190,7 +205,8 @@ public static class SessionApplier
         return new(output, Hash(bytes), changed, collision.Vertices.Length, collision.Lines.Length,
             anyModelChanged, anyModelChanged ? modelTriangles : null,
             modelExecution.MaterialWrite != null, execution.Lights != null,
-            execution.Jobjs != null, execution.Animations != null);
+            execution.Jobjs != null, execution.Animations != null,
+            execution.Gameplay != null);
 
         string Contained(string relative)
         {

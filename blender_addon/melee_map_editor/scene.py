@@ -5,7 +5,7 @@ import tempfile
 import uuid
 import bpy
 from mathutils import Matrix
-from . import animations, atmosphere, camera, collision, jobjs, lighting, modeling, model_additions, surface
+from . import animations, atmosphere, camera, collision, gameplay, jobjs, lighting, modeling, model_additions, surface
 from .protocol import StageError, digest, load_session, read, run
 from .transforms import AXES, deform_rest, joint_matrices, joint_srt, mesh_binding, mesh_pose
 
@@ -40,7 +40,8 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     # Preview cameras are disposable editor aids. Moving, renaming, or deleting
     # one must never turn into a DAT edit or fail protected-scene validation.
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid
-               and o.get('mme_role') != 'preview-camera' and not model_additions.is_pending(o)]
+               and o.get('mme_role') != 'preview-camera'
+               and not model_additions.is_pending(o) and not gameplay.is_pending(o)]
     result = {'collections': [], 'objects': []}
     session_actions = [action for action in bpy.data.actions
                        if action.get('mme_session_id') == sid]
@@ -57,7 +58,8 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
                        + (['SCENE'] if c.name in scene.collection.children else []),
             'objects': sorted(o.get('mme_id', o.name) for o in c.objects
                               if o.get('mme_role') != 'preview-camera'
-                              and not model_additions.is_pending(o)),
+                              and not model_additions.is_pending(o)
+                              and not gameplay.is_pending(o)),
             'children': sorted(x.get('mme_id', x.name) for x in c.children
                                if x.get('mme_role') != model_additions.COLLECTION_ROLE)})
     for o in objects:
@@ -146,18 +148,20 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     return result
 
 
-def protected_inventory_matches(scene, editable_id, editable_transform_ids=None):
+def protected_inventory_matches(scene, editable_id, editable_transform_ids=None,
+                                deletable_ids=None):
     current = inventory(scene, editable_id, editable_transform_ids)
     expected = scene.get('mme_guard')
     if digest(current) == expected:
         return True
     editable_ids = {editable_id} if isinstance(editable_id, str) else set(editable_id or ())
+    allowed_deletions = editable_ids | set(deletable_ids or ())
     stored = scene.get('mme_guard_inventory')
-    if stored and editable_ids:
+    if stored and allowed_deletions:
         try:
             adjusted = json.loads(stored)
             current_ids = {row['props']['mme_id'] for row in current['objects']}
-            deleted_ids = editable_ids - current_ids
+            deleted_ids = allowed_deletions - current_ids
             if deleted_ids:
                 adjusted['objects'] = [row for row in adjusted['objects']
                                        if row['props']['mme_id'] not in deleted_ids]
@@ -210,6 +214,8 @@ def import_session(context, directory):
         collisions = collection('Collision', root, 'collisions', 'collisions')
         lights = collection('Lights', root, 'lights', 'lights')
         reference = collection('Reference', root, 'reference', 'reference')
+        gameplay.create(root, stage, tag, created_objects, created_meshes,
+                        collection)
         camera.create(reference, stage, tag, created_objects, created_cameras, scene)
         atmosphere.create(stage, scene, created_worlds)
         light_objects = lighting.create(lights, stage, tag, created_objects, created_data, collection)
@@ -446,7 +452,8 @@ def import_session(context, directory):
         scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(
             modeling.target_object(scene, info), modeling.appearance_locked(info))
             for info in editable_models})
-        guard = inventory(scene, modeling.target_ids(scene), jobjs.target_ids(scene))
+        editable_transforms = jobjs.target_ids(scene) | gameplay.editable_transform_ids(scene)
+        guard = inventory(scene, modeling.target_ids(scene), editable_transforms)
         scene['mme_guard_inventory'] = json.dumps(guard)
         scene['mme_guard'] = digest(guard)
         scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
@@ -497,8 +504,10 @@ def import_session(context, directory):
 def prepare(scene):
     directory = session(scene)
     stage = load_session(directory)
+    editable_transforms = jobjs.target_ids(scene) | gameplay.editable_transform_ids(scene)
     if not protected_inventory_matches(scene, modeling.target_ids(scene),
-                                       jobjs.target_ids(scene)):
+                                       editable_transforms,
+                                       gameplay.deletable_ids(scene, stage)):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
     obj = collision_object(scene)
@@ -511,6 +520,7 @@ def prepare(scene):
     from . import material_properties
     material_properties.edits(scene, stage)
     lighting.edits(scene, stage)
+    gameplay.edits(scene, stage)
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobjs.edits(scene, stage, groups)
     animations.edits(scene, stage, groups)
@@ -525,6 +535,7 @@ def apply(scene, cli, dotnet, output):
     from . import material_properties
     material_edits = material_properties.edits(scene, stage)
     light_edits = lighting.edits(scene, stage)
+    gameplay_edits = gameplay.edits(scene, stage)
     groups = [read(directory / entry['file']) for entry in stage['modelGroups']]
     jobj_edits = jobjs.edits(scene, stage, groups)
     animation_edits = animations.edits(scene, stage, groups)
@@ -532,6 +543,8 @@ def apply(scene, cli, dotnet, output):
     payloads = {}
     if light_edits is not None:
         payloads[directory / 'edits/lights.json'] = light_edits
+    if gameplay_edits is not None:
+        payloads[directory / 'edits/gameplay.json'] = gameplay_edits
     if jobj_edits is not None:
         payloads[directory / 'edits/jobjs.json'] = jobj_edits
     if animation_edits is not None:

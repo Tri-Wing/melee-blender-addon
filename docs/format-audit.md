@@ -16,7 +16,7 @@ its full validator. Model hierarchy validation, collision consistency checks, pr
 comparison, full `GrNLa` geometry extraction, and static collision `apply` are now
 implemented. Blender 4.5.0 import and static collision vertex/property editing are
 now available; see [the add-on guide](blender-addon.md). One-target grey model editing is now implemented with automated reload checks;
-model in-game acceptance and full GX/reference and GroundParam audits remain pending.
+model in-game acceptance and full GX/reference and remaining GroundParam audits remain pending.
 
 ## Source evidence
 
@@ -29,6 +29,8 @@ Paths below refer to that checkout, avoiding dependence on moving web sources.
 | Map group +0x2C / +0x30 | `melee/src/melee/gr/types.h:2041` defines `s16*` and count; `ground.c:906` resolves each entry as a JOBJ index | `JOBJIndices` is `HSDShortArray`; count is explicit |
 | MapLine +4/+6/+8/+A | `melee/src/melee/mp/types.h:47` defines prev_id0, next_id0, prev_id1, next_id1 | Added `PreviousId0`, `NextId0`, `PreviousId1`, `NextId1`; legacy NextLine/PreviousLine names retain their old offsets for compatibility, which are opposite to engine naming |
 | MapCollData +0x2C | `melee/src/melee/mp/types.h:124` includes an **inferred** int x2C | New accessor size is 0x30 and exposes `Unknown2C`; existing raw structures are never resized on read/save |
+| `map_head` +0x00 / +0x04 | `HSDRaw/Melee/Gr/SBM_Map_Head.cs` identifies the general-point array and count | Typed general-point sets are read directly with bounded counts and stable set/entry IDs |
+| General-point entry +0x00 / +0x02 | `SBM_GeneralPointInfo` stores a JOBJ traversal index and `PointType`; HSDRawViewer's `GeneralPointEditor` resolves the index and edits the JOBJ translation | Player/item spawns and camera/blast corner types are exposed; only flat identity-root records are writable |
 
 The incorrect `CollisionLinks2`/`CollisionLinkCount2` API was removed, rather than
 keeping a six-byte accessor over a two-byte array. No references to those names
@@ -77,24 +79,48 @@ finite collision vertices, vertex/link indices, category flags, nonoverlapping
 complete category ranges, joint ownership/ranges/bounds, reciprocal links at
 simple vertices, and local dynamic attachment indices. Zero-length retail lines
 and companion-archive attachments produce warnings. Full GX validation,
-complex-link compilation, and stage-code attachment discovery remain pending. GroundParam names/types have not been audited yet.
+complex-link compilation, and stage-code attachment discovery remain pending.
+The `grGroundParam` fixed-camera pose/FOV fields are decoded for preview, but
+the remaining names and write semantics are not fully audited.
 Edited collision exports are covered by automated reload tests. A user has now
 reported a successful in-game vertex-edit test; see the acceptance note below.
 
+## Gameplay general points
+
+`map_head` stores an array of 0x0C-byte general-point descriptors. Each descriptor
+points to a JOBJ hierarchy plus an array of four-byte records containing a signed
+JOBJ preorder index and signed point type. Corpus and HSDRaw evidence agree on
+types 0–3 (player spawns), 4–7 (respawns), 127–147 (21 item spawns), 149/150
+(camera-boundary corners), and 151/152 (blast-zone corners). Their authoritative
+coordinates are the referenced JOBJ translation fields at +0x2C/+0x30/+0x34.
+
+The first writable subset requires the descriptor root to have identity SRT and
+each referenced point to be its direct child. Shared point JOBJs and nested or
+transformed hierarchies remain read-only because their stored translations are
+not necessarily world coordinates. Multiple general-point sets remain separate;
+the editor does not assume set zero is always active. Writes patch only the
+twelve translation bytes for movement. Item-spawn topology writes append a leaf
+JOBJ and replacement point-record array, preserve unknown records, enforce unique
+runtime slots, and verify the result after reloading.
+
+The match camera combines these camera-boundary points with offsets and tuning
+loaded from `grGroundParam`. The latter's previewed fixed-camera pose and FOV are
+not writable yet. Spawn facing direction has not been identified as a generic
+authoritative general-point field and is also deferred.
+
 ## HSDLib fork workflow
 
-`HSDLib/` is an independent Git checkout, currently based on upstream
-`85567e40797de3c820a55476eca54c704921a848` from
-`https://github.com/Ploaj/HSDLib.git`. Keep its history independent while the
-application is established. The workspace root currently has no Git repository.
+`HSDLib/` is an independent Git checkout. The top-level project pins the
+`Tri-Wing/HSDLib` fork's `blender_plugin` branch; upstream HSDLib remains
+`Ploaj/HSDLib`. Keep the fork's history independent from the application.
 
 Keep local HSDRaw patches in that checkout and review them with
 `git -C HSDLib diff`. Before updating upstream, commit the project patches on a
 project branch, fetch the upstream baseline, rebase that branch, and rerun
 `dotnet test MeleeMap.sln`. Review all schema and preservation regressions before
-accepting the update. No remote fork has been created or pushed. Application
-projects reference the local fork project; never replace it with an unpatched
-NuGet binary. HSDRawViewer is outside the Linux build.
+accepting the update. Application projects reference the pinned fork project;
+never replace it with an unpatched NuGet binary. HSDRawViewer is outside the
+Linux build.
 
 
 ## Model identity validation

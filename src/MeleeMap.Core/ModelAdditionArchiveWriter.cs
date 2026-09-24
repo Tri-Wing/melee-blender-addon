@@ -267,7 +267,8 @@ public static class ModelAdditionArchiveWriter
 
     public static void Verify(ArchiveLayout source, ArchiveLayout archive,
         ModelIdentitySnapshot identity, ModelAdditionWrite expected,
-        bool verifyPreservation = true)
+        bool verifyPreservation = true,
+        IReadOnlySet<int>? ignoredJobjOffsets = null)
     {
         Require(source.Roots.SequenceEqual(archive.Roots) && source.References.SequenceEqual(archive.References),
             "MODEL_ADDITION_ROOTS", "Root or external-reference inventory changed while adding models.");
@@ -281,7 +282,8 @@ public static class ModelAdditionArchiveWriter
         }
 
         var catalog = ModelIdentityCatalog.Restore(identity.Nodes);
-        var extended = ModelIdentity.Capture(archive, catalog);
+        var extended = ModelIdentity.Capture(archive, catalog)
+            .WithoutSourceOffsets(ignoredJobjOffsets ?? new HashSet<int>());
         int expectedNewNodes = expected.Chunks.Length * 2 + expected.Jobjs.Length;
         Require(extended.Nodes.Count == identity.Nodes.Count + expectedNewNodes,
             "MODEL_ADDITION_GRAPH", $"Model graph extension contains an unexpected descriptor count "

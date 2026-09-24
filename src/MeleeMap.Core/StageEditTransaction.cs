@@ -5,6 +5,7 @@ namespace MeleeMap.Core;
 public sealed record StageLightEditRequest(StageLightEdits Edits, string[] DeclaredIds);
 public sealed record JobjTransformEditRequest(JobjTransformEdits Edits, string[] DeclaredIds);
 public sealed record JointAnimationEditRequest(JointAnimationEdits Edits, string[] DeclaredTargets);
+public sealed record GameplayEditRequest(GameplayEdits Edits, string[] DeclaredIds);
 
 public sealed record StageEditTransactionPlan(
     CollisionData Collision,
@@ -12,14 +13,16 @@ public sealed record StageEditTransactionPlan(
     ModelEditPlan Model,
     StageLightEditRequest? Lights,
     JobjTransformEditRequest? Jobjs,
-    JointAnimationEditRequest? Animations);
+    JointAnimationEditRequest? Animations,
+    GameplayEditRequest? Gameplay);
 
 public sealed record StageEditTransactionExecution(
     byte[] Bytes,
     ModelEditExecution Model,
     StageLightWrite? Lights,
     JobjTransformWrite? Jobjs,
-    JointAnimationWrite? Animations);
+    JointAnimationWrite? Animations,
+    GameplayWrite? Gameplay);
 
 /// <summary>
 /// Composes the independently owned stage domains into one in-memory transaction.
@@ -63,7 +66,19 @@ public static class StageEditTransaction
 
         var model = ModelEditExecutor.Execute(new ArchiveLayout(bytes), catalog,
             plan.Model);
-        return new(model.Bytes, model, lightWrite, jobjWrite, animationWrite);
+        bytes = model.Bytes;
+
+        GameplayWrite? gameplayWrite = null;
+        if (plan.Gameplay != null)
+        {
+            gameplayWrite = StageGameplayEditing.Write(source.Layout,
+                new ArchiveLayout(bytes), plan.Gameplay.Edits,
+                plan.Gameplay.DeclaredIds);
+            bytes = gameplayWrite.Bytes;
+        }
+
+        return new(bytes, model, lightWrite, jobjWrite, animationWrite,
+            gameplayWrite);
     }
 
     public static void Verify(StageArchive source, StageArchive reloaded,
@@ -71,7 +86,8 @@ public static class StageEditTransaction
         StageEditTransactionPlan plan, StageEditTransactionExecution execution)
     {
         VerifyCollision(reloaded.Layout, plan.Collision);
-        ModelEditVerifier.Verify(reloaded.Layout, catalog, plan.Model, execution.Model);
+        ModelEditVerifier.Verify(reloaded.Layout, catalog, plan.Model, execution.Model,
+            execution.Gameplay?.AddedJobjs.Select(jobj => jobj.Offset).ToHashSet());
         if (execution.Lights != null)
             StageLightEditing.Verify(reloaded.Layout, execution.Lights);
         if (execution.Jobjs != null)
@@ -79,13 +95,16 @@ public static class StageEditTransaction
         if (execution.Animations != null)
             JointAnimationEditing.Verify(reloaded.Layout, modelBaseline,
                 execution.Animations);
+        if (execution.Gameplay != null)
+            StageGameplayEditing.Verify(reloaded.Layout, execution.Gameplay);
 
         bool modelWrite = plan.Model.Changes.Count > 0
             || plan.Model.Deletions.Count > 0
             || plan.Model.MaterialEdits != null
             || plan.Model.Additions != null;
         if (!plan.CollisionChanged && !modelWrite && plan.Lights == null
-            && plan.Jobjs == null && plan.Animations == null)
+            && plan.Jobjs == null && plan.Animations == null
+            && plan.Gameplay == null)
             Require(source.Layout.Bytes.SequenceEqual(reloaded.Layout.Bytes),
                 "ROUNDTRIP_MISMATCH", "No-edit apply changed archive bytes.");
     }

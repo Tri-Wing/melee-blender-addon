@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 
-SESSION_PROTOCOL = 3
+SESSION_PROTOCOL = 4
 SESSION_SCHEMA = 2
 MODEL_OPERATIONS = ('vertexMovement', 'topologyReplacement', 'uvEditing',
                     'vertexColorEditing', 'materialAssignment',
