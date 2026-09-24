@@ -461,6 +461,11 @@ All inspector values are read-only and refresh from the current selection.
 Work in Collision Edit Mode. Use vertex selection for Extend and Connect, and
 edge selection for Split and Reverse. The overlay arrows show edge direction.
 
+- **Place Collision Vertex:** click the button, then click in the 3D viewport.
+  The view ray is projected onto the collision object's plane, so the new vertex
+  always has Blender-local Y = 0 even in perspective view. The isolated vertex is
+  selected after placement. Connect it to another endpoint before export;
+  unconnected points are editing aids and do not become game collision by themselves.
 - **Split Edge:** select one or more edges. Each is split at its midpoint,
   preserving direction, type, material, flags, and joint. Move the new vertices
   with Blender's normal move tool.

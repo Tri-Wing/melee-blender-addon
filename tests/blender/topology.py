@@ -5,6 +5,7 @@ import sys
 import tempfile
 import bpy
 import bmesh
+from mathutils import Vector
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
@@ -44,6 +45,30 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     bpy.context.view_layer.objects.active = obj
     bpy.ops.object.mode_set(mode='EDIT')
     original = collision.serialize(obj, source)
+    # View rays are projected onto local Y=0 and create one selected isolated vertex.
+    projected = topology.project_to_collision_plane(
+        obj, Vector((125, -100, 75)), Vector((0, 1, 0)))
+    assert projected == Vector((125, 0, 75))
+    handle = topology.add_isolated_vertex(obj, source, projected)
+    assert handle == len(source['vertices']) + 1
+    placed = collision.serialize(obj, source)
+    assert len(placed['vertices']) == len(original['vertices']) + 1
+    assert placed['lines'] == original['lines']
+    bm = bmesh.from_edit_mesh(obj.data)
+    vertex_layer = bm.verts.layers.int['mme_vertex']
+    created = next(vertex for vertex in bm.verts if vertex[vertex_layer] == handle)
+    assert created.select and created.co == Vector((125, 0, 75))
+    assert sum(vertex.select for vertex in bm.verts) == 1
+    bm.verts.remove(created)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
+    assert collision.serialize(obj, source) == original
+    try:
+        topology.project_to_collision_plane(
+            obj, Vector((0, 0, 0)), Vector((1, 0, 0)))
+    except StageError as exc:
+        assert 'face-on' in str(exc)
+    else:
+        raise AssertionError('An edge-on placement ray should be rejected')
     # Invalid selections are rejected before touching geometry or metadata.
     for operation, vertices, edges in [('extend', (), (1,)), ('connect', (1, 2), ())]:
         select(obj, vertices=vertices, edges=edges)
@@ -156,4 +181,4 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
         assert 'native topology' in str(exc), str(exc)
     else:
         raise AssertionError('Native subdivision should be rejected')
-print('BLENDER_TOPOLOGY_OK: split, reverse, native deletion, connect, extend, save/load, exports, metadata guard')
+print('BLENDER_TOPOLOGY_OK: isolated placement, split, reverse, native deletion, connect, extend, save/load, exports, metadata guard')

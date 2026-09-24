@@ -6,6 +6,56 @@ from . import collision
 from .protocol import StageError
 
 
+def project_to_collision_plane(obj, ray_origin, ray_direction):
+    """Intersect a world-space view ray with the collision object's local Y=0 plane."""
+    plane_origin = obj.matrix_world @ Vector((0, 0, 0))
+    normal = (obj.matrix_world.inverted_safe().transposed().to_3x3()
+              @ Vector((0, 1, 0))).normalized()
+    direction = Vector(ray_direction)
+    denominator = direction.dot(normal)
+    if not all(math.isfinite(value) for value in (*ray_origin, *direction)) \
+            or direction.length_squared == 0:
+        raise StageError('The viewport produced an invalid placement ray.')
+    if abs(denominator) <= 0.000001:
+        raise StageError('View the collision more face-on before placing a vertex.')
+    distance = (plane_origin - Vector(ray_origin)).dot(normal) / denominator
+    if distance < 0:
+        raise StageError('The collision plane is behind the current view.')
+    local = obj.matrix_world.inverted_safe() @ (Vector(ray_origin) + direction * distance)
+    local.y = 0
+    if not all(math.isfinite(value) for value in local):
+        raise StageError('The projected collision position is invalid.')
+    return local
+
+
+def add_isolated_vertex(obj, source, coordinate):
+    """Create and select one identity-bearing collision vertex without an edge."""
+    collision.serialize(obj, source)
+    bm = bmesh.from_edit_mesh(obj.data)
+    vertex = bm.verts.layers.int['mme_vertex']
+    next_vertex = max([len(source['vertices'])] + [v[vertex] for v in bm.verts]) + 1
+    if len(bm.verts) >= 32767 or next_vertex > 32767:
+        raise StageError('Collision exceeds the 32767 vertex limit.')
+    coordinate = Vector(coordinate)
+    if not all(math.isfinite(value) for value in coordinate):
+        raise StageError('Collision vertex coordinates must be finite.')
+    coordinate.y = 0
+    for face in bm.faces:
+        face.select_set(False)
+    for edge in bm.edges:
+        edge.select_set(False)
+    for existing in bm.verts:
+        existing.select_set(False)
+    created = bm.verts.new(coordinate)
+    created[vertex] = next_vertex
+    created.select_set(True)
+    bm.select_mode = {'VERT'}
+    bm.select_history.clear()
+    bm.select_history.add(created)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
+    return next_vertex
+
+
 def edit(obj, source, operation, dx=10, dz=0, category=0, material=0, joint=1):
     # Check existing metadata before mutation, including native tool damage.
     collision.serialize(obj, source)

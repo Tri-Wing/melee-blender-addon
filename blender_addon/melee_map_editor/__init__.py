@@ -11,6 +11,7 @@ import bmesh
 import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty,
                        FloatVectorProperty, IntProperty, StringProperty)
+from bpy_extras import view3d_utils
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from . import animations, atmosphere, camera, collision, scene, topology, materials, inspector, modeling, model_additions, surface, material_properties, jobjs
 from .protocol import StageError, read, run
@@ -380,6 +381,88 @@ class MME_OT_topology(bpy.types.Operator):
         return execute_safely(self, context, action)
 
 
+class MME_OT_place_collision_vertex(bpy.types.Operator):
+    bl_idname = 'mme.place_collision_vertex'
+    bl_label = 'Place Collision Vertex'
+    bl_description = 'Click in the viewport to place an isolated vertex on the collision plane'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        try:
+            obj = scene.collision_object(context.scene)
+            if context.edit_object != obj:
+                raise StageError('Enter Collision Editing first.')
+            if context.area is None or context.area.type != 'VIEW_3D':
+                raise StageError('Place collision vertices from a 3D View.')
+            directory = scene.session(context.scene)
+            if not read(directory / 'stage.json')['capabilities']['collisionEdit']:
+                raise StageError('Collision is read-only for this stage.')
+            self._window_region = next((region for region in context.area.regions
+                                        if region.type == 'WINDOW'), None)
+            if self._window_region is None or context.space_data.region_3d is None:
+                raise StageError('The 3D viewport is unavailable for placement.')
+        except (StageError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            context.scene.mme_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        context.window.cursor_modal_set('CROSSHAIR')
+        context.window_manager.modal_handler_add(self)
+        context.scene.mme_status = 'Click in the 3D viewport to place a collision vertex; Esc or right-click cancels.'
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            return self._finish(context, cancelled=True)
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE',
+                          'WHEELINMOUSE', 'WHEELOUTMOUSE'}:
+            return {'PASS_THROUGH'}
+        if event.type != 'LEFTMOUSE' or event.value != 'PRESS':
+            return {'RUNNING_MODAL'}
+        region = self._window_region
+        if not (region.x <= event.mouse_x < region.x + region.width
+                and region.y <= event.mouse_y < region.y + region.height):
+            context.scene.mme_status = 'Click inside the 3D viewport, or press Esc to cancel.'
+            return {'RUNNING_MODAL'}
+        try:
+            obj = scene.collision_object(context.scene)
+            if context.edit_object != obj:
+                raise StageError('Collision Edit Mode ended before placement.')
+            coordinate = (event.mouse_x - region.x, event.mouse_y - region.y)
+            origin = view3d_utils.region_2d_to_origin_3d(
+                region, context.space_data.region_3d, coordinate)
+            direction = view3d_utils.region_2d_to_vector_3d(
+                region, context.space_data.region_3d, coordinate)
+        except (StageError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            context.scene.mme_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return self._finish(context, cancelled=True)
+        try:
+            local = topology.project_to_collision_plane(obj, origin, direction)
+        except StageError as exc:
+            context.scene.mme_status = f'{exc} Adjust the view and click again, or press Esc to cancel.'
+            self.report({'WARNING'}, str(exc))
+            return {'RUNNING_MODAL'}
+        try:
+            source = read(scene.session(context.scene) / 'collision/collision.json')
+            topology.add_isolated_vertex(obj, source, local)
+            context.tool_settings.mesh_select_mode = (True, False, False)
+            obj['mme_dirty'] = True
+            context.scene.mme_status = ('Placed an isolated collision vertex. Connect it to another '
+                                        'vertex before export.')
+            self.report({'INFO'}, context.scene.mme_status)
+            return self._finish(context)
+        except (StageError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            context.scene.mme_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return self._finish(context, cancelled=True)
+
+    def _finish(self, context, cancelled=False):
+        context.window.cursor_modal_restore()
+        if context.area:
+            context.area.tag_redraw()
+        return {'CANCELLED'} if cancelled else {'FINISHED'}
+
+
 class MME_OT_open_export(bpy.types.Operator):
     bl_idname = 'mme.open_export_directory'
     bl_label = 'Open Export Directory'
@@ -628,6 +711,7 @@ class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
         if not editable:
             layout.label(text='Read-only for this stage', icon='LOCKED')
             return
+        layout.operator('mme.place_collision_vertex', icon='ADD')
         for left, right in ((('split', 'Split Edge'), ('extend', 'Extend Collision')),
                             (('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))):
             row = layout.row(align=True)
@@ -1018,7 +1102,7 @@ class MME_PT_material(bpy.types.Panel):
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_add_models,
            MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
-           MME_OT_assign, MME_OT_topology, MME_OT_open_export,
+           MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex, MME_OT_open_export,
            MME_PT_stage, MME_PT_viewport, MME_PT_models, MME_PT_import_models,
            MME_PT_import_report, MME_PT_jobj_animation, MME_PT_collision,
            MME_PT_collision_legend, MME_PT_edge, MME_PT_edge_raw, MME_PT_export,
