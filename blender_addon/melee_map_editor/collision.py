@@ -1,4 +1,5 @@
-"""Collision edge attributes retain orientation independently of Blender edge order."""
+"""Collision attributes and moving-joint preview helpers."""
+import json
 import math
 import uuid
 import bpy
@@ -44,6 +45,68 @@ def create(collection, source, tag):
         for item, value in zip(attr.data, values[key]):
             item.value = value
     return obj
+
+
+def configure_moving_preview(obj, source):
+    """Record unambiguous serialized JOBJ bindings for the viewport overlay."""
+    grouped = {}
+    for attachment in source.get('attachments', []):
+        joint = attachment['source']['jointIndex']
+        grouped.setdefault(joint, []).append(attachment)
+    bindings = {}
+    unresolved = {}
+    for joint, attachments in grouped.items():
+        if len(attachments) == 1 and attachments[0].get('jobjId'):
+            bindings[str(joint)] = attachments[0]['jobjId']
+        else:
+            unresolved[str(joint)] = ('external-target' if len(attachments) == 1
+                                      and not attachments[0].get('jobjId')
+                                      else 'multiple-bindings')
+    obj['mme_collision_bindings'] = json.dumps(bindings, sort_keys=True)
+    obj['mme_collision_unresolved_bindings'] = json.dumps(unresolved,
+                                                          sort_keys=True)
+    # Hide the untransformed source mesh outside Edit Mode when at least one
+    # attachment can be previewed; the GPU overlay remains visible and evaluates
+    # the current pose-bone matrices. Edit Mode exposes the DAT's local geometry.
+    if bindings:
+        obj['mme_collision_source_hidden'] = True
+        obj.hide_set(True)
+    return bindings, unresolved
+
+
+def attachment_transforms(scene, obj):
+    """Resolve serialized one-to-one collision bindings to current Blender poses."""
+    try:
+        bindings = json.loads(obj.get('mme_collision_bindings', '{}'))
+    except (TypeError, ValueError):
+        raise StageError('Moving-collision binding metadata is invalid. Re-import the DAT.')
+    result = {}
+    for joint, jobj_id in bindings.items():
+        matches = [(armature, bone) for armature in scene.objects
+                   if armature.type == 'ARMATURE'
+                   and armature.get('mme_session_id') == scene.mme_session_id
+                   and armature.get('mme_role') == 'jobj-armature'
+                   for bone in armature.pose.bones if bone.get('mme_id') == jobj_id]
+        if len(matches) != 1:
+            raise StageError('A moving-collision JOBJ target is missing or duplicated. Re-import the DAT.')
+        armature, bone = matches[0]
+        result[int(joint)] = armature.matrix_world @ bone.matrix
+    return result
+
+
+def display_edge_points(scene, obj, edge, transforms=None):
+    """Return an edge's evaluated viewport endpoints in source direction."""
+    transforms = transforms if transforms is not None else attachment_transforms(scene, obj)
+    vertex = obj.data.attributes.get('mme_vertex')
+    start = obj.data.attributes.get('mme_start')
+    joint = obj.data.attributes.get('mme_joint')
+    if vertex is None or start is None or joint is None:
+        raise StageError('Collision attributes are missing. Re-import the DAT.')
+    matrix = transforms.get(joint.data[edge.index].value - 1, obj.matrix_world)
+    points = [matrix @ obj.data.vertices[index].co for index in edge.vertices]
+    if vertex.data[edge.vertices[0]].value != start.data[edge.index].value:
+        points.reverse()
+    return points
 
 
 def serialize(obj, source):
@@ -98,7 +161,11 @@ def serialize(obj, source):
             raise StageError('Collision joint identity changed.')
         if not 0 <= category < len(CATEGORIES) or not 0 <= high <= 65535 or not 0 <= low <= 65535:
             raise StageError('Invalid collision type or flags.')
-        if (original and (high != original['highFlags'] or (low & 0xFC00) != (original['lowFlags'] & 0xFC00))) or (not original and (high & ~15 or low & 0xFC00)):
+        new_high_known = ((high & ~31) == 0 and high & 16
+                          and high & 15 in (1, 2, 4, 8)) \
+            if category == CATEGORIES.index('dynamic') else (high & ~15) == 0
+        if (original and (high != original['highFlags'] or (low & 0xFC00) != (original['lowFlags'] & 0xFC00))) \
+                or (not original and (not new_high_known or low & 0xFC00)):
             raise StageError('Protected collision flag bits changed.')
         lines.append({'id': identity(source, 'lines', handle), 'vertex0Id': identity(source, 'vertices', start),
                       'vertex1Id': identity(source, 'vertices', end), 'jointId': source['joints'][joint-1]['id'],

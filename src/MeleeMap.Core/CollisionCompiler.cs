@@ -16,12 +16,11 @@ public static class CollisionCompiler
 {
     public const float WeldEpsilon = 0.0001f;
     public const float BoundsMargin = 8;
-    private static readonly string[] Categories = ["floor", "ceiling", "right-wall", "left-wall"];
+    private static readonly string[] Categories = ["floor", "ceiling", "right-wall", "left-wall", "dynamic"];
 
     public static CollisionData Compile(CollisionData source, CollisionSourceIds ids, CollisionEdits edits)
     {
         Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.CoordinateSpace == "game", "COLLISION_EDIT_VERSION", "Expected current protocol and game-space collision coordinates.");
-        Require(source.Ranges[4].Count == 0 && source.Attachments.Length == 0, "COLLISION_DYNAMIC_READ_ONLY", "Collision with dynamic lines or attachments is read-only in this version.");
         Require(source.Validate().Count == 0, "COLLISION_SOURCE_WARNING", "Resolve source collision warnings before editing.");
         Require(edits.Vertices != null && edits.Lines != null && edits.Lines.Length > 0
             && edits.Vertices.Length <= short.MaxValue && edits.Lines.Length <= short.MaxValue, "COLLISION_EDIT_COUNT", "Invalid collision edit counts.");
@@ -38,6 +37,11 @@ public static class CollisionCompiler
         var groupIndex = ids.Joints.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
         var oldLineIndex = ids.Lines.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
         var oldOwners = new int[source.Lines.Length];
+        var oldCategories = new int[source.Lines.Length];
+        for (int category = 0; category < source.Ranges.Length; category++)
+            for (int i = source.Ranges[category].Start;
+                 i < source.Ranges[category].Start + source.Ranges[category].Count; i++)
+                oldCategories[i] = category;
         for (int g = 0; g < source.Joints.Length; g++)
             foreach (var range in source.Joints[g].Ranges)
                 for (int i = range.Start; i < range.Start + range.Count; i++) oldOwners[i] = g;
@@ -49,10 +53,22 @@ public static class CollisionCompiler
             if (oldLineIndex.TryGetValue(line.Id, out int old))
             {
                 Require(groupIndex[line.JointId] == oldOwners[old], "COLLISION_JOINT_CHANGED", $"Line {line.Id} moved to a different joint.");
+                Require((oldCategories[old] == 4) == (line.Category == "dynamic"),
+                    "COLLISION_DYNAMIC_MEMBERSHIP",
+                    $"Line {line.Id} cannot move into or out of the dynamic range yet.");
                 Require((line.HighFlags & ~15) == (source.Lines[old].HighFlags & ~15), "COLLISION_UNKNOWN_FLAGS", "Unknown high flag bits must be preserved.");
                 Require((line.LowFlags & 0xFC00) == (source.Lines[old].LowFlags & 0xFC00), "COLLISION_UNKNOWN_FLAGS", "Unknown property bits must be preserved.");
             }
-            else Require((line.HighFlags & ~15) == 0 && (line.LowFlags & 0xFC00) == 0, "COLLISION_UNKNOWN_FLAGS", "New lines may only set known collision bits.");
+            else
+            {
+                int category = Array.IndexOf(Categories, line.Category);
+                bool knownHighFlags = category == 4
+                    ? (line.HighFlags & ~31) == 0 && (line.HighFlags & 16) != 0
+                        && (line.HighFlags & 15) is 1 or 2 or 4 or 8
+                    : (line.HighFlags & ~15) == 0;
+                Require(knownHighFlags && (line.LowFlags & 0xFC00) == 0,
+                    "COLLISION_UNKNOWN_FLAGS", "New lines may only set known collision bits.");
+            }
         }
         var sorted = edits.Lines.OrderBy(l => Array.IndexOf(Categories, l.Category)).ThenBy(l => groupIndex[l.JointId]).ToArray();
         var lineIndex = sorted.Select((line, i) => (line.Id, i)).ToDictionary(x => x.Id, x => x.i);
@@ -79,8 +95,17 @@ public static class CollisionCompiler
                 contains ? old.Right : Math.Max(old.Right, right + BoundsMargin), contains ? old.Top : Math.Max(old.Top, top + BoundsMargin), start, vertices.Count - start);
         }
         Require(vertices.Count <= short.MaxValue, "COLLISION_LIMIT", "Compiled vertex count exceeds signed 16-bit limits.");
-        var lines = sorted.Select(l => new CollisionLine(endpointIndex[(groupIndex[l.JointId], l.Vertex0Id)], endpointIndex[(groupIndex[l.JointId], l.Vertex1Id)],
-            -1, -1, -1, -1, (ushort)((l.HighFlags & ~15) | (1 << Array.IndexOf(Categories, l.Category))), l.LowFlags)).ToArray();
+        var lines = sorted.Select(l =>
+        {
+            int category = Array.IndexOf(Categories, l.Category);
+            // Dynamic-range lines keep their stored initial kind. The game
+            // recomputes those low four bits after applying the joint transform.
+            ushort highFlags = category == 4 ? l.HighFlags
+                : (ushort)((l.HighFlags & ~15) | (1 << category));
+            return new CollisionLine(endpointIndex[(groupIndex[l.JointId], l.Vertex0Id)],
+                endpointIndex[(groupIndex[l.JointId], l.Vertex1Id)],
+                -1, -1, -1, -1, highFlags, l.LowFlags);
+        }).ToArray();
         for (int i = 0; i < lines.Length; i++)
             Require(vertices[lines[i].Vertex0] != vertices[lines[i].Vertex1], "COLLISION_ZERO_LENGTH", $"Line {sorted[i].Id} has coincident endpoints after welding.");
         // mplib.c: mpLineIntersectionH and the Floor/Ceiling/Wall lookup
@@ -88,15 +113,16 @@ public static class CollisionCompiler
         for (int i = 0; i < lines.Length; i++)
         {
             var a = vertices[lines[i].Vertex0]; var b = vertices[lines[i].Vertex1];
-            bool facing = sorted[i].Category switch
+            bool? facing = sorted[i].Category switch
             {
                 "floor" => b.X > a.X,
                 "ceiling" => b.X < a.X,
                 "right-wall" => b.Y < a.Y,
                 "left-wall" => b.Y > a.Y,
+                "dynamic" => null,
                 _ => false
             };
-            Require(facing, "COLLISION_FACING", $"Line {sorted[i].Id} direction does not match {sorted[i].Category}. Floors must run left-to-right, ceilings right-to-left, right walls downward, and left walls upward. Reassign the collision type to orient endpoints; vertical floors/ceilings and horizontal walls are invalid.");
+            Require(facing != false, "COLLISION_FACING", $"Line {sorted[i].Id} direction does not match {sorted[i].Category}. Floors must run left-to-right, ceilings right-to-left, right walls downward, and left walls upward. Reassign the collision type to orient endpoints; vertical floors/ceilings and horizontal walls are invalid.");
         }
         var incident = new Dictionary<int, List<int>>();
         for (int i = 0; i < lines.Length; i++)
@@ -129,7 +155,11 @@ public static class CollisionCompiler
                 return endpoint == source.Vertices[sourceEndpoint] && targetEndpoint == source.Vertices[sourceTarget] ? mapped : -1;
             }
         }
-        var result = new CollisionData(vertices.ToArray(), lines, Enumerable.Range(0, 5).Select(k => Range(i => Array.IndexOf(Categories, sorted[i].Category) == k)).ToArray(), joints, []);
+        // Attachments are part of the collision transaction even though this
+        // edit schema currently changes geometry only. Keeping the structured
+        // records here makes a later attachment writer an additive operation
+        // instead of requiring another geometry/compiler redesign.
+        var result = new CollisionData(vertices.ToArray(), lines, Enumerable.Range(0, 5).Select(k => Range(i => Array.IndexOf(Categories, sorted[i].Category) == k)).ToArray(), joints, source.Attachments);
         result.Validate(forEditedExport: true);
         return result;
 

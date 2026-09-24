@@ -85,6 +85,12 @@ the remaining names and write semantics are not fully audited.
 Edited collision exports are covered by automated reload tests. A user has now
 reported a successful in-game vertex-edit test; see the acceptance note below.
 
+The relationship between collision joints, dynamic line ranges, serialized
+`map_head` bindings, companion targets, and stage-code `GrJoint` arrays is
+documented in [the Phase 2 dynamic-collision audit](dynamic-collision-audit.md).
+In particular, absence of a serialized binding is not proof that stage code does
+not move a collision joint.
+
 ## Gameplay general points
 
 `map_head` stores an array of 0x0C-byte general-point descriptors. Each descriptor
@@ -236,7 +242,7 @@ indices/lists, session contents, unchanged source hashes, existing-directory
 protection, and failed extraction without a published partial session.
 
 
-## Static collision apply
+## Collision apply
 
 Session protocol v2 adds protected JSON baseline hashes and collision edit input.
 `apply` validates the snapshot hash before parsing, restores persistent model
@@ -244,13 +250,19 @@ identities, verifies baseline inventory/hashes, rejects unsupported edit files,
 and reopens/validates the completed DAT before publishing it to a new path.
 No-edit apply is byte-identical, including for read-only collision sessions.
 
-The compiler supports static vertex/topology, category, material, drop-through,
-and ledge edits within existing collision joints. It welds per joint at 0.0001
-units, sorts category/joint ranges, regenerates directional links, rejects
-ambiguous junctions, preserves surviving unchanged alternate-link endpoints,
-retains enclosing bounds or expands them with an 8-unit margin, and validates
-the result against signed 16-bit limits. Dynamic/attached collision, source
-warnings, and buffers with external/interior references are explicit restrictions.
+The compiler supports static and dynamic vertex/topology, category, material,
+drop-through, and ledge edits within existing collision joints. It welds per
+joint at 0.0001 units, sorts all five category/joint ranges, regenerates
+directional links, rejects ambiguous junctions, preserves surviving unchanged
+alternate-link endpoints, retains enclosing bounds or expands them with an
+8-unit margin, and validates the result against signed 16-bit limits. Dynamic
+lines retain their stored initial kind while their category range remains
+dynamic. Geometry-only writes keep serialized attachment records unchanged.
+Extraction dry-runs the replacement compiler before advertising geometry edits.
+Zero-length source warnings, existing ambiguous junctions or inconsistent fixed
+directions, and buffers with external/interior references remain explicit
+restrictions. The manifest and Blender panel report the compiler denial reason;
+runtime stage-code uncertainty is not a denial reason.
 
 The collision writer deliberately uses a narrower preservation path than the
 general HSDRaw serializer: new leaf buffers are appended before the archive tables,
@@ -264,7 +276,11 @@ Integration tests move a `GrNLa` vertex, add/remove lines, reload collision,
 compare all unrelated original data bytes and model identities, and check failure
 atomicity, source hash mismatches, protected-file edits, old protocol versions,
 malformed edit records, and unsupported edits. Unit tests cover welding, bounds,
-links, unknown flag preservation, dynamic restrictions, and envelope decoding.
+links, unknown flag preservation, dynamic-range rebuilding, attachment
+preservation, and envelope decoding. Mute City integration coverage edits
+attached local geometry, validates/reimports it, and compares all five serialized
+attachments. GrGb coverage edits dynamic geometry even though its runtime binding
+is supplied by stage code.
 A user has reported edited collision vertices working in game. Topology edits
 still need manual Dolphin/hardware testing.
 
@@ -278,8 +294,9 @@ affine scale compensation without flattening the protected identity hierarchy.
 
 Headless smoke tests import all 93 GrNLa meshes, preserve no-edit DAT bytes, move a
 collision vertex, assign flags/materials in Edit Mode, save/reopen a .blend, and
-validate edited output. GrGb collision remains read-only and its no-edit export
-is byte-identical. Protected geometry, hierarchy, transforms, metadata, and
+validate edited output. GrGb dynamic collision is geometry-editable and its
+edited output passes structural validation. Protected geometry, hierarchy,
+transforms, metadata, and
 unsupported topology changes are checked before invoking the backend. The ZIP
 is a development package with a separately configured CLI. GPU appearance and
 manual topology acceptance have not been tested by the agent.

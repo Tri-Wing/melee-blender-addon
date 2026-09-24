@@ -153,7 +153,19 @@ be edited through the model replacement path.
 category ranges, joint bounds, primary and alternate links, raw high/low flags,
 material/property bytes, and attachment records. Locally resolvable attachments
 have JOBJ IDs; unresolved companion targets have null IDs and source warnings.
-Dynamic lines/attachments are read-only.
+Dynamic and attached collision geometry remains in the joint-local coordinates
+stored by the DAT and is writable. Geometry-only exports preserve every
+serialized attachment record exactly.
+
+`stage.json.collisionBindingSummary` reports the dynamic-line count, serialized,
+locally resolved, and external attachment counts, one-to-one preview joints,
+multiply bound joints, and the fact that stage-code bindings are not discoverable
+from the DAT. `capabilities.dynamicCollisionPreview` is true when at least one
+serialized collision joint has exactly one locally resolvable JOBJ target.
+Preview resolution is independent of geometry permissions:
+`collisionGeometryEdit` and `dynamicCollisionEdit` describe geometry export,
+while `collisionAttachmentEdit` remains false until the attachment-array writer
+and UI are implemented.
 
 ## Collision edits
 
@@ -184,7 +196,10 @@ The placeholders above are illustrative; real IDs must be 32 hexadecimal digits.
 Every property is required. Unknown properties are rejected to catch misspellings.
 Copy vertices and lines from the baseline to begin an edit; remove records to
 delete geometry. Unreferenced vertices are omitted by compilation. Supported
-categories are `floor`, `ceiling`, `right-wall`, and `left-wall`.
+categories are `floor`, `ceiling`, `right-wall`, `left-wall`, and `dynamic`. The
+Blender type picker currently creates the four fixed categories; existing dynamic
+edges retain their membership through moves, splits, extensions, reversals, and
+deletion.
 
 The compiler:
 
@@ -193,18 +208,26 @@ The compiler:
 - Welds endpoints per joint within 0.0001 game units on each axis and rejects
   non-finite/zero-length geometry, ambiguous junctions, or inconsistent direction.
 - Orders lines by category then joint and rebuilds primary links from endpoints.
+- Rebuilds the global and per-joint fifth (`dynamic`) ranges. Dynamic lines keep
+  their stored initial kind bits because the game recomputes those bits from
+  transformed endpoint direction at runtime.
 - Preserves alternate links only when referenced original lines and both original
   endpoint coordinates still exist; otherwise clears the link.
 - Derives direction bits from category, preserves unknown bits on existing lines,
   and permits material/drop-through/ledge changes in `lowFlags` (material low byte,
   platform bit 8, ledge bit 9). New lines cannot set unknown bits.
 - Preserves enclosing bounds; otherwise expands bounds using an 8-unit margin.
+- Carries structured attachment records through the collision transaction and
+  verifies that geometry-only writes reload with the same records.
 - Enforces signed 16-bit limits and runs strict collision validation.
 
-Collision edits are refused if the source has warnings, dynamic lines, or
-attachments. Collision buffers with external/interior references are also refused
-until alias-aware editing exists. A no-edit apply remains available and returns
-byte-identical source contents even for read-only collision.
+Collision edits are refused when a dry-run rebuild cannot reproduce the source
+graph safely. Current examples include zero-length warning lines, junctions with
+more than two incident lines, and fixed-category lines whose stored direction is
+already inconsistent. `collisionEditReadOnlyReason` reports the concrete compiler
+error. An unresolved companion attachment is a preview warning, not a geometry
+editing denial. Collision buffers with external/interior references are also
+refused until alias-aware editing exists. A no-edit apply remains byte-identical.
 
 ## Gameplay point edits
 

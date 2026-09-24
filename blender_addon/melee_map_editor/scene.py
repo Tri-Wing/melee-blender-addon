@@ -422,6 +422,8 @@ def import_session(context, directory):
                 created_objects.remove(obj)
                 bpy.data.objects.remove(obj, do_unlink=True)
         obj = collision.create(collisions, source, tag)
+        moving_bindings, unresolved_bindings = collision.configure_moving_preview(
+            obj, source)
         created_objects.append(obj)
         created_meshes.append(obj.data)
         scene.mme_session = str(directory)
@@ -460,7 +462,10 @@ def import_session(context, directory):
         scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
             'groups': len(groups), 'lines': len(source['lines']), 'editable': stage['capabilities']['collisionEdit'],
-            'deferred': len(stage.get('deferredMeshes', []))})
+            'collisionReadOnlyReason': stage.get('collisionEditReadOnlyReason'),
+            'deferred': len(stage.get('deferredMeshes', [])),
+            'movingCollisionPreview': bool(moving_bindings),
+            'unresolvedCollisionBindings': len(unresolved_bindings)})
         # Melee's display colors should not pass through AgX's cinematic tone mapping.
         scene.view_settings.view_transform = 'Standard'
         scene.view_settings.look = 'None'
@@ -515,7 +520,8 @@ def prepare(scene):
     dirty = digest(edits) != scene.get('mme_collision_baseline')
     obj['mme_dirty'] = dirty
     if dirty and not stage['capabilities']['collisionEdit']:
-        raise StageError('This stage has read-only collision (dynamic attachments or source warnings). Undo collision changes.')
+        reason = stage.get('collisionEditReadOnlyReason') or 'This collision graph cannot be rebuilt safely.'
+        raise StageError(f'{reason} Undo collision changes.')
     modeling.edits(scene, stage)
     from . import material_properties
     material_properties.edits(scene, stage)

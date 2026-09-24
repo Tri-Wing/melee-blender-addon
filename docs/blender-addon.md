@@ -117,7 +117,9 @@ reload workflow headlessly:
    an item-spawn marker and use Blender's normal Delete command to remove it.
 4. Expand **Collision** and choose **Enter Collision Editing**. Front view
    (`Numpad 1`) looks onto the gameplay plane. Move vertices along Blender X and
-   Z; keep Blender Y at zero.
+   Z; keep Blender Y at zero. Choose **Exit Collision Editing** when finished;
+   attached stages then hide the local source mesh and return to the animated
+   collision overlay.
    Use the dedicated topology tools below to add or reconnect collision. Native
    vertex/edge deletion is supported. Object transforms and modifiers are rejected.
 5. Select edges to assign a collision type or named surface type, or toggle
@@ -140,11 +142,22 @@ Mode. An untouched scene exports a byte-identical copy of the input DAT. The
 sidebar tracks collision changes; validation/export also detects unsupported
 model or hierarchy changes and explains which class of edit must be undone.
 
-Use a new Blender scene for a second import. Sources with dynamic collision,
-attachments, or collision warnings are imported read-only for collision; a
-no-edit export preserves them. `GrGb.dat` is covered by the read-only smoke test.
-Other stages may contain unsupported preview transforms/bindings and are not yet
-certified. Missing extracted meshes are reported in the sidebar.
+Use a new Blender scene for a second import. Dynamic and attached collision
+geometry is editable in the local coordinate space stored by the DAT. Existing
+serialized attachment records are preserved exactly during geometry export;
+adding, deleting, and retargeting attachments is a separate pending tool. When a
+collision joint has exactly one serialized attachment to a JOBJ in the same DAT,
+its colored collision overlay follows that JOBJ's current pose and animation.
+External targets, repeated bindings, and bindings supplied only by stage code can
+limit animated preview, but do not lock the serialized collision geometry. The
+editor deliberately does not infer or modify stage-code behavior. `GrGb.dat`
+covers code-controlled dynamic geometry export, and `GrMc.dat` covers resolved
+moving-collision preview plus local geometry export/reimport. Sources containing
+zero-length lines or source graphs that the replacement compiler cannot yet
+reproduce exactly remain read-only, with the concrete compiler reason shown in
+the panel. This includes some pre-existing branch and direction patterns; it is
+unrelated to whether stage code manipulates the collision at runtime. Missing
+extracted meshes are reported in the sidebar.
 
 ## Gameplay points and boundaries
 
@@ -597,12 +610,14 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/camera.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/atmosphere.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/dynamic_collision.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,
 real stage import, protected identities, no-edit byte equality, vertex/property
 edits through the CLI, Edit Mode serialization, `.blend` save/load, overwrite confirmation defaults, validated output
-replacement, failed-export cleanup, and dynamic collision restrictions. It uses
+replacement, failed-export cleanup, and dynamic collision editing. It uses
 temporary sessions and outputs. The topology script covers the new tools, native
 deletion, Undo/Redo, stable identities, and DAT export/reload. GPU arrow appearance
 still needs interactive checking; the user has reported the collision workflow
@@ -610,6 +625,11 @@ working in game. The addition scripts cover synthetic asymmetric textures,
 multiple materials, negative scale, save/reopen, deterministic repeated export,
 the local Salvage Boat OBJ/MTL/PNG fixture, and programmatic discovery/export on
 `GrGd.dat`. Added textured models still need in-game acceptance.
+
+The dynamic-collision script verifies that Mute City's five unambiguous
+serialized collision attachments resolve to their JOBJ pose bones, respond to a
+pose change, export edited local geometry, preserve all attachment records and
+the dynamic range after reimport, and preserve a no-edit DAT byte-for-byte.
 
 ## Ceiling assignment correction
 

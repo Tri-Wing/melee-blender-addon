@@ -52,12 +52,51 @@ public static class SessionExtractor
         var vertexIds = collision.Vertices.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var lineIds = collision.Lines.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
         var jointIds = collision.Joints.Select(_ => Guid.NewGuid().ToString("N")).ToArray();
+        bool ResolvedAttachment(CollisionAttachment attachment) => identity.Nodes.Any(node =>
+            node.GroupIndex == attachment.GroupIndex && node.Kind.EndsWith("jobj")
+            && node.Index == attachment.JobjIndex);
+        var attachmentGroups = collision.Attachments.GroupBy(attachment =>
+            attachment.JointIndex).ToArray();
+        int previewJoints = attachmentGroups.Count(links => links.Count() == 1
+            && ResolvedAttachment(links.Single()));
+        var collisionBindingSummary = new
+        {
+            dynamicLines = collision.Ranges[4].Count,
+            serializedAttachments = collision.Attachments.Length,
+            locallyResolvedAttachments = collision.Attachments.Count(ResolvedAttachment),
+            externalAttachments = collision.Attachments.Count(attachment =>
+                !ResolvedAttachment(attachment)),
+            oneToOnePreviewJoints = previewJoints,
+            multipleBindingJoints = attachmentGroups.Count(links => links.Count() > 1),
+            stageCodeBindingsDiscoverable = false
+        };
         var categories = new int[collision.Lines.Length]; var owners = new int[collision.Lines.Length];
         for (int k = 0; k < 5; k++)
             for (int i = collision.Ranges[k].Start; i < collision.Ranges[k].Start + collision.Ranges[k].Count; i++) categories[i] = k;
         for (int j = 0; j < collision.Joints.Length; j++)
             foreach (var range in collision.Joints[j].Ranges)
                 for (int i = range.Start; i < range.Start + range.Count; i++) owners[i] = j;
+        string? collisionEditReadOnlyReason = null;
+        bool collisionEdit;
+        try
+        {
+            var sourceIds = new CollisionSourceIds(vertexIds, lineIds, jointIds);
+            var baseline = new CollisionEdits(ProtocolVersion, "game",
+                collision.Vertices.Select((vertex, i) => new CollisionEditVertex(
+                    vertexIds[i], vertex.X, vertex.Y)).ToArray(),
+                collision.Lines.Select((line, i) => new CollisionEditLine(
+                    lineIds[i], vertexIds[line.Vertex0], vertexIds[line.Vertex1],
+                    jointIds[owners[i]],
+                    new[] { "floor", "ceiling", "right-wall", "left-wall", "dynamic" }[categories[i]],
+                    line.HighFlags, line.LowFlags)).ToArray());
+            CollisionCompiler.Compile(collision, sourceIds, baseline);
+            collisionEdit = true;
+        }
+        catch (StageException exception)
+        {
+            collisionEdit = false;
+            collisionEditReadOnlyReason = $"{exception.Code}: {exception.Message}";
+        }
         string parent = Path.GetDirectoryName(directory)!;
         Directory.CreateDirectory(parent);
         string temporary = Path.Combine(parent, ".meleemap-session-" + Guid.NewGuid().ToString("N"));
@@ -127,7 +166,7 @@ public static class SessionExtractor
                 {
                     id = lineIds[i], sourceIndex = i, vertex0Id = vertexIds[l.Vertex0], vertex1Id = vertexIds[l.Vertex1],
                     jointId = jointIds[owners[i]], category = new[] { "floor", "ceiling", "right-wall", "left-wall", "dynamic" }[categories[i]],
-                    readOnly = categories[i] == 4 || warnings.Count > 0,
+                    readOnly = !collisionEdit,
                     previous0Id = Link(l.Previous0), next0Id = Link(l.Next0), previous1Id = Link(l.Previous1), next1Id = Link(l.Next1),
                     highFlags = l.HighFlags, lowFlags = l.LowFlags, materialId = l.LowFlags & 255,
                     propertyFlags = l.LowFlags >> 8, empty = (l.HighFlags & 0x80) != 0,
@@ -182,14 +221,16 @@ public static class SessionExtractor
                 protocolVersion = ProtocolVersion, assetType = "melee-stage", schemaVersion = SchemaVersion,
                 source = new { file = "source.dat", filename = info.Filename, sha256 = info.Sha256, datVersion = info.DatVersion },
                 publicRoots = info.Roots, externalReferences = info.References,
-                lighting, atmosphere, camera, gameplay,
+                lighting, atmosphere, camera, gameplay, collisionBindingSummary,
+                collisionEditReadOnlyReason,
                 modelGroupCount = groups.Length,
                 modelGroups = groups.Select(g => new { id = g.Id, index = g.GroupIndex, file = $"models/group-{g.GroupIndex:D3}/group.json" }),
                 coordinates = new { payloadSpace = "game", gameAxes = "X right, Y up, Z depth", blenderFromGame = "(X, -Z, Y)", unitScale = 1 },
                 modelAdditionSchemaVersion = ModelAddition.SchemaVersion,
                 modelAdditionTargets,
                 capabilities = new { modelIdentities = true, collisionExtraction = true, extractedMeshCount = meshes.Count, allModelGeometry = deferredMeshes.Count == 0,
-                    collisionEdit = warnings.Count == 0 && collision.Ranges[4].Count == 0 && collision.Attachments.Length == 0,
+                    collisionEdit, collisionGeometryEdit = collisionEdit,
+                    collisionAttachmentEdit = false,
                     modelEdit = editableModels.Length > 0, jobjTransformEdit = editableJobjs.Length > 0,
                     jobjAnimationEdit = jointAnimationsByGroup.Values.SelectMany(animations => animations)
                         .SelectMany(animation => animation.Nodes).Any(node => node.Editable),
@@ -208,9 +249,10 @@ public static class SessionExtractor
                         .Any(track => track.Channel.StartsWith("konst.") || track.Channel.StartsWith("tev0.")
                             || track.Channel.StartsWith("tev1.")),
                     modelAddition = modelAdditionTargets.Length > 0,
-                    dynamicCollisionEdit = false, apply = true },
+                    dynamicCollisionPreview = previewJoints > 0,
+                    dynamicCollisionEdit = collisionEdit && (collision.Ranges[4].Count > 0 || collision.Attachments.Length > 0), apply = true },
                 deferredCapabilities = new[] { "material-animation-export", "material-pixel-animation-preview", "shape-animations",
-                    "jobj-animation-duration-edit", "dynamic-collision-editing", "stage-parameters" },
+                    "jobj-animation-duration-edit", "collision-attachment-editing", "stage-parameters" },
                 editableMaterialProperties,
                 editableJobjs = editableJobjs.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex }),
                 editableGameplayPoints = gameplay.EditablePoints.Select(point => new

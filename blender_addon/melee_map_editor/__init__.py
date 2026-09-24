@@ -151,7 +151,8 @@ class MME_OT_edit_collision(bpy.types.Operator):
         def action():
             stage = read(scene.session(context.scene) / 'stage.json')
             if not stage['capabilities']['collisionEdit']:
-                raise StageError('Collision is read-only for this stage.')
+                raise StageError(stage.get('collisionEditReadOnlyReason')
+                                 or 'Collision is read-only for this stage.')
             obj = scene.collision_object(context.scene)
             if context.mode != 'OBJECT':
                 bpy.ops.object.mode_set(mode='OBJECT')
@@ -161,6 +162,23 @@ class MME_OT_edit_collision(bpy.types.Operator):
             context.view_layer.objects.active = obj
             context.tool_settings.mesh_select_mode = (True, False, False)
             bpy.ops.object.mode_set(mode='EDIT')
+        return execute_safely(self, context, action)
+
+
+class MME_OT_exit_collision(bpy.types.Operator):
+    bl_idname = 'mme.exit_collision'
+    bl_label = 'Exit Collision Editing'
+
+    def execute(self, context):
+        def action():
+            obj = scene.collision_object(context.scene)
+            if context.edit_object != obj or obj.mode != 'EDIT':
+                raise StageError('Collision editing is not active.')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            if obj.get('mme_collision_source_hidden'):
+                obj.select_set(False)
+                obj.hide_set(True)
+            context.scene.mme_status = 'Exited collision editing.'
         return execute_safely(self, context, action)
 
 
@@ -830,12 +848,21 @@ class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
         except StageError:
             layout.label(text='Collision object missing', icon='ERROR')
             return
+        editing = context.edit_object == obj and obj.mode == 'EDIT'
         row = layout.row()
-        row.enabled = editable
-        row.operator('mme.edit_collision')
+        if editing:
+            row.operator('mme.exit_collision', icon='CHECKMARK')
+        else:
+            row.enabled = editable
+            row.operator('mme.edit_collision')
         if not editable:
             layout.label(text='Read-only for this stage', icon='LOCKED')
+            reason = _stage_info(s).get('collisionReadOnlyReason')
+            if reason:
+                _wrapped_labels(layout, reason)
             return
+        if _stage_info(s).get('movingCollisionPreview'):
+            layout.label(text='Attached geometry edits in JOBJ-local space', icon='INFO')
         layout.operator('mme.place_collision_vertex', icon='ADD')
         for left, right in ((('split', 'Split Edge'), ('extend', 'Extend Collision')),
                             (('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))):
@@ -869,7 +896,7 @@ class MME_PT_collision_legend(MME_PT_sidebar, bpy.types.Panel):
         layout.label(text='Drop-through floor: bright green')
         layout.label(text='Ceiling: red')
         layout.label(text='Right wall: blue · Left wall: amber')
-        layout.label(text='Dynamic: purple (read-only)')
+        layout.label(text='Dynamic range: purple')
         layout.label(text='White mark: ledge-grab flag')
         layout.label(text='Arrows show edge direction')
 
@@ -915,6 +942,12 @@ class MME_PT_diagnostics(MME_PT_sidebar, bpy.types.Panel):
             layout.label(text='No unsupported meshes omitted')
         if not info.get('editable', False):
             layout.label(text='Collision editing unavailable', icon='LOCKED')
+        if info.get('movingCollisionPreview'):
+            layout.label(text='Serialized moving collision preview enabled')
+        unresolved = info.get('unresolvedCollisionBindings', 0)
+        if unresolved:
+            layout.label(text=f'{unresolved} collision binding(s) unresolved',
+                         icon='INFO')
         layout.label(text=f'{len(_addition_targets(s))} model placement target(s)')
 
 
@@ -1020,10 +1053,11 @@ def draw_collision():
         return
     try:
         obj = scene.collision_object(context.scene)
-        if not obj.visible_get():
+        if not obj.visible_get() and not obj.get('mme_collision_source_hidden'):
             return
         batches = {}
         markers = []
+        transforms = collision.attachment_transforms(context.scene, obj)
 
         def directed_line(points):
             from mathutils import Vector
@@ -1044,14 +1078,17 @@ def draw_collision():
             low = bm.edges.layers.int.get('mme_low')
             vertex = bm.verts.layers.int.get('mme_vertex')
             start = bm.edges.layers.int.get('mme_start')
-            if layer is None or low is None or vertex is None or start is None:
+            joint = bm.edges.layers.int.get('mme_joint')
+            if (layer is None or low is None or vertex is None or start is None
+                    or joint is None):
                 return
             for edge in bm.edges:
                 if edge.hide:
                     continue
                 category = edge[layer]
                 if 0 <= category < len(collision.CATEGORIES):
-                    points = [obj.matrix_world @ v.co for v in edge.verts]
+                    matrix = transforms.get(edge[joint] - 1, obj.matrix_world)
+                    points = [matrix @ v.co for v in edge.verts]
                     if edge.verts[0][vertex] != edge[start]:
                         points.reverse()
                     color = collision.overlay_color(category, edge[low])
@@ -1067,9 +1104,8 @@ def draw_collision():
                 return
             for edge, value, flags in zip(obj.data.edges, attr.data, low.data):
                 if 0 <= value.value < len(collision.CATEGORIES):
-                    points = [obj.matrix_world @ obj.data.vertices[i].co for i in edge.vertices]
-                    if vertex.data[edge.vertices[0]].value != start.data[edge.index].value:
-                        points.reverse()
+                    points = collision.display_edge_points(
+                        context.scene, obj, edge, transforms)
                     color = collision.overlay_color(value.value, flags.value)
                     batches.setdefault(color, []).extend(directed_line(points))
                     if flags.value & 0x200:
@@ -1227,7 +1263,8 @@ class MME_PT_material(bpy.types.Panel):
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_add_models,
-           MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation,
+           MME_OT_edit_collision, MME_OT_exit_collision,
+           MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation,
            MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex,
            MME_OT_place_item_spawn, MME_OT_open_export,

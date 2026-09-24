@@ -314,7 +314,7 @@ The panel shows:
 - Source filename and hash status.
 - Number of model groups and collision lines.
 - Dirty model/collision summary.
-- Deferred-capability notices, such as “dynamic collision is present and read-only in this version.”
+- Deferred-capability notices, such as “collision attachment retargeting is not available in this version.”
 - Last validation/export result.
 
 ## 9. Collision editing

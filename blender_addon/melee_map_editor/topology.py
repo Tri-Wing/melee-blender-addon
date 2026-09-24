@@ -73,7 +73,11 @@ def edit(obj, source, operation, dx=10, dz=0, category=0, material=0, joint=1):
         return start, edge.other_vert(start)
 
     def known(row):
-        if row['high'] & ~15 or row['low'] & 0xFC00:
+        dynamic = row['category'] == collision.CATEGORIES.index('dynamic')
+        known_high = ((row['high'] & ~31) == 0 and row['high'] & 16
+                      and row['high'] & 15 in (1, 2, 4, 8)) if dynamic \
+            else (row['high'] & ~15) == 0
+        if not known_high or row['low'] & 0xFC00:
             raise StageError('This edge has unknown flags that cannot be copied to new collision. Choose another edge.')
 
     def create(a, b, row, handle):

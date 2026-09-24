@@ -74,9 +74,9 @@ public class CollisionCompilerTests
     }
 
     [Theory]
-    [InlineData("dynamic", "COLLISION_DYNAMIC_READ_ONLY")]
     [InlineData("zero", "COLLISION_ZERO_LENGTH")]
     [InlineData("flags", "COLLISION_UNKNOWN_FLAGS")]
+    [InlineData("membership", "COLLISION_DYNAMIC_MEMBERSHIP")]
     [InlineData("joint", "COLLISION_JOINT_ID")]
     [InlineData("duplicate", "COLLISION_ID")]
     [InlineData("nonfinite", "COLLISION_NONFINITE")]
@@ -85,13 +85,47 @@ public class CollisionCompilerTests
         var (source, ids, edit) = Fixture();
         switch (mutation)
         {
-            case "dynamic": source = source with { Attachments = [new(0, 0, 0, 0)] }; break;
             case "zero": edit.Vertices[0] = edit.Vertices[0] with { X = 1 }; break;
             case "flags": edit.Lines[0] = edit.Lines[0] with { HighFlags = 128 }; break;
+            case "membership": edit.Lines[0] = edit.Lines[0] with { Category = "dynamic" }; break;
             case "joint": edit.Lines[0] = edit.Lines[0] with { JointId = Id() }; break;
             case "duplicate": edit.Lines[1] = edit.Lines[0]; break;
             case "nonfinite": edit.Vertices[0] = edit.Vertices[0] with { X = float.PositiveInfinity }; break;
         }
         Assert.Equal(code, Assert.Throws<StageException>(() => CollisionCompiler.Compile(source, ids, edit)).Code);
+    }
+
+    [Fact]
+    public void RebuildsDynamicRangeAndPreservesAttachments()
+    {
+        var (source, ids, edit) = Fixture();
+        source = source with
+        {
+            Ranges = [new(0, 1), new(0, 0), new(0, 0), new(0, 0), new(1, 1)],
+            Joints = [source.Joints[0] with
+            {
+                Ranges = [new(0, 1), new(0, 0), new(0, 0), new(0, 0), new(1, 1)]
+            }],
+            Lines = [source.Lines[0], source.Lines[1] with { HighFlags = 0x11 }],
+            Attachments = [new(2, 0, -1, 3)]
+        };
+        edit.Lines[1] = edit.Lines[1] with { Category = "dynamic", HighFlags = 0x11 };
+        edit.Vertices[2] = edit.Vertices[2] with { Y = 0.5f };
+        string extraVertex = Id();
+        edit = edit with
+        {
+            Vertices = [.. edit.Vertices, new(extraVertex, 3, 0.5f)],
+            Lines = [.. edit.Lines, new(Id(), ids.Vertices[2], extraVertex,
+                ids.Joints[0], "dynamic", 0x11, 0)]
+        };
+
+        var result = CollisionCompiler.Compile(source, ids, edit);
+
+        Assert.Equal(new CollisionRange(1, 2), result.Ranges[4]);
+        Assert.Equal(new CollisionRange(1, 2), result.Joints[0].Ranges[4]);
+        Assert.Equal((ushort)0x11, result.Lines[1].HighFlags);
+        Assert.Equal((ushort)0x11, result.Lines[2].HighFlags);
+        Assert.Equal(source.Attachments, result.Attachments);
+        Assert.Empty(result.Validate(forEditedExport: true));
     }
 }

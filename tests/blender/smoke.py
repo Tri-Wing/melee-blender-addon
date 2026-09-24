@@ -234,7 +234,8 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     bpy.data.objects.remove(model, do_unlink=True)
     rejects(lambda: scene.prepare(s), 'protected')
 
-    # A dynamic stage can be inspected and preserved, but collision is read-only.
+    # Dynamic DAT collision is editable even when its runtime binding comes from
+    # stage code; the editor owns serialized data, not stage-code behavior.
     bpy.context.window.scene = bpy.data.scenes.new('Dynamic Stage')
     user_resource = bpy.utils.user_resource
     try:
@@ -244,10 +245,12 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
         bpy.utils.user_resource = user_resource
     ds = bpy.context.scene
     dynamic = scene.collision_object(ds)
-    assert not read(scene.session(ds) / 'stage.json')['capabilities']['collisionEdit']
+    assert read(scene.session(ds) / 'stage.json')['capabilities']['collisionEdit']
     scene.apply(ds, CLI, 'dotnet', tmp / 'dynamic-unchanged.dat')
     assert (tmp / 'dynamic-unchanged.dat').read_bytes() == (CORPUS / 'GrGb.dat').read_bytes()
     dynamic.data.vertices[0].co.z += 1
-    rejects(lambda: scene.prepare(ds), 'read-only')
+    assert scene.prepare(ds)[1] is not None
+    scene.apply(ds, CLI, 'dotnet', tmp / 'dynamic-edited.dat')
+    run(CLI, 'dotnet', 'validate', tmp / 'dynamic-edited.dat', '--json')
 
-print('BLENDER_SMOKE_OK: import, transforms, no-op, collision edit/properties, guards, save/load, dynamic restrictions, CLI validation')
+print('BLENDER_SMOKE_OK: import, transforms, no-op, collision edit/properties, guards, save/load, dynamic editing, CLI validation')
