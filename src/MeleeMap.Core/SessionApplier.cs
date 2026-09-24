@@ -89,6 +89,15 @@ public static class SessionApplier
         Require(File.Exists(additionPath) || !editFiles.Any(edit =>
             edit.StartsWith(additionAssets + Path.DirectorySeparatorChar, StringComparison.Ordinal)),
             "EDIT_UNSUPPORTED", "Addition assets require edits/additions.json.");
+        MaterialPropertyEdits? materialEdits = null;
+        string[] declaredMaterialIds = [];
+        if (File.Exists(materialPath))
+        {
+            declaredMaterialIds = m.TryGetProperty("editableMaterialProperties", out var list)
+                ? list.EnumerateArray().Select(e => e.GetProperty("id").GetString()!).ToArray() : [];
+            materialEdits = JsonSerializer.Deserialize<MaterialPropertyEdits>(File.ReadAllText(materialPath), Json);
+            Require(materialEdits != null, "MATERIAL_EDIT_FORMAT", "Empty material edit document.");
+        }
         ValidatedModelAdditionBatch? additionBatch = null;
         if (File.Exists(additionPath))
         {
@@ -111,23 +120,25 @@ public static class SessionApplier
         }
         bool modelChanged = File.Exists(modelPath);
         var compiledModels = new List<(EditableModel Target, MeshData Mesh, bool PreserveAppearance, ModelMaterial? Material, int Culling)>();
+        var deletedModels = new List<EditableModel>();
+        var eligibleModels = ModelEditing.SelectAll(source.Layout, modelBaseline).ToDictionary(t => t.Id);
         if (modelChanged)
         {
-            var eligible = ModelEditing.SelectAll(source.Layout, modelBaseline).ToDictionary(t => t.Id);
             // Legacy sessions retain their single-target permissions.
             var declaredIds = m.TryGetProperty("editableMeshes", out var declaredMany)
                 ? declaredMany.EnumerateArray().Select(t => t.GetProperty("id").GetString()!).ToArray()
                 : m.TryGetProperty("editableMesh", out var declared) && declared.ValueKind == JsonValueKind.Object
                     ? new[] { declared.GetProperty("id").GetString()! } : Array.Empty<string>();
             var edits = JsonSerializer.Deserialize<ModelEdits>(File.ReadAllText(modelPath), Json);
-            Require(edits?.Meshes is { Length: > 0 }, "MODEL_EDIT_FORMAT", "Empty model edit document.");
+            Require(edits != null && (edits.Meshes is { Length: > 0 }
+                || edits.DeletedIds is { Length: > 0 }), "MODEL_EDIT_FORMAT", "Empty model edit document.");
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var edit in edits!.Meshes)
             {
                 Require(edit != null && edit.Id != null && seen.Add(edit.Id) && declaredIds.Contains(edit.Id)
-                    && eligible.ContainsKey(edit.Id), "MODEL_EDIT_TARGET", "Model edit target is unsupported, duplicated, or absent from this session.");
-                var target = eligible[edit!.Id];
-                var material = edit.SourceMaterialId == null ? null : ModelMaterials.Resolve(source.Layout, eligible.Values, edit.SourceMaterialId);
+                    && eligibleModels.ContainsKey(edit.Id), "MODEL_EDIT_TARGET", "Model edit target is unsupported, duplicated, or absent from this session.");
+                var target = eligibleModels[edit!.Id];
+                var material = edit.SourceMaterialId == null ? null : ModelMaterials.Resolve(source.Layout, eligibleModels.Values, edit.SourceMaterialId);
                 Require(material == null || !material.UsesUv || edit.TexCoords != null,
                     "MODEL_UV", "The assigned textured material requires UV coordinates for every triangle corner.");
                 var original = GxMeshDecoder.Decode(source.Layout, target.PobjOffset);
@@ -136,23 +147,67 @@ public static class SessionApplier
                     material != null && ModelEditing.HasSameTopology(edit, original)
                         ? new ArchiveDataReader(source.Layout).UShort(target.PobjOffset + 12) & 0xC000 : 0x4000));
             }
-            // Compile the complete batch before writing any replacement.
-            foreach (var (target, mesh, preserveAppearance, material, culling) in compiledModels)
-                bytes = preserveAppearance ? ModelPositionWriter.Write(new ArchiveLayout(bytes), target, mesh)
-                    : ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh, material?.MobjOffset, culling);
+            foreach (string id in edits.DeletedIds ?? [])
+            {
+                Require(id != null && seen.Add(id) && declaredIds.Contains(id)
+                    && eligibleModels.ContainsKey(id), "MODEL_DELETE_TARGET",
+                    "Deleted model target is unsupported, duplicated, edited, or absent from this session.");
+                deletedModels.Add(eligibleModels[id]);
+            }
         }
-        MaterialPropertyWrite? materialWrite = null;
-        if (File.Exists(materialPath))
+        var currentIdentity = modelBaseline;
+        var splitIds = compiledModels.Where(model => model.Target.SharesDobj && !model.PreserveAppearance)
+            .Select(model => model.Target.Id).Concat((materialEdits?.Materials ?? [])
+                .Where(edit => edit != null && eligibleModels.TryGetValue(edit.Id, out var target) && target.SharesDobj)
+                .Select(edit => edit.Id)).ToHashSet(StringComparer.Ordinal);
+        splitIds.ExceptWith(deletedModels.Select(target => target.Id));
+        // Keep one surviving POBJ in every original DOBJ. It is independent as
+        // soon as its edited siblings move, and this avoids empty descriptors.
+        var deletedIds = deletedModels.Select(target => target.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var siblings in modelBaseline.Nodes.Where(node => node.Kind == "pobj")
+                     .GroupBy(node => node.OwnerId))
         {
-            var declared = m.TryGetProperty("editableMaterialProperties", out var list)
-                ? list.EnumerateArray().Select(e => e.GetProperty("id").GetString()!).ToArray() : [];
-            var edits = JsonSerializer.Deserialize<MaterialPropertyEdits>(File.ReadAllText(materialPath), Json);
-            Require(edits != null, "MATERIAL_EDIT_FORMAT", "Empty material edit document.");
+            var survivors = siblings.Where(node => !deletedIds.Contains(node.Id))
+                .OrderBy(node => node.Index).ToArray();
+            if (survivors.Length > 0 && survivors.All(node => splitIds.Contains(node.Id)))
+                splitIds.Remove(survivors[0].Id);
+        }
+        if (splitIds.Count > 0)
+        {
+            var split = ModelDobjSplitter.Write(new ArchiveLayout(bytes), modelBaseline, splitIds);
+            bytes = split.Bytes;
+            currentIdentity = ModelIdentity.Capture(new ArchiveLayout(bytes), catalog);
+            var currentTargets = ModelEditing.SelectAll(new ArchiveLayout(bytes), currentIdentity)
+                .ToDictionary(target => target.Id);
+            for (int index = 0; index < compiledModels.Count; index++)
+            {
+                var model = compiledModels[index];
+                compiledModels[index] = (currentTargets[model.Target.Id], model.Mesh,
+                    model.PreserveAppearance, model.Material, model.Culling);
+            }
+            for (int index = 0; index < deletedModels.Count; index++)
+                deletedModels[index] = currentTargets[deletedModels[index].Id];
+        }
+        // Compile the complete batch before writing any replacement.
+        foreach (var (target, mesh, preserveAppearance, material, culling) in compiledModels)
+            bytes = preserveAppearance ? ModelPositionWriter.Write(new ArchiveLayout(bytes), target, mesh)
+                : ModelArchiveWriter.Write(new ArchiveLayout(bytes), target, mesh, material?.MobjOffset, culling);
+        // Delete list tails before their predecessors so every source link
+        // field remains reachable until it is patched.
+        foreach (var target in deletedModels.OrderBy(target => target.DobjOffset)
+                     .ThenByDescending(target => target.PobjIndex))
+            bytes = ModelDeletionWriter.Write(new ArchiveLayout(bytes), target);
+        var effectiveIdentity = currentIdentity.WithoutPobjs(deletedModels.Select(target => target.Id));
+        MaterialPropertyWrite? materialWrite = null;
+        if (materialEdits != null)
+        {
             var assignments = ModelEditing.SelectAll(source.Layout, modelBaseline)
                 .ToDictionary(t => t.Id, t => (string?)t.Id);
             foreach (var compiled in compiledModels)
                 if (!compiled.PreserveAppearance) assignments[compiled.Target.Id] = compiled.Material?.Id;
-            materialWrite = MaterialProperties.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline, edits!, declared, assignments);
+            foreach (var deleted in deletedModels) assignments.Remove(deleted.Id);
+            materialWrite = MaterialProperties.Write(source.Layout, new ArchiveLayout(bytes), modelBaseline,
+                currentIdentity, materialEdits, declaredMaterialIds, assignments);
             bytes = materialWrite.Bytes;
         }
         StageLightWrite? lightWrite = null;
@@ -195,7 +250,7 @@ public static class SessionApplier
         if (additionBatch != null)
         {
             additionBase = new ArchiveLayout(bytes);
-            additionWrite = ModelAdditionArchiveWriter.Write(additionBase, modelBaseline, additionBatch);
+            additionWrite = ModelAdditionArchiveWriter.Write(additionBase, effectiveIdentity, additionBatch);
             bytes = additionWrite.Bytes;
         }
         string temp = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -204,12 +259,12 @@ public static class SessionApplier
             using (var file = new FileStream(temp, FileMode.CreateNew)) file.Write(bytes);
             var reloaded = new StageArchive(temp); reloaded.Validate();
             if (additionWrite == null)
-                modelBaseline.RequireUnchanged(ModelIdentity.Capture(reloaded.Layout, catalog));
+                effectiveIdentity.RequireUnchanged(ModelIdentity.Capture(reloaded.Layout, catalog));
             else
             {
                 Require(reloaded.Layout.Bytes.SequenceEqual(additionWrite.Bytes),
                     "MODEL_ADDITION_RELOAD", "Reloaded model addition archive differs from the written bytes.");
-                ModelAdditionArchiveWriter.Verify(additionBase!, modelBaseline, additionWrite);
+                ModelAdditionArchiveWriter.Verify(additionBase!, effectiveIdentity, additionWrite);
             }
             var written = CollisionData.Read(reloaded.Layout);
             Require(written.Vertices.SequenceEqual(collision.Vertices) && written.Lines.SequenceEqual(collision.Lines)
@@ -223,7 +278,7 @@ public static class SessionApplier
                     materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int positionMaterial) ? positionMaterial : null);
                 else ModelArchiveWriter.Verify(reloaded.Layout, target, mesh,
                     materialWrite != null && materialWrite.Bindings.TryGetValue(target.Id, out int replacementMaterial) ? replacementMaterial : material?.MobjOffset, culling);
-            if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, modelBaseline, materialWrite);
+            if (materialWrite != null) MaterialProperties.Verify(reloaded.Layout, currentIdentity, materialWrite);
             if (lightWrite != null) StageLightEditing.Verify(reloaded.Layout, lightWrite);
             if (jobjWrite != null) JobjEditing.Verify(reloaded.Layout, modelBaseline, jobjWrite);
             if (animationWrite != null) JointAnimationEditing.Verify(reloaded.Layout, modelBaseline, animationWrite);

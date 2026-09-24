@@ -46,6 +46,12 @@ def target_object(scene, info=None):
     return objects[0]
 
 
+def target_matches(scene, info):
+    return [obj for obj in scene.objects
+            if obj.get('mme_session_id') == scene.mme_session_id
+            and obj.get('mme_id') == info['id']]
+
+
 def fingerprint(obj):
     if obj.mode == 'EDIT':
         obj.update_from_editmode()
@@ -78,8 +84,15 @@ def edits(scene, stage):
     appearance_baseline = json.loads(scene.get('mme_appearance_baselines', '{}'))
     color_baseline = json.loads(scene.get('mme_color_baselines', '{}'))
     meshes = []
+    deleted_ids = []
     for info in infos:
-        obj = target_object(scene, info)
+        matches = target_matches(scene, info)
+        if not matches:
+            deleted_ids.append(info['id'])
+            continue
+        if len(matches) != 1 or matches[0].type != 'MESH':
+            raise StageError('The editable model object is duplicated or has an invalid type. Undo the change.')
+        obj = matches[0]
         changed = (fingerprint(obj) != baseline.get(info['id'])
                    or surface.fingerprint(obj, info.get('positionsOnly', False)) != appearance_baseline.get(info['id'], digest(None)))
         obj['mme_dirty'] = changed
@@ -91,7 +104,9 @@ def edits(scene, stage):
             obj['mme_dirty'] = changed
             if changed:
                 meshes.append(edit)
-    return {'protocolVersion': 2, 'coordinateSpace': 'game-joint-local', 'meshes': meshes} if meshes else None
+    return ({'protocolVersion': 2, 'coordinateSpace': 'game-joint-local',
+             'meshes': meshes, 'deletedIds': deleted_ids}
+            if meshes or deleted_ids else None)
 
 
 def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
@@ -127,7 +142,13 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                 continue
             layer = mesh.color_attributes.get(f'Stage Color {channel}')
             if layer is None:
-                raise StageError('An imported stage color attribute was removed. Restore it before export.')
+                if same_topology:
+                    raise StageError('An imported stage color attribute was removed. Restore it before export.')
+                # Replacement topology cannot retain source corner colors. It
+                # will use the assigned compatible stage material or grey.
+                continue
+            if not same_topology:
+                continue
             loops = (source_order_loops(mesh, reversed_faces) if same_topology else
                      [i for triangle in mesh.loop_triangles for i in triangle.loops])
             colors = [list(layer.data[mesh.loops[i].vertex_index if layer.domain == 'POINT' else i].color) for i in loops]
@@ -142,7 +163,7 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                 result[key] = [dict(zip(('r', 'g', 'b', 'a'), color)) for color in colors]
         if same_topology and not appearance_changed:
             return result
-        if not material and appearance_changed:
+        if not material and (appearance_changed or not same_topology):
             result['useGreyMaterial'] = True
         if material:
             result['sourceMaterialId'] = material['id']
@@ -177,7 +198,10 @@ def update_dirty(scene, depsgraph):
     color_baseline = json.loads(scene.get('mme_color_baselines', '{}'))
     updates = {update.id.original for update in depsgraph.updates}
     for info in infos:
-        obj = target_object(scene, info)
+        matches = target_matches(scene, info)
+        if len(matches) != 1 or matches[0].type != 'MESH':
+            continue
+        obj = matches[0]
         if obj not in updates and obj.data not in updates:
             continue
         try:

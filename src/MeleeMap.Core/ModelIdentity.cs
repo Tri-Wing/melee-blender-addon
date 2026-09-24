@@ -49,6 +49,22 @@ public sealed class ModelIdentitySnapshot
     public IReadOnlyList<ModelIdentityNode> Nodes { get; }
     internal ModelIdentitySnapshot(List<ModelIdentityNode> nodes) => Nodes = nodes.AsReadOnly();
 
+    public ModelIdentitySnapshot WithoutPobjs(IEnumerable<string> ids)
+    {
+        var removed = ids.ToHashSet(StringComparer.Ordinal);
+        Require(Nodes.Where(node => removed.Contains(node.Id)).All(node => node.Kind == "pobj")
+            && removed.All(id => Nodes.Any(node => node.Id == id)),
+            "MODEL_DELETE_TARGET", "Only declared POBJ models can be deleted.");
+        var remaining = Nodes.Where(node => !removed.Contains(node.Id)).ToList();
+        var pobjIndexes = remaining.Where(node => node.Kind == "pobj")
+            .GroupBy(node => node.OwnerId)
+            .SelectMany(group => group.OrderBy(node => node.Index)
+                .Select((node, index) => (node.Id, index)))
+            .ToDictionary(item => item.Id, item => item.index, StringComparer.Ordinal);
+        return new(remaining.Select(node => node.Kind == "pobj"
+            ? node with { Index = pobjIndexes[node.Id] } : node).ToList());
+    }
+
     public void RequireUnchanged(ModelIdentitySnapshot edited)
     {
         Require(Nodes.Count == edited.Nodes.Count, "MODEL_IDENTITY_CHANGED", "Protected model object count changed.");

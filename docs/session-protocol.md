@@ -249,7 +249,7 @@ and removes its temporary edit payload after each apply attempt.
 
 New sessions set `capabilities.modelEdit` and list supported rigid targets in
 `editableMeshes`. Each entry contains `id`, `groupIndex`, `jobjIndex`, `dobjIndex`,
-`pobjIndex`, baseline `file`, topology-replacement
+`pobjIndex`, `positionsOnly`, `sharesDobj`, baseline `file`, topology-replacement
 `representation: "opaque-grey-flat-shaded"`, and
 `maxTriangles: 14000`. Mesh payloads also contain `editable`, `readOnlyReason`, and optional `texCoords0`
 (one game-space UV per decoded vertex). `modelMaterials` advertises reusable
@@ -259,7 +259,8 @@ The legacy `editableMesh` field remains as a single-target compatibility alias.
 Old sessions with only this alias remain single-target; sessions without either
 field remain collision-only. `selectedMesh` is only a preview selection.
 
-`edits/models.json` uses this shape (all fields required):
+`edits/models.json` uses this shape (`protocolVersion`, `coordinateSpace`, and
+`meshes` are required):
 
 ```json
 {
@@ -269,7 +270,8 @@ field remain collision-only. `selectedMesh` is only a preview selection.
     "id": "<editableMeshes entry id>",
     "positions": [{"x": 0, "y": 0, "z": 0}, {"x": 10, "y": 0, "z": 0}, {"x": 0, "y": 10, "z": 0}],
     "triangleIndices": [0, 1, 2]
-  }]
+  }],
+  "deletedIds": ["<editableMeshes entry id>"]
 }
 ```
 
@@ -280,6 +282,8 @@ Optional model-edit fields:
   (corner order), required when the assigned source material uses a texture.
 - `useGreyMaterial`: force grey replacement even if topology is unchanged;
   mutually exclusive with `sourceMaterialId`.
+- `deletedIds`: unique eligible POBJ IDs to detach from their owning DOBJ. An ID
+  cannot appear in both `meshes` and `deletedIds`.
 
 A supplied material is resolved from the immutable DAT and validated again.
 The writer retains its source MOBJ/TOBJ/image data and points the target DOBJ at
@@ -289,8 +293,20 @@ values at shared vertex indices support seams. Mixed-material faces must be
 resolved by the adapter before submission; this protocol has one material per
 editable DOBJ.
 
-Supply one or more changed meshes with unique eligible IDs; omit untouched
-meshes. Positions are local to each original owning JOBJ,
+`sharesDobj` reports that the source POBJ is one member of a multi-POBJ DOBJ.
+It is informational; apply recomputes the relationship. Position-only edits keep
+that source structure. Before a topology, material-assignment, or material-property
+edit, apply moves the affected POBJ into an appended one-POBJ DOBJ under the same
+JOBJ. The new DOBJ initially retains the shared source MOBJ, after which normal
+copy-on-write material processing can change it without affecting siblings. If
+every sibling is edited, one POBJ retains the original DOBJ and the rest are
+split. Original descriptor offsets remain stable.
+
+Supply one or more changed meshes and/or deleted IDs; omit untouched meshes.
+Deleting a model relinks the owning DOBJ or preceding POBJ around that entry and
+preserves the DOBJ, JOBJ, detached source payload, and all unrelated archive
+bytes. List tails are removed before their predecessors so deleting any subset,
+including an entire multi-POBJ list, remains deterministic. Positions are local to each original owning JOBJ,
 not world coordinates. The backend independently recomputes target eligibility;
 changing the manifest cannot enable structurally unsupported mesh IDs. Unknown fields, nonfinite
 positions, invalid indices, unsupported targets and oversized/empty geometry fail.
@@ -318,10 +334,12 @@ limits are 65,535 positions and 14,000 input triangles.
 
 The replacement writer appends a GX triangle display list with direct float32
 position/normal attributes and optional UV0. It reuses the assigned source MOBJ
-or appends a constant opaque grey MOBJ/material. It patches only the existing
-POBJ attribute pointer, culling bits, display-list size/pointer, and DOBJ material pointer. Old
-buffers are retained; archive output grows. The POBJ/JOBJ/DOBJ identities, next
-pointers, non-culling flags, joint transforms/animation, original shared
+or appends a constant opaque grey MOBJ/material. It patches the existing POBJ
+attribute pointer, culling bits, display-list size/pointer, and owning DOBJ material
+pointer. A shared source DOBJ may additionally receive appended DOBJ descriptors
+and updated POBJ/DOBJ list links as described above. Old buffers are retained;
+archive output grows. Except for explicit deletion or DOBJ-splitting links, original
+POBJ/JOBJ/DOBJ descriptor offsets, non-culling flags, joint transforms/animation, original shared
 materials and all other source payloads remain intact. Model and collision edits
 compose sequentially without relocating original offsets. Apply reloads the
 output and verifies exact decoded positions, normals, triangles, material fields,

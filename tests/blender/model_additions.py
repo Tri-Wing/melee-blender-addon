@@ -10,7 +10,7 @@ import bpy
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
-from melee_map_editor import model_additions, scene
+from melee_map_editor import model_additions, modeling, scene
 from melee_map_editor.protocol import read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -144,15 +144,27 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
     assert repeated['sha256'] == result['sha256']
     assert (temporary / 'repeated.dat').read_bytes() == (temporary / 'added.dat').read_bytes()
 
+    deleted_source = modeling.targets(bpy.context.scene)[0]
+    bpy.data.objects.remove(modeling.target_object(bpy.context.scene, deleted_source), do_unlink=True)
+    combined = scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'combined.dat')
+    assert combined['modelChanged']
+    run(CLI, 'dotnet', 'extract', temporary / 'combined.dat', '--session', temporary / 'combined')
+    combined_stage = read(temporary / 'combined/stage.json')
+    combined_mesh_count = sum(len(read(temporary / 'combined' / group['file'])['meshes'])
+                              for group in combined_stage['modelGroups'])
+    assert combined_mesh_count == source_mesh_count + 1
+
     run(CLI, 'dotnet', 'extract', temporary / 'added.dat', '--session', temporary / 'reimport')
     reimported = read(temporary / 'reimport/stage.json')
     output_mesh_count = sum(len(read(temporary / 'reimport' / group['file'])['meshes'])
                             for group in reimported['modelGroups'])
     assert output_mesh_count == source_mesh_count + 2
-    bpy.ops.object.select_all(action='DESELECT')
     pending = model_additions.objects(bpy.context.scene)
-    pending[0].select_set(True)
-    assert model_additions.remove_selected(bpy.context) == 1
+    bpy.data.objects.remove(pending[0], do_unlink=True)
+    reduced_payload, _ = model_additions.edits(bpy.context.scene, stage)
+    assert len(reduced_payload['additions']) == 1
+    assert len(reduced_payload['additions'][0]['parts']) == 1
+    bpy.data.objects.remove(model_additions.objects(bpy.context.scene)[0], do_unlink=True)
     assert not model_additions.objects(bpy.context.scene)
     assert model_additions.edits(bpy.context.scene, stage) == (None, {})
 

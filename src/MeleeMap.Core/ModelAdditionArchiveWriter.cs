@@ -318,7 +318,8 @@ public static class ModelAdditionArchiveWriter
         var extended = ModelIdentity.Capture(archive, catalog);
         int expectedNewNodes = expected.Chunks.Length * 2 + expected.Jobjs.Length;
         Require(extended.Nodes.Count == identity.Nodes.Count + expectedNewNodes,
-            "MODEL_ADDITION_GRAPH", "Model graph extension contains an unexpected descriptor count.");
+            "MODEL_ADDITION_GRAPH", $"Model graph extension contains an unexpected descriptor count "
+            + $"({extended.Nodes.Count} actual, {identity.Nodes.Count + expectedNewNodes} expected).");
         var extendedById = extended.Nodes.ToDictionary(node => node.Id);
         foreach (var original in identity.Nodes)
         {

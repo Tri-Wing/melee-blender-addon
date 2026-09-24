@@ -9,11 +9,13 @@ public sealed record ModelEdit([property: JsonRequired] string Id,
     string? SourceMaterialId = null, Vector2Data[]? TexCoords = null, bool UseGreyMaterial = false,
     ColorData[]? Colors0 = null, ColorData[]? Colors1 = null);
 public sealed record ModelEdits([property: JsonRequired] int ProtocolVersion,
-    [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes);
+    [property: JsonRequired] string CoordinateSpace, [property: JsonRequired] ModelEdit[] Meshes,
+    string[]? DeletedIds = null);
 public sealed record EditableModel(string Id, int GroupIndex, int JobjIndex, int DobjIndex,
-    int PobjIndex, int PobjOffset, int DobjOffset, bool PositionsOnly = false);
+    int PobjIndex, int PobjOffset, int DobjOffset, bool PositionsOnly = false,
+    int PobjLinkField = -1, bool SharesDobj = false);
 
-/// <summary>Structurally eligible rigid POBJs with independently replaceable materials.</summary>
+/// <summary>Structurally eligible rigid POBJs for position, topology, or deletion edits.</summary>
 public static class ModelEditing
 {
     public const int MaxTriangles = 14000;
@@ -45,11 +47,14 @@ public static class ModelEditing
         {
             var d = byId[p.OwnerId!]; var j = byId[d.OwnerId!];
             var group = nodes.First(n => n.GroupIndex == p.GroupIndex && n.Kind is "group" or "sentinel-group");
-            if (group.Kind != "group" || j.Kind != "jobj" || p.Index != 0
-                || nodes.Count(n => n.OwnerId == d.Id && n.Kind == "pobj") != 1
+            var siblings = nodes.Where(n => n.OwnerId == d.Id && n.Kind == "pobj")
+                .OrderBy(n => n.Index).ToArray();
+            int siblingIndex = Array.FindIndex(siblings, node => node.Id == p.Id);
+            if (group.Kind != "group" || j.Kind != "jobj" || siblingIndex < 0
+                || p.Index != siblingIndex
                 || nodes.Count(n => n.SourceOffset == p.SourceOffset && n.Kind == "pobj") != 1
                 || nodes.Count(n => n.SourceOffset == d.SourceOffset && n.Kind == "dobj") != 1)
-            { readOnlyReasons[p.Id] = "Shared descriptors or multiple meshes in one DOBJ."; continue; }
+            { readOnlyReasons[p.Id] = "Shared or inconsistent model descriptors."; continue; }
             try
             {
                 // Custom classes, bindings and shape animation need dedicated writers.
@@ -59,12 +64,15 @@ public static class ModelEditing
                 { readOnlyReasons[p.Id] = "Skinned, shared-joint, or shape-bound geometry."; continue; }
                 if (r.Pointer(group.SourceOffset + 12) != null)
                 { readOnlyReasons[p.Id] = "This group has shape animation."; continue; }
-                if (material == null || r.Pointer(p.SourceOffset) != null || r.Pointer(d.SourceOffset) != null
+                if (material == null || r.Pointer(p.SourceOffset) != null
+                    || r.Pointer(d.SourceOffset) != null
                     || r.Pointer(material.Value) != null
                     || (r.Int(j.SourceOffset + 4) & (0x20000 | 0x1000 | 0xE00)) != 0)
                 { readOnlyReasons[p.Id] = "Custom classes, instancing, or billboard transforms."; continue; }
+                int linkField = siblingIndex == 0 ? d.SourceOffset + 12
+                    : siblings[siblingIndex - 1].SourceOffset + 4;
                 if (archive.Pointers.Count(x => x.Value == p.SourceOffset) != 1
-                    || !archive.Pointers.TryGetValue(d.SourceOffset + 12, out int target) || target != p.SourceOffset
+                    || !archive.Pointers.TryGetValue(linkField, out int target) || target != p.SourceOffset
                     || archive.Pointers.Count(x => x.Value == d.SourceOffset) != 1)
                 { readOnlyReasons[p.Id] = "Shared model descriptors."; continue; }
                 bool HasInteriorReference(int start, int size) => archive.Pointers.Values.Any(x => x > start && x < start + size)
@@ -75,7 +83,9 @@ public static class ModelEditing
                 var mesh = GxMeshDecoder.Decode(archive, p.SourceOffset);
                 if (mesh.Envelopes != null || mesh.BoundJobjSourceOffset != null)
                 { readOnlyReasons[p.Id] = "Skinned or shared-joint geometry."; continue; }
-                result.Add(new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index, p.SourceOffset, d.SourceOffset, positionsOnly));
+                result.Add(new(p.Id, p.GroupIndex, j.Index, d.Index, p.Index,
+                    p.SourceOffset, d.SourceOffset, positionsOnly, linkField,
+                    siblings.Length > 1));
             }
             catch (StageException e) { readOnlyReasons[p.Id] = e.Message; }
         }

@@ -11,7 +11,7 @@ from mathutils import Matrix, Vector
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
 import melee_map_editor as addon
-from melee_map_editor import animations, scene, collision, transforms
+from melee_map_editor import animations, scene, collision, modeling, transforms
 from melee_map_editor.protocol import StageError, read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -229,7 +229,8 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     # Publication errors still clean temporary edit input.
     rejects(lambda: scene.apply(s, CLI, 'dotnet', tmp), 'directory')
     assert not (directory / 'edits/collision.json').exists()
-    model = next(o for o in s.objects if o.get('mme_role') == 'pobj')
+    model = next(o for o in s.objects if o.get('mme_role') == 'pobj'
+                 and o.get('mme_id') not in modeling.target_ids(s))
     bpy.data.objects.remove(model, do_unlink=True)
     rejects(lambda: scene.prepare(s), 'protected')
 

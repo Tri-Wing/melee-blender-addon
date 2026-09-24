@@ -340,47 +340,6 @@ def register_selected(context, target_id):
         raise
 
 
-def remove_selected(context):
-    selected = [obj for obj in context.selected_objects if is_pending(obj)
-                and obj.get('mme_session_id') == context.scene.mme_session_id]
-    if not selected:
-        raise StageError('Select one or more pending imported models to remove.')
-    addition_ids = set()
-    for obj in selected:
-        if obj.get('mme_role') == ROLE and obj.parent:
-            addition_ids.add(obj.parent.get('mme_addition_id'))
-        else:
-            addition_ids.add(obj.get('mme_addition_id') or obj.get('mme_id'))
-    addition_ids.discard(None)
-    pending = [obj for obj in bpy.data.objects
-               if obj.get('mme_session_id') == context.scene.mme_session_id
-               and is_pending(obj)
-               and ((obj.get('mme_role') == ROLE and obj.parent
-                     and obj.parent.get('mme_addition_id') in addition_ids)
-                    or obj.get('mme_addition_id') in addition_ids
-                    or obj.get('mme_id') in addition_ids)]
-    meshes = [obj.data for obj in pending if obj.type == 'MESH']
-    materials = {material for mesh in meshes for material in mesh.materials if material}
-    images = {node.image for material in materials if material.use_nodes and material.node_tree
-              for node in material.node_tree.nodes
-              if node.bl_idname == 'ShaderNodeTexImage' and node.image is not None}
-    for obj in sorted(pending, key=lambda item: item.get('mme_role') != ROLE):
-        bpy.data.objects.remove(obj, do_unlink=True)
-    _remove_jobj_bones(context, addition_ids)
-    for mesh in meshes:
-        if mesh.users == 0:
-            bpy.data.meshes.remove(mesh)
-    for material in materials:
-        if material.users == 0:
-            bpy.data.materials.remove(material)
-    for image in images:
-        if image.users == 0:
-            bpy.data.images.remove(image)
-    if not objects(context.scene):
-        context.scene.pop('mme_addition_report', None)
-    return len(addition_ids)
-
-
 def _target_matrix(scene, target):
     armature, bone = _target_binding(scene, target)
     return armature.matrix_world @ bone.matrix

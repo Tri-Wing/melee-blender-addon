@@ -98,6 +98,222 @@ public class ModelEditingTests
     }
 
     [PrimaryFixtureFact]
+    public void DeletesAnEligiblePobjWithoutChangingItsDobjOrUnrelatedData()
+    {
+        using var session = new Fixture();
+        var target = session.Target;
+        session.Write(new ModelEdits(2, "game-joint-local", [], [target.Id]));
+        var result = SessionApplier.Apply(session.Directory, session.Output);
+        Assert.True(result.ModelChanged); Assert.Equal(0, result.ModelTriangles);
+
+        var output = new StageArchive(session.Output);
+        var reader = new ArchiveDataReader(output.Layout);
+        Assert.Null(reader.Pointer(target.DobjOffset + 12));
+        session.Identity.WithoutPobjs([target.Id]).RequireUnchanged(
+            ModelIdentity.Capture(output.Layout, session.Catalog));
+        for (int i = 0; i < session.Source.Layout.DataSize; i++)
+        {
+            if (i >= target.DobjOffset + 12 && i < target.DobjOffset + 16) continue;
+            Assert.Equal(session.Source.Layout.Bytes[32 + i], output.Layout.Bytes[32 + i]);
+        }
+        Assert.Equal(session.Source.Layout.Bytes,
+            File.ReadAllBytes(Path.Combine(session.Directory, "source.dat")));
+    }
+
+    [PrimaryFixtureFact]
+    public void RejectsDuplicateUnsupportedOrEditedAndDeletedModelIds()
+    {
+        using var session = new Fixture();
+        var target = session.Target;
+        foreach (var edits in new[] {
+            new ModelEdits(2, "game-joint-local", [], [target.Id, target.Id]),
+            new ModelEdits(2, "game-joint-local", [Triangle(target.Id).Meshes[0]], [target.Id]),
+            new ModelEdits(2, "game-joint-local", [], [Guid.NewGuid().ToString("N")]) })
+        {
+            session.Write(edits);
+            Assert.Equal("MODEL_DELETE_TARGET",
+                Assert.Throws<StageException>(() => SessionApplier.Apply(session.Directory, session.Output)).Code);
+        }
+    }
+
+    [GrGdFixtureFact]
+    public void MultiPobjDobjSupportsTopologyMaterialSplittingAndLinkedListDeletion()
+    {
+        var source = new StageArchive(Path.Combine(CorpusTests.CorpusDirectory, "GrGd.dat"));
+        var catalog = new ModelIdentityCatalog();
+        var identity = ModelIdentity.Capture(source.Layout, catalog);
+        var targets = ModelEditing.SelectAll(source.Layout, identity)
+            .Where(target => target.GroupIndex == 2 && target.JobjIndex == 7
+                && target.DobjIndex == 2).OrderBy(target => target.PobjIndex).ToArray();
+        Assert.Equal(2, targets.Length);
+        Assert.All(targets, target => { Assert.False(target.PositionsOnly); Assert.True(target.SharesDobj); });
+        Assert.Equal(targets[0].DobjOffset + 12, targets[0].PobjLinkField);
+        Assert.Equal(targets[0].PobjOffset + 4, targets[1].PobjLinkField);
+
+        var original = GxMeshDecoder.Decode(source.Layout, targets[1].PobjOffset);
+        var moved = new ModelEdit(targets[1].Id,
+            original.Positions.Select(position => position with { X = position.X + 1 }).ToArray(),
+            original.TriangleIndices);
+        ModelEditing.Compile(new(2, "game-joint-local", [moved]), targets[1], original);
+        var topology = Triangle(targets[1].Id);
+        var compiled = ModelEditing.Compile(topology, targets[1], original);
+
+        var split = ModelDobjSplitter.Write(source.Layout, identity, [targets[1].Id]);
+        var splitLayout = new ArchiveLayout(split.Bytes);
+        var splitIdentity = ModelIdentity.Capture(splitLayout, catalog);
+        var splitTargets = ModelEditing.SelectAll(splitLayout, splitIdentity)
+            .Where(target => targets.Any(originalTarget => originalTarget.Id == target.Id))
+            .ToDictionary(target => target.Id);
+        var first = splitTargets[targets[0].Id];
+        var second = splitTargets[targets[1].Id];
+        Assert.False(first.SharesDobj); Assert.False(second.SharesDobj);
+        Assert.Equal(targets[0].DobjOffset, first.DobjOffset);
+        Assert.Equal(split.DobjOffsets[targets[1].Id], second.DobjOffset);
+        Assert.NotEqual(first.DobjOffset, second.DobjOffset);
+        Assert.Equal(0, first.PobjIndex); Assert.Equal(0, second.PobjIndex);
+        var splitReader = new ArchiveDataReader(splitLayout);
+        int sharedMaterial = new ArchiveDataReader(source.Layout).Pointer(targets[0].DobjOffset + 8)!.Value;
+        Assert.Equal(sharedMaterial, splitReader.Pointer(first.DobjOffset + 8));
+        Assert.Equal(sharedMaterial, splitReader.Pointer(second.DobjOffset + 8));
+
+        var replaced = new ArchiveLayout(ModelArchiveWriter.Write(splitLayout, second, compiled));
+        ModelArchiveWriter.Verify(replaced, second, compiled);
+        Assert.Equal(sharedMaterial, new ArchiveDataReader(replaced).Pointer(first.DobjOffset + 8));
+        Assert.NotEqual(sharedMaterial, new ArchiveDataReader(replaced).Pointer(second.DobjOffset + 8));
+        splitIdentity.RequireUnchanged(ModelIdentity.Capture(replaced, catalog));
+
+        foreach (var target in targets)
+        {
+            var deleted = new ArchiveLayout(ModelDeletionWriter.Write(source.Layout, target));
+            identity.WithoutPobjs([target.Id]).RequireUnchanged(
+                ModelIdentity.Capture(deleted, catalog));
+            var survivors = ModelEditing.SelectAll(deleted, ModelIdentity.Capture(deleted, catalog))
+                .Where(candidate => candidate.GroupIndex == 2 && candidate.JobjIndex == 7
+                    && candidate.DobjIndex == 2).ToArray();
+            Assert.Single(survivors);
+            Assert.Equal(0, survivors[0].PobjIndex);
+        }
+
+        ArchiveLayout bothDeleted = source.Layout;
+        foreach (var target in targets.OrderByDescending(target => target.PobjIndex))
+            bothDeleted = new(ModelDeletionWriter.Write(bothDeleted, target));
+        identity.WithoutPobjs(targets.Select(target => target.Id)).RequireUnchanged(
+            ModelIdentity.Capture(bothDeleted, catalog));
+    }
+
+    [GrGdFixtureFact]
+    public void MultiPobjSessionApplySplitsForTopologyAndMaterialReplacement()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "mme-grgd-split-" + Guid.NewGuid().ToString("N"));
+        string directory = Path.Combine(root, "session");
+        string outputPath = Path.Combine(root, "edited.dat");
+        try
+        {
+            var source = new StageArchive(Path.Combine(CorpusTests.CorpusDirectory, "GrGd.dat"));
+            SessionExtractor.Extract(source, directory);
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "stage.json")));
+            var nodes = new List<ModelIdentityNode>();
+            foreach (var entry in manifest.RootElement.GetProperty("modelGroups").EnumerateArray())
+            {
+                using var group = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory,
+                    entry.GetProperty("file").GetString()!)));
+                nodes.AddRange(group.RootElement.GetProperty("nodes").Deserialize<ModelIdentityNode[]>(Json)!);
+            }
+            var catalog = ModelIdentityCatalog.Restore(nodes);
+            var identity = ModelIdentity.Capture(source.Layout, catalog);
+            var targets = ModelEditing.SelectAll(source.Layout, identity)
+                .Where(target => target.GroupIndex == 2 && target.JobjIndex == 7
+                    && target.DobjIndex == 2).OrderBy(target => target.PobjIndex).ToArray();
+            var assignedMaterial = ModelMaterials.Select(source.Layout,
+                ModelEditing.SelectAll(source.Layout, identity)).First(material => !material.UsesUv);
+            var replacement = Triangle(targets[1].Id);
+            replacement.Meshes[0] = replacement.Meshes[0] with {
+                SourceMaterialId = assignedMaterial.Id
+            };
+            File.WriteAllText(Path.Combine(directory, "edits/models.json"),
+                JsonSerializer.Serialize(replacement, Json));
+
+            SessionApplier.Apply(directory, outputPath);
+            var output = new StageArchive(outputPath);
+            var editedIdentity = ModelIdentity.Capture(output.Layout, catalog);
+            var editedTargets = ModelEditing.SelectAll(output.Layout, editedIdentity)
+                .Where(target => targets.Any(original => original.Id == target.Id))
+                .ToDictionary(target => target.Id);
+            var first = editedTargets[targets[0].Id];
+            var second = editedTargets[targets[1].Id];
+            Assert.NotEqual(first.DobjOffset, second.DobjOffset);
+            Assert.False(first.SharesDobj); Assert.False(second.SharesDobj);
+            Assert.Equal(identity.Nodes.Count + 1, editedIdentity.Nodes.Count);
+            ModelArchiveWriter.Verify(output.Layout, second,
+                ModelEditing.Compile(replacement, second), assignedMaterial.MobjOffset);
+            int originalMaterial = new ArchiveDataReader(source.Layout)
+                .Pointer(targets[0].DobjOffset + 8)!.Value;
+            Assert.Equal(originalMaterial, new ArchiveDataReader(output.Layout).Pointer(first.DobjOffset + 8));
+            Assert.Equal(assignedMaterial.MobjOffset,
+                new ArchiveDataReader(output.Layout).Pointer(second.DobjOffset + 8));
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, true);
+        }
+    }
+
+    [GrGdFixtureFact]
+    public void MultiPobjMaterialPropertyEditUsesCopyOnWriteDobjSplit()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "mme-grgd-material-split-" + Guid.NewGuid().ToString("N"));
+        string directory = Path.Combine(root, "session");
+        string outputPath = Path.Combine(root, "edited.dat");
+        try
+        {
+            var source = new StageArchive(Path.Combine(CorpusTests.CorpusDirectory, "GrGd.dat"));
+            SessionExtractor.Extract(source, directory);
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "stage.json")));
+            var nodes = new List<ModelIdentityNode>();
+            foreach (var entry in manifest.RootElement.GetProperty("modelGroups").EnumerateArray())
+            {
+                using var group = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory,
+                    entry.GetProperty("file").GetString()!)));
+                nodes.AddRange(group.RootElement.GetProperty("nodes").Deserialize<ModelIdentityNode[]>(Json)!);
+            }
+            var catalog = ModelIdentityCatalog.Restore(nodes);
+            var identity = ModelIdentity.Capture(source.Layout, catalog);
+            var targets = ModelEditing.SelectAll(source.Layout, identity)
+                .Where(target => target.GroupIndex == 2 && target.JobjIndex == 7
+                    && target.DobjIndex == 2).OrderBy(target => target.PobjIndex).ToArray();
+            Assert.Contains(MaterialProperties.Select(source.Layout, identity),
+                material => material.Id == targets[1].Id);
+            var edits = new MaterialPropertyEdits(2,
+                [new MaterialPropertyEdit(targets[1].Id, Ambient: [1, 2, 3])]);
+            File.WriteAllText(Path.Combine(directory, "edits/materials.json"),
+                JsonSerializer.Serialize(edits, Json));
+
+            var result = SessionApplier.Apply(directory, outputPath);
+            Assert.True(result.MaterialChanged);
+            var output = new StageArchive(outputPath);
+            var editedIdentity = ModelIdentity.Capture(output.Layout, catalog);
+            var editedTargets = ModelEditing.SelectAll(output.Layout, editedIdentity)
+                .Where(target => targets.Any(original => original.Id == target.Id))
+                .ToDictionary(target => target.Id);
+            var first = editedTargets[targets[0].Id];
+            var second = editedTargets[targets[1].Id];
+            var sourceReader = new ArchiveDataReader(source.Layout);
+            var outputReader = new ArchiveDataReader(output.Layout);
+            int originalMobj = sourceReader.Pointer(targets[0].DobjOffset + 8)!.Value;
+            Assert.Equal(originalMobj, outputReader.Pointer(first.DobjOffset + 8));
+            int editedMobj = outputReader.Pointer(second.DobjOffset + 8)!.Value;
+            Assert.NotEqual(originalMobj, editedMobj);
+            int editedMaterial = outputReader.Pointer(editedMobj + 12)!.Value;
+            Assert.Equal(new byte[] { 1, 2, 3 }, Enumerable.Range(0, 3)
+                .Select(index => outputReader.Byte(editedMaterial + index)).ToArray());
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, true);
+        }
+    }
+
+    [PrimaryFixtureFact]
     public void CombinesModelAndCollisionEditsAndPreservesOutputOnFailure()
     {
         using var session = new Fixture(); session.Write(Triangle(session.Target.Id));

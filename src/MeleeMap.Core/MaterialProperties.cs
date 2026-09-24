@@ -87,7 +87,8 @@ public static class MaterialProperties
     }
 
     public static MaterialPropertyWrite Write(ArchiveLayout source, ArchiveLayout current,
-        ModelIdentitySnapshot identity, MaterialPropertyEdits edits, string[] declaredIds,
+        ModelIdentitySnapshot identity, ModelIdentitySnapshot bindingIdentity,
+        MaterialPropertyEdits edits, string[] declaredIds,
         IReadOnlyDictionary<string, string?> assignments)
     {
         Require(edits.ProtocolVersion == SessionExtractor.ProtocolVersion && edits.Materials is { Length: > 0 },
@@ -244,11 +245,14 @@ public static class MaterialProperties
             materials.Add(edit.Id, mobj);
         }
         byte[] payload = data.ToArray(); var bindings = new Dictionary<string, int>(); var fields = new HashSet<int>();
+        var bindingNodes = bindingIdentity.Nodes.ToDictionary(node => node.Id);
         foreach (var target in ModelEditing.SelectAll(source, identity))
             if (assignments.TryGetValue(target.Id, out string? id) && id != null && materials.TryGetValue(id, out int mobj))
             {
-                Put(payload, target.DobjOffset + 8, mobj); bindings.Add(target.Id, mobj);
-                fields.Add(target.DobjOffset + 8);
+                var pobj = bindingNodes[target.Id];
+                int dobjOffset = bindingNodes[pobj.OwnerId!].SourceOffset;
+                Put(payload, dobjOffset + 8, mobj); bindings.Add(target.Id, mobj);
+                fields.Add(dobjOffset + 8);
             }
         using var stream = new MemoryStream(); stream.Write(current.Bytes.AsSpan(0, 32)); stream.Write(payload);
         foreach (int field in relocations) { byte[] value = new byte[4]; Put(value, 0, field); stream.Write(value); }
@@ -258,16 +262,21 @@ public static class MaterialProperties
             Require(fields.Any(f => i >= f && i < f + 4) || bytes[32 + i] == current.Bytes[32 + i],
                 "MATERIAL_PRESERVATION", "Material writing changed unrelated source data.");
         var output = new MaterialPropertyWrite(bytes, bindings, blocks);
-        Verify(new ArchiveLayout(bytes), identity, output);
+        Verify(new ArchiveLayout(bytes), bindingIdentity, output);
         return output;
     }
 
-    public static void Verify(ArchiveLayout archive, ModelIdentitySnapshot identity, MaterialPropertyWrite expected)
+    public static void Verify(ArchiveLayout archive, ModelIdentitySnapshot bindingIdentity,
+        MaterialPropertyWrite expected)
     {
-        var byId = identity.Nodes.ToDictionary(n => n.Id); var r = new ArchiveDataReader(archive);
+        var byId = bindingIdentity.Nodes.ToDictionary(n => n.Id); var r = new ArchiveDataReader(archive);
         foreach (var (id, mobj) in expected.Bindings)
-            Require(r.Pointer(byId[byId[id].OwnerId!].SourceOffset + 8) == mobj,
-                "MATERIAL_WRITE_MISMATCH", "Edited material binding changed after export.");
+        {
+            int dobj = byId[byId[id].OwnerId!].SourceOffset;
+            int? actual = r.Pointer(dobj + 8);
+            Require(actual == mobj, "MATERIAL_WRITE_MISMATCH",
+                $"Edited material binding changed after export (DOBJ 0x{dobj:X}, expected 0x{mobj:X}, actual {(actual.HasValue ? $"0x{actual.Value:X}" : "null")}).");
+        }
         foreach (var (offset, block) in expected.Blocks)
             Require(archive.Bytes.AsSpan(32 + offset, block.Length).SequenceEqual(block),
                 "MATERIAL_WRITE_MISMATCH", "Edited material properties changed after export.");

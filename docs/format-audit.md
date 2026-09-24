@@ -341,8 +341,10 @@ archive verifies all changed meshes and the unchanged identity inventory.
 Static textured/translucent materials and pixel descriptors can be replaced by
 an independent grey MOBJ without changing the original material data. Hidden
 JOBJ flags no longer exclude a rigid target; source visibility stays intact.
-Material/texture animation, shared descriptors, multi-POBJ DOBJ materials,
-bindings, shape animation and unsupported transforms remain excluded.
+Material/texture animation, shared descriptors, bindings, shape animation and
+unsupported transforms remain excluded. Multi-POBJ DOBJ meshes use copy-on-write
+DOBJ splitting for topology and material edits; position-only edits retain the
+source shared DOBJ.
 
 GrNLa exposes 45 editable meshes. The other 48 comprise 45 material-animated
 meshes, two skinned meshes, and one billboard mesh. The prior one-target export,

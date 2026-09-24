@@ -16,6 +16,7 @@ if ! command -v "$melee_blender_bin" >/dev/null 2>&1; then
 fi
 
 export MELEEMAP_REPO="$(dirname -- "$melee_launcher_dir")"
+export PYTHONPATH="$MELEEMAP_REPO/blender_addon${PYTHONPATH:+:$PYTHONPATH}"
 export MELEEMAP_IMPORT_DAT=""
 if [[ ${1:-} == *.[dD][aA][tT] ]]; then
     if [[ ! -f "$1" ]]; then
@@ -26,4 +27,4 @@ if [[ ${1:-} == *.[dD][aA][tT] ]]; then
     shift
 fi
 # Load any requested .blend before enabling the development add-on.
-exec "$melee_blender_bin" "$@" --python "$melee_launcher_dir/load_blender_addon.py"
+exec "$melee_blender_bin" --python-use-system-env "$@" --python "$melee_launcher_dir/load_blender_addon.py"

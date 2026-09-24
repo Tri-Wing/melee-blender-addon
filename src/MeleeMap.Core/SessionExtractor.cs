@@ -210,10 +210,10 @@ public static class SessionExtractor
                 modelMaterials = previewMaterials,
                 modelPreviews = basePreviews,
                 editableMeshes = editableModels.Select(e => new { e.Id, e.GroupIndex, e.JobjIndex,
-                    e.DobjIndex, e.PobjIndex, e.PositionsOnly, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
+                    e.DobjIndex, e.PobjIndex, e.PositionsOnly, e.SharesDobj, file = $"models/group-{e.GroupIndex:D3}/mesh-{e.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles }),
                 editableMesh = editable == null ? null : new { editable.Id, editable.GroupIndex, editable.JobjIndex,
-                    editable.DobjIndex, editable.PobjIndex, editable.PositionsOnly, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
+                    editable.DobjIndex, editable.PobjIndex, editable.PositionsOnly, editable.SharesDobj, file = $"models/group-{editable.GroupIndex:D3}/mesh-{editable.Id}.json",
                     representation = "opaque-grey-flat-shaded", maxTriangles = ModelEditing.MaxTriangles },
                 selectedMesh = new { id = selected.Id, file = meshPath }, deferredMeshes, warnings, baselineFiles
             });

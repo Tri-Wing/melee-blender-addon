@@ -151,6 +151,23 @@ def protected_inventory_matches(scene, editable_id, editable_transform_ids=None)
     expected = scene.get('mme_guard')
     if digest(current) == expected:
         return True
+    editable_ids = {editable_id} if isinstance(editable_id, str) else set(editable_id or ())
+    stored = scene.get('mme_guard_inventory')
+    if stored and editable_ids:
+        try:
+            adjusted = json.loads(stored)
+            current_ids = {row['props']['mme_id'] for row in current['objects']}
+            deleted_ids = editable_ids - current_ids
+            if deleted_ids:
+                adjusted['objects'] = [row for row in adjusted['objects']
+                                       if row['props']['mme_id'] not in deleted_ids]
+                for collection in adjusted['collections']:
+                    collection['objects'] = [identity for identity in collection['objects']
+                                             if identity not in deleted_ids]
+                if digest(current) == digest(adjusted):
+                    return True
+        except (TypeError, ValueError, KeyError):
+            pass
     inventories = [current]
     if editable_transform_ids:
         # Saved scenes from before JOBJ editing included every object transform.
@@ -177,6 +194,18 @@ def protected_inventory_matches(scene, editable_id, editable_transform_ids=None)
                 if digest(candidate) == expected:
                     return True
     return False
+
+
+def ensure_model_deletion_guard(scene):
+    """Upgrade an intact older .blend so native editable-model deletion is available."""
+    if not scene.mme_session or scene.get('mme_guard_inventory') or not scene.get('mme_guard'):
+        return
+    editable_ids = modeling.target_ids(scene)
+    if not editable_ids:
+        return
+    current = inventory(scene, editable_ids, jobjs.target_ids(scene))
+    if digest(current) == scene['mme_guard']:
+        scene['mme_guard_inventory'] = json.dumps(current)
 
 
 def import_session(context, directory):
@@ -457,7 +486,9 @@ def import_session(context, directory):
         # Preserve the single-target helpers for older saved scenes/scripts.
         if editable:
             scene['mme_model_baseline'] = baselines[editable['id']]
-        scene['mme_guard'] = digest(inventory(scene, modeling.target_ids(scene), jobjs.target_ids(scene)))
+        guard = inventory(scene, modeling.target_ids(scene), jobjs.target_ids(scene))
+        scene['mme_guard_inventory'] = json.dumps(guard)
+        scene['mme_guard'] = digest(guard)
         scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
         scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],

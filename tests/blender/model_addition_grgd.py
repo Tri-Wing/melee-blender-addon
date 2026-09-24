@@ -8,7 +8,7 @@ import bpy
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
-from melee_map_editor import model_additions, scene
+from melee_map_editor import model_additions, modeling, scene
 from melee_map_editor.protocol import read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -64,13 +64,45 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-grgd-') as temporary:
     added = [preview for preview in reimported['modelPreviews']
              if preview.get('preview', {}).get('diffuseLighting')]
     assert added
-    bpy.ops.object.select_all(action='DESELECT')
-    registered[0].select_set(True)
-    bpy.context.view_layer.objects.active = registered[0]
-    assert model_additions.remove_selected(bpy.context) == 1
+
+    multi_pobj = sorted((info for info in modeling.targets(bpy.context.scene)
+                         if info['groupIndex'] == 2 and info['jobjIndex'] == 7
+                         and info['dobjIndex'] == 2), key=lambda info: info['pobjIndex'])
+    assert len(multi_pobj) == 2
+    assert all(not info['positionsOnly'] and info['sharesDobj'] for info in multi_pobj)
+    split_obj = modeling.target_object(bpy.context.scene, multi_pobj[1])
+    assert split_obj.name.startswith(
+        'Editable Model - Group 002 JOBJ 007 DOBJ 002 POBJ 001')
+    split_obj.data.clear_geometry()
+    split_obj.data.from_pydata([(0, 0, 0), (2, 0, 0), (0, 2, 0)], [], [(0, 1, 2)])
+    split_obj.data.update()
+    scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'grgd-split.dat')
+    run(CLI, 'dotnet', 'extract', temporary / 'grgd-split.dat',
+        '--session', temporary / 'split-reimport')
+    split_stage = read(temporary / 'split-reimport/stage.json')
+    same_joint = [info for info in split_stage['editableMeshes']
+                  if info['groupIndex'] == 2 and info['jobjIndex'] == 7]
+    retained = next(info for info in same_joint if info['dobjIndex'] == 2)
+    separated = max(same_joint, key=lambda info: info['dobjIndex'])
+    separated_mesh = read(temporary / 'split-reimport' / separated['file'])
+    assert retained['pobjIndex'] == 0 and not retained['sharesDobj']
+    assert separated['dobjIndex'] != 2 and separated['pobjIndex'] == 0
+    assert not separated['sharesDobj']
+    assert len(separated_mesh['positions']) == 3
+    assert len(separated_mesh['triangleIndices']) == 3
+
+    bpy.data.objects.remove(modeling.target_object(bpy.context.scene, multi_pobj[1]), do_unlink=True)
+    scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'grgd-deleted.dat')
+    run(CLI, 'dotnet', 'extract', temporary / 'grgd-deleted.dat',
+        '--session', temporary / 'deleted-reimport')
+    deleted_stage = read(temporary / 'deleted-reimport/stage.json')
+    remaining = [info for info in deleted_stage['editableMeshes']
+                 if info['groupIndex'] == 2 and info['jobjIndex'] == 7
+                 and info['dobjIndex'] == 2]
+    assert len(remaining) == 1 and remaining[0]['pobjIndex'] == 0
+
+    bpy.data.objects.remove(registered[0], do_unlink=True)
     assert not model_additions.objects(bpy.context.scene)
-    assert not any(bone.get('mme_role') == model_additions.JOBJ_ROLE
-                   for obj in bpy.context.scene.objects if obj.type == 'ARMATURE'
-                   for bone in obj.pose.bones)
+    assert model_additions.edits(bpy.context.scene, stage) == (None, {})
 
 print('GrGd programmatic model addition test passed')

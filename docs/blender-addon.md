@@ -153,9 +153,10 @@ POBJ mesh beneath its own DOBJ object; new-chain placement also adds a generated
 identity-transform JOBJ bone to the group's existing armature and bone-parents
 those DOBJ branches to it. This matches the hierarchy emitted to
 the DAT, while any additional GX-size chunking remains an export detail. Duplicate first if you want to retain an
-imported reference. Select registered objects and use **Remove Selected Imported
-Models** to remove them from the pending export. A failed registration leaves
-the selected source objects untouched.
+imported reference. To remove a model, select its mesh object and use Blender's
+normal **Delete** command. This is the same workflow for imported additions and
+original editable stage models. A failed registration leaves the selected source
+objects untouched.
 
 Each face must have a material. The initial converter accepts either a constant
 base color or one Image Texture connected to a Principled BSDF Base Color input.
@@ -312,8 +313,9 @@ model is rejected.
 4. Move vertices. For fully editable models, use native Blender mesh tools to add/delete faces and replace
    geometry **inside this object**. Unlike collision, render geometry can be
    edited freely in all three dimensions. Quads/ngons are triangulated on export.
-   Do not delete the object, change its parenting or object transforms, or add
-   other identity-bearing objects. Apply desired shape changes in Edit Mode.
+   Delete the mesh object with Blender's normal **Delete** command to remove that
+   model from the exported stage. Do not change its parenting or object transforms,
+   or add other identity-bearing objects. Apply desired shape changes in Edit Mode.
 5. Validate and export normally. Model and collision changes can be exported
    together. Editing model geometry does **not** automatically change collision.
 
@@ -352,9 +354,13 @@ can contain separate vertices at the same position; native Merge by Distance is
 available for this model if appropriate for your edit.
 
 Object transforms, group/JOBJ/DOBJ/POBJ identities, and unsupported meshes remain
-protected except for the SRT of explicitly marked **Editable JOBJ** nodes. Eligible meshes must be rigid and unbound, with one POBJ per DOBJ,
-no custom class, no material/texture animation on that DOBJ, and no group shape
-animation. Shared/interior descriptors, instancing, billboard transforms, and
+protected except for the SRT of explicitly marked **Editable JOBJ** nodes. Eligible meshes must be rigid and unbound,
+have no custom class, and have no group shape animation. A sole POBJ in a DOBJ
+supports full topology and material editing. Multiple POBJs under one DOBJ are
+also fully editable and deletable. Vertex-only edits retain their shared source
+DOBJ; topology, material-assignment, and material-property edits use copy-on-write
+splitting to move only the affected POBJ beneath an appended one-POBJ DOBJ. The
+unedited sibling keeps the original DOBJ and material. Shared/interior descriptors, instancing, billboard transforms, and
 quaternion joints remain unsupported. Static textured and translucent source
 materials are preserved for vertex-only edits. Topology changes use a supported
 assigned stage material or opaque grey. Source-hidden

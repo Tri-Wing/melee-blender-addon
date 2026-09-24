@@ -142,19 +142,6 @@ class MME_OT_add_models(bpy.types.Operator):
         return execute_safely(self, context, action)
 
 
-class MME_OT_remove_models(bpy.types.Operator):
-    bl_idname = 'mme.remove_models'
-    bl_label = 'Remove Selected Imported Models'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        def action():
-            count = model_additions.remove_selected(context)
-            context.scene.mme_status = f'Removed {count} pending imported model object(s).'
-            self.report({'INFO'}, context.scene.mme_status)
-        return execute_safely(self, context, action)
-
-
 class MME_OT_edit_collision(bpy.types.Operator):
     bl_idname = 'mme.edit_collision'
     bl_label = 'Enter Collision Editing'
@@ -480,11 +467,15 @@ class MME_PT_models(MME_PT_sidebar, bpy.types.Panel):
         if not editable:
             layout.label(text='No editable rigid models', icon='LOCKED')
             return
+        available = sum(bool(modeling.target_matches(s, info)) for info in editable)
+        if not available:
+            layout.label(text='No editable rigid models remain', icon='INFO')
+            return
         ids = {info['id'] for info in editable}
         active = context.active_object
         selected = (active and active.get('mme_session_id') == s.mme_session_id
                     and active.get('mme_id') in ids)
-        layout.label(text=f'{len(editable)} editable rigid models')
+        layout.label(text=f'{available} editable rigid models')
         row = layout.row()
         row.enabled = bool(selected) or not (active and active.get('mme_role') == 'pobj')
         row.operator('mme.edit_model', icon='EDITMODE_HLT')
@@ -526,15 +517,12 @@ class MME_PT_import_models(MME_PT_sidebar, bpy.types.Panel):
         addition_ids = {obj.parent.get('mme_addition_id') for obj in pending if obj.parent}
         addition_ids.discard(None)
         if addition_ids:
-            layout.label(text=f'{len(addition_ids)} pending model addition(s) · {len(pending)} mesh part(s)')
+            layout.label(text=f'{len(addition_ids)} added model(s) · {len(pending)} mesh part(s)')
         else:
-            layout.label(text='No pending model additions')
+            layout.label(text='No added models')
         if context.active_object in pending:
             layout.operator('mme.edit_model', text='Edit Selected Model', icon='EDITMODE_HLT')
         layout.operator('mme.add_models', icon='ADD')
-        row = layout.row()
-        row.enabled = any(model_additions.is_pending(obj) for obj in context.selected_objects)
-        row.operator('mme.remove_models', icon='REMOVE')
 
 
 class MME_PT_import_report(MME_PT_sidebar, bpy.types.Panel):
@@ -545,7 +533,8 @@ class MME_PT_import_report(MME_PT_sidebar, bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return bool(context.scene.mme_session and context.scene.get('mme_addition_report'))
+        return bool(context.scene.mme_session and model_additions.objects(context.scene)
+                    and context.scene.get('mme_addition_report'))
 
     def draw(self, context):
         layout = self.layout
@@ -922,7 +911,7 @@ def update_dirty(scene_arg, depsgraph):
 def update_animation(scene_arg, depsgraph=None):
     try:
         animations.apply(scene_arg)
-    except (StageError, ReferenceError, FileNotFoundError):
+    except (StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
         pass
 
 
@@ -930,9 +919,20 @@ def update_animation(scene_arg, depsgraph=None):
 def load_animation(_):
     animations.clear_cache()
     try:
+        scene.ensure_model_deletion_guard(bpy.context.scene)
         animations.apply(bpy.context.scene)
-    except (StageError, ReferenceError, FileNotFoundError):
+    except (StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
         pass
+
+
+def migrate_model_deletion_guards():
+    """Run after registration, when Blender's startup data restriction is lifted."""
+    try:
+        for current_scene in bpy.data.scenes:
+            scene.ensure_model_deletion_guard(current_scene)
+    except (AttributeError, StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
+        pass
+    return None
 
 
 class MME_TextureLayerProperties(bpy.types.PropertyGroup):
@@ -1026,7 +1026,7 @@ class MME_PT_material(bpy.types.Panel):
 
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
-           MME_OT_add_models, MME_OT_remove_models,
+           MME_OT_add_models,
            MME_OT_edit_collision, MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation, MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_open_export,
            MME_PT_stage, MME_PT_viewport, MME_PT_models, MME_PT_import_models,
@@ -1092,12 +1092,16 @@ def register():
     bpy.app.handlers.depsgraph_update_post.append(update_dirty)
     bpy.app.handlers.frame_change_post.append(update_animation)
     bpy.app.handlers.load_post.append(load_animation)
+    if not bpy.app.timers.is_registered(migrate_model_deletion_guards):
+        bpy.app.timers.register(migrate_model_deletion_guards, first_interval=0.0)
     if not bpy.app.background:
         _draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_collision, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
     global _draw_handle
+    if bpy.app.timers.is_registered(migrate_model_deletion_guards):
+        bpy.app.timers.unregister(migrate_model_deletion_guards)
     if _draw_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handle, 'WINDOW')
         _draw_handle = None

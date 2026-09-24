@@ -109,7 +109,20 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
     s = bpy.context.scene
     assert modeling.edits(s, stage) == edits
     scene.validate(s, CLI, 'dotnet')
-    # Missing one edited target cannot silently export only the other one.
-    bpy.data.objects.remove(modeling.target_object(s, chosen[1]), do_unlink=True)
-    rejects(lambda: scene.apply(s, CLI, 'dotnet', tmp / 'multi.dat'))
-print('BLENDER_MULTI_MODELS_OK: batch joins, multi-object edit mode, collision, untouched meshes, guards, save/load')
+    # Blender's normal object deletion removes an editable POBJ on export.
+    deleted = chosen[1]
+    bpy.data.objects.remove(modeling.target_object(s, deleted), do_unlink=True)
+    deletion_edits = modeling.edits(s, stage)
+    assert deletion_edits['deletedIds'] == [deleted['id']]
+    scene.apply(s, CLI, 'dotnet', tmp / 'deleted.dat')
+    run(CLI, 'dotnet', 'extract', tmp / 'deleted.dat', '--session', tmp / 'deleted-session')
+    deleted_stage = read(tmp / 'deleted-session/stage.json')
+    deleted_offsets = {mesh['sourceOffset']
+        for group in deleted_stage['modelGroups']
+        for mesh in read(tmp / 'deleted-session' / group['file'])['nodes']
+        if mesh['kind'] == 'pobj'}
+    source_group = read(directory / stage['modelGroups'][deleted['groupIndex']]['file'])
+    deleted_offset = next(node['sourceOffset'] for node in source_group['nodes']
+                          if node['id'] == deleted['id'])
+    assert deleted_offset not in deleted_offsets
+print('BLENDER_MULTI_MODELS_OK: batch joins, multi-object edit mode, deletion, collision, guards, save/load')

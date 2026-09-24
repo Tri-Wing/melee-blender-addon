@@ -54,7 +54,12 @@ def load():
     # Unregister the currently loaded code before discarding its modules. Merely
     # reloading __init__ would leave helper modules and old callbacks in memory.
     errors = []
-    addon_utils.disable(name, default_set=False, handle_error=lambda: errors.append(sys.exc_info()[1]))
+
+    def capture_error(error=None):
+        errors.append(error or sys.exc_info()[1])
+
+    if name in sys.modules:
+        addon_utils.disable(name, default_set=False, handle_error=capture_error)
     if errors:
         raise RuntimeError('Could not unregister the previous add-on; restart Blender.') from errors[0]
     for module in list(sys.modules):
@@ -65,8 +70,7 @@ def load():
         sys.path.remove(path)
     sys.path.insert(0, path)
     importlib.invalidate_caches()
-    module = addon_utils.enable(name, default_set=True,
-                                handle_error=lambda: errors.append(sys.exc_info()[1]))
+    module = addon_utils.enable(name, default_set=True, handle_error=capture_error)
     if module is None or errors:
         raise RuntimeError('Could not load the development add-on. See the console traceback.') from (errors[0] if errors else None)
     prefs = bpy.context.preferences.addons[name].preferences
