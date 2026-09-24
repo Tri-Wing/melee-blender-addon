@@ -16,12 +16,22 @@ def session(scene):
     return Path(bpy.path.abspath(scene.mme_session))
 
 
-def collision_object(scene):
-    matches = [obj for obj in scene.objects if obj.get('mme_role') == 'collision'
-               and obj.get('mme_session_id') == scene.mme_session_id]
-    if len(matches) != 1:
-        raise StageError('The protected collision object is missing or duplicated.')
-    return matches[0]
+def collision_objects(scene):
+    return collision.collision_objects(scene)
+
+
+def active_collision_object(context):
+    obj = context.active_object
+    if obj in collision_objects(context.scene):
+        return obj
+    raise StageError('Select a collision component first.')
+
+
+def editing_collision_objects(context):
+    objects = [obj for obj in collision_objects(context.scene) if obj.mode == 'EDIT']
+    if not objects:
+        raise StageError('Select collision components and enter Edit Mode first.')
+    return objects
 
 
 def properties(item):
@@ -41,6 +51,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     # one must never turn into a DAT edit or fail protected-scene validation.
     objects = [o for o in bpy.data.objects if o.get('mme_session_id') == sid
                and o.get('mme_role') != 'preview-camera'
+               and o.get('mme_role') != 'collision'
                and not model_additions.is_pending(o) and not gameplay.is_pending(o)]
     result = {'collections': [], 'objects': []}
     session_actions = [action for action in bpy.data.actions
@@ -58,6 +69,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
                        + (['SCENE'] if c.name in scene.collection.children else []),
             'objects': sorted(o.get('mme_id', o.name) for o in c.objects
                               if o.get('mme_role') != 'preview-camera'
+                              and o.get('mme_role') != 'collision'
                               and not model_additions.is_pending(o)
                               and not gameplay.is_pending(o)),
             'children': sorted(x.get('mme_id', x.name) for x in c.children
@@ -421,18 +433,23 @@ def import_session(context, directory):
                 objects[payload['id']] = replacement
                 created_objects.remove(obj)
                 bpy.data.objects.remove(obj, do_unlink=True)
-        obj = collision.create(collisions, source, tag)
-        moving_bindings, unresolved_bindings = collision.configure_moving_preview(
-            obj, source)
-        created_objects.append(obj)
-        created_meshes.append(obj.data)
+        collision_objects = collision.create(collisions, source, tag, collection)
+        joint_registry, moving_bindings, unresolved_bindings = collision.joint_registry(
+            source)
+        created_objects.extend(collision_objects)
+        created_meshes.extend(obj.data for obj in collision_objects)
         scene.mme_session = str(directory)
         scene.mme_session_id = sid
+        scene['mme_collision_joints'] = json.dumps(joint_registry)
+        scene['mme_collision_representation_version'] = 2
+        scene['mme_collision_next_vertex'] = len(source['vertices']) + 1
+        scene['mme_collision_next_line'] = len(source['lines']) + 1
         if animation_end:
             scene.frame_start = 1
             scene.frame_end = animation_end
             scene.frame_set(1)
         animations.apply(scene)
+        collision.update_component_transforms(scene)
         context.view_layer.update()
         editable_models = modeling.stage_targets(stage)
         scene['mme_editable_meshes'] = json.dumps(editable_models)
@@ -458,8 +475,10 @@ def import_session(context, directory):
         guard = inventory(scene, modeling.target_ids(scene), editable_transforms)
         scene['mme_guard_inventory'] = json.dumps(guard)
         scene['mme_guard'] = digest(guard)
-        scene['mme_collision_baseline'] = digest(collision.serialize(obj, source))
-        scene['mme_collision_fingerprint'] = collision.fingerprint(obj)
+        scene['mme_collision_baseline'] = digest(
+            collision.serialize_components(collision_objects, source, scene))
+        scene['mme_collision_fingerprint'] = collision.fingerprint_components(
+            collision_objects)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
             'groups': len(groups), 'lines': len(source['lines']), 'editable': stage['capabilities']['collisionEdit'],
             'collisionReadOnlyReason': stage.get('collisionEditReadOnlyReason'),
@@ -472,7 +491,7 @@ def import_session(context, directory):
         scene.view_settings.exposure = 0
         scene.view_settings.gamma = 1
         scene.mme_status = f"Imported {stage['source']['filename']}: {len(groups)} groups, {len(source['lines'])} collision lines"
-        return obj
+        return collision_objects[0]
     except Exception:
         scene.mme_session = ''
         scene.mme_session_id = ''
@@ -515,10 +534,12 @@ def prepare(scene):
                                        gameplay.deletable_ids(scene, stage)):
         raise StageError('Protected model geometry, hierarchy, identities, or object transforms changed. Undo those changes before export.')
     source = read(directory / 'collision/collision.json')
-    obj = collision_object(scene)
-    edits = collision.serialize(obj, source)
+    collision.ensure_component_representation(scene, source)
+    objects = collision_objects(scene)
+    edits = collision.serialize_components(objects, source, scene)
     dirty = digest(edits) != scene.get('mme_collision_baseline')
-    obj['mme_dirty'] = dirty
+    for obj in objects:
+        obj['mme_dirty'] = dirty
     if dirty and not stage['capabilities']['collisionEdit']:
         reason = stage.get('collisionEditReadOnlyReason') or 'This collision graph cannot be rebuilt safely.'
         raise StageError(f'{reason} Undo collision changes.')

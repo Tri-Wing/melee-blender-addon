@@ -143,42 +143,25 @@ class MME_OT_add_models(bpy.types.Operator):
         return execute_safely(self, context, action)
 
 
-class MME_OT_edit_collision(bpy.types.Operator):
-    bl_idname = 'mme.edit_collision'
-    bl_label = 'Enter Collision Editing'
+class MME_OT_normalize_collision(bpy.types.Operator):
+    bl_idname = 'mme.normalize_collision_components'
+    bl_label = 'Separate Disconnected Islands'
+    bl_description = 'Rebuild collision component objects after native edge or vertex deletion'
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         def action():
-            stage = read(scene.session(context.scene) / 'stage.json')
-            if not stage['capabilities']['collisionEdit']:
-                raise StageError(stage.get('collisionEditReadOnlyReason')
-                                 or 'Collision is read-only for this stage.')
-            obj = scene.collision_object(context.scene)
             if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            obj.hide_set(False)
-            obj.select_set(True)
-            context.view_layer.objects.active = obj
-            context.tool_settings.mesh_select_mode = (True, False, False)
-            bpy.ops.object.mode_set(mode='EDIT')
-        return execute_safely(self, context, action)
-
-
-class MME_OT_exit_collision(bpy.types.Operator):
-    bl_idname = 'mme.exit_collision'
-    bl_label = 'Exit Collision Editing'
-
-    def execute(self, context):
-        def action():
-            obj = scene.collision_object(context.scene)
-            if context.edit_object != obj or obj.mode != 'EDIT':
-                raise StageError('Collision editing is not active.')
-            bpy.ops.object.mode_set(mode='OBJECT')
-            if obj.get('mme_collision_source_hidden'):
-                obj.select_set(False)
-                obj.hide_set(True)
-            context.scene.mme_status = 'Exited collision editing.'
+                raise StageError('Return to Object Mode before separating collision islands.')
+            source = read(scene.session(context.scene) / 'collision/collision.json')
+            converted = collision.ensure_component_representation(
+                context.scene, source)
+            changed = collision.normalize_components(context.scene, source)
+            context.scene.mme_status = (
+                f'Separated {changed} collision island(s).' if changed else
+                ('Converted collision components.' if converted else
+                 'Collision components are already normalized.'))
+            self.report({'INFO'}, context.scene.mme_status)
         return execute_safely(self, context, action)
 
 
@@ -329,29 +312,41 @@ class MME_OT_assign(bpy.types.Operator):
 
     def execute(self, context):
         def action():
-            obj = scene.collision_object(context.scene)
-            if obj != context.edit_object:
-                raise StageError('Enter Collision Editing and select edges first.')
+            objects = scene.editing_collision_objects(context)
             if not read(scene.session(context.scene) / 'stage.json')['capabilities']['collisionEdit']:
                 raise StageError('Collision is read-only for this stage.')
-            bm = bmesh.from_edit_mesh(obj.data)
-            selected = [e for e in bm.edges if e.select]
-            if not selected:
+            selections = []
+            for obj in objects:
+                bm = bmesh.from_edit_mesh(obj.data)
+                selected = [edge for edge in bm.edges
+                            if edge.select and not edge.hide]
+                if selected:
+                    selections.append((obj, bm, selected))
+            if not selections:
                 raise StageError('Select collision edges first.')
             key = 'mme_category' if self.property == 'type' else 'mme_low'
-            layer = bm.edges.layers.int.get(key)
-            if layer is None:
-                raise StageError('Collision attributes are missing. Undo the edit or re-import.')
             if self.property == 'type':
-                collision.serialize(obj, read(scene.session(context.scene) / 'collision/collision.json'))
-                collision.assign_type(bm, selected, collision.CATEGORIES.index(context.scene.mme_collision_type))
-            for e in selected:
-                if self.property == 'material':
-                    e[layer] = (e[layer] & 0xFF00) | context.scene.mme_collision_material
-                elif self.property in ('drop', 'ledge'):
-                    e[layer] ^= 0x100 if self.property == 'drop' else 0x200
-            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
-            obj['mme_dirty'] = True
+                collision.serialize_components(
+                    scene.collision_objects(context.scene),
+                    read(scene.session(context.scene) / 'collision/collision.json'),
+                    context.scene)
+            for obj, bm, selected in selections:
+                layer = bm.edges.layers.int.get(key)
+                if layer is None:
+                    raise StageError('Collision attributes are missing. Undo the edit or re-import.')
+                if self.property == 'type':
+                    collision.assign_type(
+                        bm, selected,
+                        collision.CATEGORIES.index(context.scene.mme_collision_type))
+                for edge in selected:
+                    if self.property == 'material':
+                        edge[layer] = ((edge[layer] & 0xFF00)
+                                       | context.scene.mme_collision_material)
+                    elif self.property in ('drop', 'ledge'):
+                        edge[layer] ^= 0x100 if self.property == 'drop' else 0x200
+                bmesh.update_edit_mesh(obj.data, loop_triangles=False,
+                                       destructive=False)
+                obj['mme_dirty'] = True
         return execute_safely(self, context, action)
 
 
@@ -384,17 +379,41 @@ class MME_OT_topology(bpy.types.Operator):
 
     def execute(self, context):
         def action():
-            obj = scene.collision_object(context.scene)
-            if context.edit_object != obj:
-                raise StageError('Enter Collision Editing first.')
+            objects = scene.editing_collision_objects(context)
             directory = scene.session(context.scene)
             if not read(directory / 'stage.json')['capabilities']['collisionEdit']:
                 raise StageError('Collision is read-only for this stage.')
             source = read(directory / 'collision/collision.json')
-            topology.edit(obj, source, self.operation, self.offset_x, self.offset_z,
-                          collision.CATEGORIES.index(context.scene.mme_collision_type),
-                          context.scene.mme_collision_material, self.joint)
-            obj['mme_dirty'] = True
+            all_objects = scene.collision_objects(context.scene)
+            collision.serialize_components(all_objects, source, context.scene)
+            category = collision.CATEGORIES.index(
+                context.scene.mme_collision_type)
+            if self.operation == 'connect':
+                target = topology.connect_components(
+                    context, objects, source, category,
+                    context.scene.mme_collision_material)
+                target['mme_dirty'] = True
+            elif self.operation == 'extend':
+                selected = [obj for obj in objects
+                            if topology.selected_counts(obj)[0]]
+                if len(selected) != 1:
+                    raise StageError('Select exactly one open endpoint.')
+                topology.edit(selected[0], source, self.operation,
+                              self.offset_x, self.offset_z, category,
+                              context.scene.mme_collision_material, self.joint,
+                              all_objects)
+                selected[0]['mme_dirty'] = True
+            else:
+                selected = [obj for obj in objects
+                            if topology.selected_counts(obj)[1]]
+                if not selected:
+                    raise StageError('Select collision edges first.')
+                for obj in selected:
+                    topology.edit(obj, source, self.operation,
+                                  self.offset_x, self.offset_z, category,
+                                  context.scene.mme_collision_material,
+                                  self.joint, all_objects)
+                    obj['mme_dirty'] = True
             context.scene.mme_status = 'Collision topology updated. Validate before exporting.'
         return execute_safely(self, context, action)
 
@@ -407,9 +426,10 @@ class MME_OT_place_collision_vertex(bpy.types.Operator):
 
     def invoke(self, context, event):
         try:
-            obj = scene.collision_object(context.scene)
-            if context.edit_object != obj:
-                raise StageError('Enter Collision Editing first.')
+            objects = scene.editing_collision_objects(context)
+            obj = context.edit_object
+            if obj not in objects:
+                raise StageError('Make a collision component active first.')
             if context.area is None or context.area.type != 'VIEW_3D':
                 raise StageError('Place collision vertices from a 3D View.')
             directory = scene.session(context.scene)
@@ -442,8 +462,9 @@ class MME_OT_place_collision_vertex(bpy.types.Operator):
             context.scene.mme_status = 'Click inside the 3D viewport, or press Esc to cancel.'
             return {'RUNNING_MODAL'}
         try:
-            obj = scene.collision_object(context.scene)
-            if context.edit_object != obj:
+            objects = scene.editing_collision_objects(context)
+            obj = context.edit_object
+            if obj not in objects:
                 raise StageError('Collision Edit Mode ended before placement.')
             coordinate = (event.mouse_x - region.x, event.mouse_y - region.y)
             origin = view3d_utils.region_2d_to_origin_3d(
@@ -462,7 +483,10 @@ class MME_OT_place_collision_vertex(bpy.types.Operator):
             return {'RUNNING_MODAL'}
         try:
             source = read(scene.session(context.scene) / 'collision/collision.json')
-            topology.add_isolated_vertex(obj, source, local)
+            collision.serialize_components(
+                scene.collision_objects(context.scene), source, context.scene)
+            topology.add_isolated_vertex(
+                obj, source, local, scene.collision_objects(context.scene))
             context.tool_settings.mesh_select_mode = (True, False, False)
             obj['mme_dirty'] = True
             context.scene.mme_status = ('Placed an isolated collision vertex. Connect it to another '
@@ -843,39 +867,42 @@ class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
         s = context.scene
         editable = _stage_info(s).get('editable', False)
         try:
-            obj = scene.collision_object(s)
-            layout.label(text='Edited' if obj.get('mme_dirty') else 'Unchanged')
+            objects = scene.collision_objects(s)
+            if not objects:
+                raise StageError('All collision components were deleted.')
+            layout.label(text='Edited' if any(obj.get('mme_dirty') for obj in objects)
+                         else 'Unchanged')
         except StageError:
-            layout.label(text='Collision object missing', icon='ERROR')
+            layout.label(text='Collision components missing', icon='ERROR')
             return
-        editing = context.edit_object == obj and obj.mode == 'EDIT'
-        row = layout.row()
-        if editing:
-            row.operator('mme.exit_collision', icon='CHECKMARK')
-        else:
-            row.enabled = editable
-            row.operator('mme.edit_collision')
+        editing = any(obj.mode == 'EDIT' for obj in objects)
         if not editable:
             layout.label(text='Read-only for this stage', icon='LOCKED')
             reason = _stage_info(s).get('collisionReadOnlyReason')
             if reason:
                 _wrapped_labels(layout, reason)
             return
+        if not editing:
+            layout.label(text='Select components and press Tab to edit.', icon='INFO')
+            layout.operator('mme.normalize_collision_components',
+                            icon='MESH_DATA')
         if _stage_info(s).get('movingCollisionPreview'):
             layout.label(text='Attached geometry edits in JOBJ-local space', icon='INFO')
-        layout.operator('mme.place_collision_vertex', icon='ADD')
+        tools = layout.column()
+        tools.enabled = editing
+        tools.operator('mme.place_collision_vertex', icon='ADD')
         for left, right in ((('split', 'Split Edge'), ('extend', 'Extend Collision')),
                             (('connect', 'Connect Vertices'), ('reverse', 'Reverse Direction'))):
-            row = layout.row(align=True)
+            row = tools.row(align=True)
             for action, label in (left, right):
                 row.operator('mme.collision_topology', text=label).operation = action
-        row = layout.row(align=True)
+        row = tools.row(align=True)
         row.prop(s, 'mme_collision_type', text='')
         row.operator('mme.assign_collision', text='Assign Type').property = 'type'
-        row = layout.row(align=True)
+        row = tools.row(align=True)
         materials.draw_surface(row, s)
         row.operator('mme.assign_collision', text='Assign').property = 'material'
-        row = layout.row(align=True)
+        row = tools.row(align=True)
         row.operator('mme.assign_collision', text='Toggle Drop-through').property = 'drop'
         row.operator('mme.assign_collision', text='Toggle Ledge-grab').property = 'ledge'
 
@@ -963,9 +990,9 @@ class MME_PT_edge(MME_PT_sidebar, bpy.types.Panel):
 
     @staticmethod
     def details(context):
-        obj = scene.collision_object(context.scene)
-        if context.edit_object != obj:
-            raise StageError('Enter Collision Editing and select an edge.')
+        obj = context.edit_object
+        if obj not in scene.collision_objects(context.scene):
+            raise StageError('Enter Edit Mode on a collision component and select an edge.')
         return inspector.describe(obj, inspector.source(scene.session(context.scene)))
 
     def draw(self, context):
@@ -1052,12 +1079,9 @@ def draw_collision():
     if not context.scene.mme_session or not context.space_data.overlay.show_overlays:
         return
     try:
-        obj = scene.collision_object(context.scene)
-        if not obj.visible_get() and not obj.get('mme_collision_source_hidden'):
-            return
         batches = {}
         markers = []
-        transforms = collision.attachment_transforms(context.scene, obj)
+        selected_lines = []
 
         def directed_line(points):
             from mathutils import Vector
@@ -1072,51 +1096,80 @@ def draw_collision():
             base = tip - direction * size
             return [a, b, tip, base + side * size * 0.5, tip, base - side * size * 0.5]
 
-        if obj.mode == 'EDIT':
-            bm = bmesh.from_edit_mesh(obj.data)
-            layer = bm.edges.layers.int.get('mme_category')
-            low = bm.edges.layers.int.get('mme_low')
-            vertex = bm.verts.layers.int.get('mme_vertex')
-            start = bm.edges.layers.int.get('mme_start')
-            joint = bm.edges.layers.int.get('mme_joint')
-            if (layer is None or low is None or vertex is None or start is None
-                    or joint is None):
-                return
-            for edge in bm.edges:
-                if edge.hide:
+        def selection_cross(obj, coordinate):
+            from mathutils import Vector
+            point = obj.matrix_world @ coordinate
+            axes = [obj.matrix_world.to_3x3() @ Vector((0.8, 0, 0)),
+                    obj.matrix_world.to_3x3() @ Vector((0, 0, 0.8))]
+            for axis in axes:
+                selected_lines.extend((point - axis, point + axis))
+
+        for obj in scene.collision_objects(context.scene):
+            if not obj.visible_get() or obj.hide_get():
+                continue
+            if obj.mode == 'EDIT':
+                bm = bmesh.from_edit_mesh(obj.data)
+                layer = bm.edges.layers.int.get('mme_category')
+                low = bm.edges.layers.int.get('mme_low')
+                vertex = bm.verts.layers.int.get('mme_vertex')
+                start = bm.edges.layers.int.get('mme_start')
+                if layer is None or low is None or vertex is None or start is None:
                     continue
-                category = edge[layer]
-                if 0 <= category < len(collision.CATEGORIES):
-                    matrix = transforms.get(edge[joint] - 1, obj.matrix_world)
-                    points = [matrix @ v.co for v in edge.verts]
-                    if edge.verts[0][vertex] != edge[start]:
-                        points.reverse()
-                    color = collision.overlay_color(category, edge[low])
-                    batches.setdefault(color, []).extend(directed_line(points))
-                    if edge[low] & 0x200:
-                        markers.append((points[0] + points[1]) * 0.5)
-        else:
-            attr = obj.data.attributes.get('mme_category')
-            low = obj.data.attributes.get('mme_low')
-            vertex = obj.data.attributes.get('mme_vertex')
-            start = obj.data.attributes.get('mme_start')
-            if attr is None or low is None or vertex is None or start is None:
-                return
-            for edge, value, flags in zip(obj.data.edges, attr.data, low.data):
-                if 0 <= value.value < len(collision.CATEGORIES):
-                    points = collision.display_edge_points(
-                        context.scene, obj, edge, transforms)
-                    color = collision.overlay_color(value.value, flags.value)
-                    batches.setdefault(color, []).extend(directed_line(points))
-                    if flags.value & 0x200:
-                        markers.append((points[0] + points[1]) * 0.5)
+                for item in bm.verts:
+                    if item.select and not item.hide and not item.link_edges:
+                        selection_cross(obj, item.co)
+                for edge in bm.edges:
+                    if edge.hide:
+                        continue
+                    category = edge[layer]
+                    if 0 <= category < len(collision.CATEGORIES):
+                        points = [obj.matrix_world @ value.co
+                                  for value in edge.verts]
+                        if edge.verts[0][vertex] != edge[start]:
+                            points.reverse()
+                        color = collision.overlay_color(category, edge[low])
+                        directed = directed_line(points)
+                        batches.setdefault(color, []).extend(directed)
+                        if edge.select:
+                            selected_lines.extend(directed)
+                        if edge[low] & 0x200:
+                            markers.append((points[0] + points[1]) * 0.5)
+            else:
+                attr = obj.data.attributes.get('mme_category')
+                low = obj.data.attributes.get('mme_low')
+                vertex = obj.data.attributes.get('mme_vertex')
+                start = obj.data.attributes.get('mme_start')
+                if attr is None or low is None or vertex is None or start is None:
+                    continue
+                if obj.select_get() and len(obj.data.edges) == 0:
+                    for item in obj.data.vertices:
+                        selection_cross(obj, item.co)
+                for edge, value, flags in zip(obj.data.edges, attr.data, low.data):
+                    if 0 <= value.value < len(collision.CATEGORIES):
+                        points = collision.display_edge_points(
+                            context.scene, obj, edge)
+                        color = collision.overlay_color(value.value, flags.value)
+                        directed = directed_line(points)
+                        batches.setdefault(color, []).extend(directed)
+                        if obj.select_get():
+                            selected_lines.extend(directed)
+                        if flags.value & 0x200:
+                            markers.append((points[0] + points[1]) * 0.5)
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
         depth = gpu.state.depth_test_get()
         width = gpu.state.line_width_get()
         try:
             gpu.state.depth_test_set('NONE')
-            gpu.state.line_width_set(2)
             shader.bind()
+            # The category overlay otherwise covers Blender's native orange
+            # selection wire. Draw a wider orange line first so the category
+            # color remains readable inside a clear selection halo.
+            if selected_lines:
+                gpu.state.line_width_set(6)
+                shader.uniform_float('color', collision.SELECTION_COLOR)
+                batch_for_shader(shader, 'LINES',
+                                 {'pos': selected_lines}).draw(shader)
+            gpu.state.line_width_set(2)
             for color, coords in batches.items():
                 if coords:
                     shader.uniform_float('color', color)
@@ -1143,13 +1196,16 @@ def update_dirty(scene_arg, depsgraph):
         return
     try:
         animations.apply(scene_arg)
+        collision.update_component_transforms(scene_arg)
         modeling.update_dirty(scene_arg, depsgraph)
         jobjs.update_dirty(scene_arg, depsgraph)
-        obj = scene.collision_object(scene_arg)
+        objects = scene.collision_objects(scene_arg)
         # Small collision meshes make this cheap; model geometry is checked on export.
-        dirty = collision.fingerprint(obj) != scene_arg.get('mme_collision_fingerprint')
-        if bool(obj.get('mme_dirty')) != dirty:
-            obj['mme_dirty'] = dirty
+        dirty = collision.fingerprint_components(objects) != scene_arg.get(
+            'mme_collision_fingerprint')
+        for obj in objects:
+            if bool(obj.get('mme_dirty')) != dirty:
+                obj['mme_dirty'] = dirty
     except (StageError, ReferenceError):
         pass
 
@@ -1158,6 +1214,7 @@ def update_dirty(scene_arg, depsgraph):
 def update_animation(scene_arg, depsgraph=None):
     try:
         animations.apply(scene_arg)
+        collision.update_component_transforms(scene_arg)
     except (StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
         pass
 
@@ -1167,6 +1224,7 @@ def load_animation(_):
     animations.clear_cache()
     try:
         animations.apply(bpy.context.scene)
+        collision.update_component_transforms(bpy.context.scene)
     except (StageError, ReferenceError, FileNotFoundError, ValueError, KeyError):
         pass
 
@@ -1263,7 +1321,7 @@ class MME_PT_material(bpy.types.Panel):
 
 CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_OT_groups,
            MME_OT_add_models,
-           MME_OT_edit_collision, MME_OT_exit_collision,
+           MME_OT_normalize_collision,
            MME_OT_edit_model, MME_OT_edit_jobj, MME_OT_animation,
            MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex,

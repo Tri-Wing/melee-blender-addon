@@ -300,7 +300,7 @@ Operators:
 
 - `Import Stage DAT`
 - `Show/Hide Model Groups`
-- `Enter Collision Editing`
+- Native Blender multi-object Edit Mode for selected collision components
 - `Assign Collision Type`
 - `Assign Collision Material`
 - `Toggle Drop-through`

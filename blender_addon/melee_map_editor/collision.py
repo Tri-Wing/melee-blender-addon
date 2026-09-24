@@ -3,6 +3,7 @@ import json
 import math
 import uuid
 import bpy
+from mathutils import Matrix
 from .protocol import SESSION_PROTOCOL, StageError, digest
 
 CATEGORIES = ('floor', 'ceiling', 'right-wall', 'left-wall', 'dynamic')
@@ -12,6 +13,7 @@ COLORS = ((0.25, 0.9, 0.35, 1), (0.95, 0.35, 0.3, 1),
 
 
 SOLID_FLOOR_COLOR = (0.06, 0.38, 0.12, 1)
+SELECTION_COLOR = (1.0, 0.32, 0.02, 1)
 
 
 def overlay_color(category, low_flags):
@@ -20,78 +22,211 @@ def overlay_color(category, low_flags):
     return COLORS[category]
 
 
-def create(collection, source, tag):
-    vertices = {v['id']: i for i, v in enumerate(source['vertices'])}
-    joints = {j['id']: i for i, j in enumerate(source['joints'])}
-    mesh = bpy.data.meshes.new('Stage Collision')
-    mesh.from_pydata([(v['position']['x'], 0, v['position']['y']) for v in source['vertices']],
-                     [(vertices[e['vertex0Id']], vertices[e['vertex1Id']]) for e in source['lines']], [])
-    obj = bpy.data.objects.new('Stage Collision', mesh)
-    collection.objects.link(obj)
-    tag(obj, 'collision', 'collision')
-    obj.show_in_front = True
-    obj.display_type = 'WIRE'
-    attr = mesh.attributes.new('mme_vertex', 'INT', 'POINT')
-    for i, item in enumerate(attr.data):
-        item.value = i + 1  # Zero is invalid; Blender assigns it to new elements.
-    values = {key: [] for key in ATTRS}
-    for i, edge in enumerate(source['lines']):
-        row = (i+1, vertices[edge['vertex0Id']]+1, vertices[edge['vertex1Id']]+1,
-               joints[edge['jointId']]+1, CATEGORIES.index(edge['category']), edge['highFlags'], edge['lowFlags'])
-        for key, value in zip(ATTRS, row):
-            values[key].append(value)
-    for key in ATTRS:
-        attr = mesh.attributes.new('mme_' + key, 'INT', 'EDGE')
-        for item, value in zip(attr.data, values[key]):
-            item.value = value
-    return obj
+def _components(source):
+    """Return deterministic connected line/vertex sets within each collision joint."""
+    vertex_index = {vertex['id']: i for i, vertex in enumerate(source['vertices'])}
+    lines_by_joint = {joint['id']: [] for joint in source['joints']}
+    for index, line in enumerate(source['lines']):
+        lines_by_joint[line['jointId']].append(index)
+    result = []
+    for joint_index, joint in enumerate(source['joints']):
+        line_indices = lines_by_joint[joint['id']]
+        by_vertex = {}
+        for line_index in line_indices:
+            line = source['lines'][line_index]
+            for vertex_id in (line['vertex0Id'], line['vertex1Id']):
+                by_vertex.setdefault(vertex_id, []).append(line_index)
+        remaining = set(line_indices)
+        while remaining:
+            seed = min(remaining)
+            stack = [seed]
+            component_lines = set()
+            component_vertices = set()
+            while stack:
+                line_index = stack.pop()
+                if line_index not in remaining:
+                    continue
+                remaining.remove(line_index)
+                component_lines.add(line_index)
+                line = source['lines'][line_index]
+                for vertex_id in (line['vertex0Id'], line['vertex1Id']):
+                    component_vertices.add(vertex_index[vertex_id])
+                    stack.extend(by_vertex[vertex_id])
+            result.append((joint_index, sorted(component_vertices),
+                           sorted(component_lines)))
+        record = joint['source']
+        owned = range(record['vertexStart'],
+                      record['vertexStart'] + record['vertexCount'])
+        used = {vertex_index[vertex_id] for line_index in line_indices
+                for vertex_id in (source['lines'][line_index]['vertex0Id'],
+                                   source['lines'][line_index]['vertex1Id'])}
+        for vertex in sorted(set(owned) - used):
+            result.append((joint_index, [vertex], []))
+    return result
 
 
-def configure_moving_preview(obj, source):
-    """Record unambiguous serialized JOBJ bindings for the viewport overlay."""
+def create(collection, source, tag, collection_factory=None):
+    """Create one collision mesh object per joint-local connected component."""
+    vertex_index = {vertex['id']: index
+                    for index, vertex in enumerate(source['vertices'])}
+    joint_collections = {}
+    if collection_factory is not None:
+        for joint_index, joint in enumerate(source['joints']):
+            parent = collection_factory(
+                f'Joint {joint_index + 1:03d}', collection,
+                f"collision-joint:{joint['id']}", 'collision-joint',
+                joint_index)
+            parent['mme_collision_joint'] = joint_index + 1
+            parent['mme_collision_joint_id'] = joint['id']
+            joint_collections[joint_index] = parent
+    objects = []
+    for joint_index, component_vertices, component_lines in _components(source):
+        joint = source['joints'][joint_index]
+        parent = joint_collections.get(joint_index, collection)
+        local = {source['vertices'][index]['id']: local_index
+                 for local_index, index in enumerate(component_vertices)}
+        positions = [(source['vertices'][index]['position']['x'], 0,
+                      source['vertices'][index]['position']['y'])
+                     for index in component_vertices]
+        edges = [(local[source['lines'][index]['vertex0Id']],
+                  local[source['lines'][index]['vertex1Id']])
+                 for index in component_lines]
+        component_index = sum(obj.get('mme_collision_joint') == joint_index + 1
+                              for obj in objects) + 1
+        component_seed = ('line:' + str(component_lines[0]) if component_lines
+                          else 'vertices:' + ','.join(map(str, component_vertices)))
+        component_id = uuid.uuid5(uuid.UUID(joint['id']), component_seed).hex
+        name = f'Component {component_index:03d}'
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(positions, edges, [])
+        obj = bpy.data.objects.new(name, mesh)
+        parent.objects.link(obj)
+        tag(obj, 'collision', f'collision-component:{component_id}')
+        obj['mme_collision_component_id'] = component_id
+        obj['mme_collision_joint'] = joint_index + 1
+        obj['mme_collision_joint_id'] = joint['id']
+        obj.show_in_front = True
+        obj.display_type = 'WIRE'
+        attr = mesh.attributes.new('mme_vertex', 'INT', 'POINT')
+        for item, source_index in zip(attr.data, component_vertices):
+            item.value = source_index + 1
+        values = {key: [] for key in ATTRS}
+        for line_index in component_lines:
+            edge = source['lines'][line_index]
+            row = (line_index + 1,
+                   vertex_index[edge['vertex0Id']] + 1,
+                   vertex_index[edge['vertex1Id']] + 1,
+                   joint_index + 1, CATEGORIES.index(edge['category']),
+                   edge['highFlags'], edge['lowFlags'])
+            for key, value in zip(ATTRS, row):
+                values[key].append(value)
+        for key in ATTRS:
+            attr = mesh.attributes.new('mme_' + key, 'INT', 'EDGE')
+            for item, value in zip(attr.data, values[key]):
+                item.value = value
+        objects.append(obj)
+    return objects
+
+
+def joint_registry(source):
+    """Build the shared joint/attachment registry used by every component."""
     grouped = {}
     for attachment in source.get('attachments', []):
         joint = attachment['source']['jointIndex']
         grouped.setdefault(joint, []).append(attachment)
-    bindings = {}
-    unresolved = {}
-    for joint, attachments in grouped.items():
+    bindings, unresolved, registry = {}, {}, []
+    for joint_index, joint in enumerate(source['joints']):
+        attachments = grouped.get(joint_index, [])
         if len(attachments) == 1 and attachments[0].get('jobjId'):
-            bindings[str(joint)] = attachments[0]['jobjId']
-        else:
-            unresolved[str(joint)] = ('external-target' if len(attachments) == 1
-                                      and not attachments[0].get('jobjId')
-                                      else 'multiple-bindings')
-    obj['mme_collision_bindings'] = json.dumps(bindings, sort_keys=True)
-    obj['mme_collision_unresolved_bindings'] = json.dumps(unresolved,
-                                                          sort_keys=True)
-    # Hide the untransformed source mesh outside Edit Mode when at least one
-    # attachment can be previewed; the GPU overlay remains visible and evaluates
-    # the current pose-bone matrices. Edit Mode exposes the DAT's local geometry.
-    if bindings:
-        obj['mme_collision_source_hidden'] = True
-        obj.hide_set(True)
-    return bindings, unresolved
+            bindings[str(joint_index)] = attachments[0]['jobjId']
+        elif attachments:
+            unresolved[str(joint_index)] = (
+                'external-target' if len(attachments) == 1
+                and not attachments[0].get('jobjId') else 'multiple-bindings')
+        registry.append({'index': joint_index, 'id': joint['id'],
+                         'attachments': attachments,
+                         'previewJobjId': bindings.get(str(joint_index)),
+                         'previewError': unresolved.get(str(joint_index))})
+    return registry, bindings, unresolved
+
+
+def _registry(scene):
+    try:
+        return {entry['id']: entry
+                for entry in json.loads(scene.get('mme_collision_joints', '[]'))}
+    except (TypeError, ValueError, KeyError):
+        return {}
+
+
+def _preview_jobj(scene, obj):
+    entry = _registry(scene).get(obj.get('mme_collision_joint_id'))
+    if entry is not None:
+        return entry.get('previewJobjId')
+    # Compatibility with preview-only saved files created before components.
+    return obj.get('mme_collision_jobj_id')
+
+
+def _expected_matrix(scene, obj):
+    jobj_id = _preview_jobj(scene, obj)
+    if not jobj_id:
+        return Matrix.Identity(4)
+    matches = [(armature, bone) for armature in scene.objects
+               if armature.type == 'ARMATURE'
+               and armature.get('mme_session_id') == scene.mme_session_id
+               and armature.get('mme_role') == 'jobj-armature'
+               for bone in armature.pose.bones
+               if bone.get('mme_id') == jobj_id]
+    if len(matches) != 1:
+        raise StageError('A moving-collision JOBJ target is missing or duplicated. Re-import the DAT.')
+    armature, bone = matches[0]
+    return armature.matrix_world @ bone.matrix
+
+
+def _matrix_close(first, second, tolerance=0.000001):
+    return all(abs(first[row][column] - second[row][column]) <= tolerance
+               for row in range(4) for column in range(4))
+
+
+def _stored_matrix(obj):
+    try:
+        values = json.loads(obj.get('mme_collision_managed_matrix', 'null'))
+        if not isinstance(values, list) or len(values) != 4:
+            return None
+        return Matrix(values)
+    except (TypeError, ValueError):
+        return None
+
+
+def update_component_transforms(scene):
+    """Place authoritative local component meshes at their resolved JOBJ pose."""
+    for obj in collision_objects(scene):
+        expected = _expected_matrix(scene, obj)
+        previous = _stored_matrix(obj)
+        # A component transform is display state, not geometry. Preserve an
+        # unsupported user transform so export can explain it instead of
+        # silently snapping it back. A changed JOBJ pose remains authoritative.
+        if previous is not None and not _matrix_close(obj.matrix_world, previous) \
+                and _matrix_close(expected, previous):
+            continue
+        if not _matrix_close(expected, obj.matrix_world):
+            obj.matrix_world = expected
+        obj['mme_collision_managed_matrix'] = json.dumps(
+            [[expected[row][column] for column in range(4)] for row in range(4)])
+
+
+def collision_objects(scene):
+    return sorted((obj for obj in bpy.data.objects
+                   if obj.get('mme_role') == 'collision'
+                   and obj.get('mme_session_id') == scene.mme_session_id),
+                  key=lambda obj: (obj.get('mme_collision_joint', 0),
+                                   obj.get('mme_collision_component_id', '')))
 
 
 def attachment_transforms(scene, obj):
     """Resolve serialized one-to-one collision bindings to current Blender poses."""
-    try:
-        bindings = json.loads(obj.get('mme_collision_bindings', '{}'))
-    except (TypeError, ValueError):
-        raise StageError('Moving-collision binding metadata is invalid. Re-import the DAT.')
-    result = {}
-    for joint, jobj_id in bindings.items():
-        matches = [(armature, bone) for armature in scene.objects
-                   if armature.type == 'ARMATURE'
-                   and armature.get('mme_session_id') == scene.mme_session_id
-                   and armature.get('mme_role') == 'jobj-armature'
-                   for bone in armature.pose.bones if bone.get('mme_id') == jobj_id]
-        if len(matches) != 1:
-            raise StageError('A moving-collision JOBJ target is missing or duplicated. Re-import the DAT.')
-        armature, bone = matches[0]
-        result[int(joint)] = armature.matrix_world @ bone.matrix
-    return result
+    return {candidate['mme_collision_joint'] - 1: candidate.matrix_world.copy()
+            for candidate in collision_objects(scene)
+            if _preview_jobj(scene, candidate)}
 
 
 def display_edge_points(scene, obj, edge, transforms=None):
@@ -102,11 +237,189 @@ def display_edge_points(scene, obj, edge, transforms=None):
     joint = obj.data.attributes.get('mme_joint')
     if vertex is None or start is None or joint is None:
         raise StageError('Collision attributes are missing. Re-import the DAT.')
-    matrix = transforms.get(joint.data[edge.index].value - 1, obj.matrix_world)
+    matrix = obj.matrix_world
     points = [matrix @ obj.data.vertices[index].co for index in edge.vertices]
     if vertex.data[edge.vertices[0]].value != start.data[edge.index].value:
         points.reverse()
     return points
+
+
+def _subset_mesh(mesh, vertex_indices, edge_indices, name):
+    """Copy one identity-preserving edge island into a new mesh datablock."""
+    ordered_vertices = sorted(vertex_indices)
+    local = {source_index: index
+             for index, source_index in enumerate(ordered_vertices)}
+    ordered_edges = sorted(edge_indices)
+    result = bpy.data.meshes.new(name)
+    result.from_pydata(
+        [mesh.vertices[index].co.copy() for index in ordered_vertices],
+        [(local[mesh.edges[index].vertices[0]],
+          local[mesh.edges[index].vertices[1]]) for index in ordered_edges], [])
+    for attribute_name, domain, indices in (
+            ('mme_vertex', 'POINT', ordered_vertices),
+            *((f'mme_{key}', 'EDGE', ordered_edges) for key in ATTRS)):
+        source_attribute = mesh.attributes.get(attribute_name)
+        if source_attribute is None or source_attribute.domain != domain \
+                or source_attribute.data_type != 'INT':
+            bpy.data.meshes.remove(result)
+            raise StageError(
+                f'Collision attribute missing or changed: {attribute_name[4:]}. '
+                'Undo the edit or re-import.')
+        target_attribute = result.attributes.new(attribute_name, 'INT', domain)
+        for item, source_index in zip(target_attribute.data, indices):
+            item.value = source_attribute.data[source_index].value
+    return result
+
+
+def _mesh_islands(obj, source, allow_mixed):
+    mesh = obj.data
+    if mesh.polygons:
+        raise StageError('Collision must contain edges only; delete faces before separating components.')
+    vertex_attr = mesh.attributes.get('mme_vertex')
+    joint_attr = mesh.attributes.get('mme_joint')
+    if vertex_attr is None or joint_attr is None:
+        raise StageError('Collision identities are missing. Undo the edit or re-import.')
+    edges_by_joint = {}
+    for edge in mesh.edges:
+        edges_by_joint.setdefault(joint_attr.data[edge.index].value, []).append(edge.index)
+    owner = obj.get('mme_collision_joint')
+    if not allow_mixed and any(joint != owner for joint in edges_by_joint):
+        raise StageError(
+            f'{obj.name}: collision geometry from different joints cannot be joined. '
+            'Undo the native Join and use Connect Vertices within one joint.')
+    islands = []
+    used_vertices = set()
+    for joint in sorted(edges_by_joint):
+        remaining = set(edges_by_joint[joint])
+        by_vertex = {}
+        for edge_index in remaining:
+            for vertex_index in mesh.edges[edge_index].vertices:
+                by_vertex.setdefault(vertex_index, []).append(edge_index)
+        while remaining:
+            stack = [min(remaining)]
+            component_edges, component_vertices = set(), set()
+            while stack:
+                edge_index = stack.pop()
+                if edge_index not in remaining:
+                    continue
+                remaining.remove(edge_index)
+                component_edges.add(edge_index)
+                for vertex_index in mesh.edges[edge_index].vertices:
+                    component_vertices.add(vertex_index)
+                    stack.extend(by_vertex[vertex_index])
+            used_vertices.update(component_vertices)
+            islands.append((joint, component_vertices, component_edges))
+    for vertex_index in sorted(set(range(len(mesh.vertices))) - used_vertices):
+        joint = owner
+        if not isinstance(joint, int):
+            handle = vertex_attr.data[vertex_index].value
+            owners = []
+            if 1 <= handle <= len(source['vertices']):
+                source_index = handle - 1
+                owners = [index + 1 for index, record in enumerate(source['joints'])
+                          if record['source']['vertexStart'] <= source_index
+                          < record['source']['vertexStart'] + record['source']['vertexCount']]
+            if len(owners) != 1:
+                raise StageError(
+                    'A legacy isolated collision vertex has ambiguous joint ownership. '
+                    'Connect or remove it before converting this saved scene.')
+            joint = owners[0]
+        islands.append((joint, {vertex_index}, set()))
+    def order(item):
+        joint, vertices, edges = item
+        edge_handles = [mesh.attributes['mme_line'].data[index].value
+                        for index in edges]
+        vertex_handles = [vertex_attr.data[index].value for index in vertices]
+        return joint, min(edge_handles or [1 << 30]), min(vertex_handles)
+    return sorted(islands, key=order)
+
+
+def normalize_components(scene, source, legacy=False):
+    """Repartition disconnected islands at an explicit, undo-safe boundary."""
+    changed = 0
+    for obj in list(collision_objects(scene)):
+        if obj.mode == 'EDIT':
+            raise StageError('Exit collision Edit Mode before normalizing components.')
+        islands = _mesh_islands(obj, source, legacy)
+        old_mesh = obj.data
+        if not islands:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if old_mesh.users == 0:
+                bpy.data.meshes.remove(old_mesh)
+            changed += 1
+            continue
+        if len(islands) == 1 and obj.get('mme_collision_component_id') \
+                and obj.get('mme_collision_joint') == islands[0][0]:
+            continue
+        collections = list(obj.users_collection)
+        matrix = obj.matrix_world.copy()
+        # Legacy moving-preview scenes hid the source mesh internally. That
+        # marker is not a user visibility choice and must not hide converted
+        # authoritative components.
+        hidden = obj.hide_get() and not obj.get('mme_collision_source_hidden')
+        viewport_hidden = obj.hide_viewport
+        properties = {key: obj[key] for key in obj.keys()}
+        created = []
+        for island_index, (joint, vertices, edges) in enumerate(islands):
+            if not 1 <= joint <= len(source['joints']):
+                raise StageError(f'{obj.name}: collision joint identity changed.')
+            component_id = (obj.get('mme_collision_component_id')
+                            if island_index == 0 else None) or uuid.uuid4().hex
+            mesh = _subset_mesh(old_mesh, vertices, edges, 'Collision Component')
+            if island_index == 0:
+                target = obj
+                target.data = mesh
+            else:
+                target = bpy.data.objects.new('Component', mesh)
+                for collection in collections:
+                    collection.objects.link(target)
+                for key, value in properties.items():
+                    target[key] = value
+            target['mme_collision_component_id'] = component_id
+            target['mme_collision_joint'] = joint
+            target['mme_collision_joint_id'] = source['joints'][joint-1]['id']
+            target['mme_id'] = f'collision-component:{component_id}'
+            for obsolete in ('mme_collision_source_hidden',
+                             'mme_collision_bindings',
+                             'mme_collision_unresolved_bindings',
+                             'mme_collision_jobj_id',
+                             'mme_collision_binding_error'):
+                if obsolete in target:
+                    del target[obsolete]
+            target.matrix_world = matrix
+            target.show_in_front = True
+            target.display_type = 'WIRE'
+            target.hide_viewport = viewport_hidden
+            target.hide_set(hidden)
+            target.name = f'Component {island_index + 1:03d}'
+            created.append(target)
+        if old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
+        changed += max(1, len(created) - 1)
+    update_component_transforms(scene)
+    return changed
+
+
+def ensure_component_representation(scene, source):
+    """Convert pre-component saved scenes without replacing pending edits."""
+    if int(scene.get('mme_collision_representation_version', 0)) >= 2:
+        return False
+    registry, _, _ = joint_registry(source)
+    scene['mme_collision_joints'] = json.dumps(registry)
+    normalize_components(scene, source, legacy=True)
+    scene['mme_collision_representation_version'] = 2
+    objects = collision_objects(scene)
+    vertex_handles = [item.value for obj in objects
+                      if obj.data.attributes.get('mme_vertex')
+                      for item in obj.data.attributes['mme_vertex'].data]
+    line_handles = [item.value for obj in objects
+                    if obj.data.attributes.get('mme_line')
+                    for item in obj.data.attributes['mme_line'].data]
+    scene['mme_collision_next_vertex'] = max(
+        [len(source['vertices']), *vertex_handles]) + 1
+    scene['mme_collision_next_line'] = max(
+        [len(source['lines']), *line_handles]) + 1
+    return True
 
 
 def serialize(obj, source):
@@ -174,6 +487,50 @@ def serialize(obj, source):
             'vertices': sorted(vertices, key=lambda x: x['id']), 'lines': sorted(lines, key=lambda x: x['id'])}
 
 
+def serialize_components(objects, source, scene=None):
+    vertices = {}
+    lines = {}
+    component_ids = set()
+    for obj in objects:
+        if obj.type != 'MESH' or obj.get('mme_role') != 'collision':
+            raise StageError('Collision component inventory contains an invalid object.')
+        component_id = obj.get('mme_collision_component_id')
+        if not component_id or component_id in component_ids:
+            raise StageError('Collision component identity is missing or duplicated. Undo the native duplicate or re-import.')
+        component_ids.add(component_id)
+        joint = obj.get('mme_collision_joint')
+        if not isinstance(joint, int) or not 1 <= joint <= len(source['joints']) \
+                or obj.get('mme_collision_joint_id') != source['joints'][joint-1]['id']:
+            raise StageError(f'{obj.name}: collision joint ownership changed. Re-import the DAT.')
+        if scene is not None:
+            if obj.name not in scene.objects or not obj.users_collection:
+                raise StageError(f'{obj.name}: collision component was unlinked rather than deleted.')
+            expected = _expected_matrix(scene, obj)
+            if not _matrix_close(expected, obj.matrix_world, 0.00001):
+                raise StageError(f'{obj.name}: collision object transforms are display-managed; edit its vertices instead.')
+        if obj.matrix_parent_inverse != Matrix.Identity(4) or obj.parent is not None \
+                or obj.modifiers or obj.constraints:
+            raise StageError(
+                f'{obj.name}: collision components cannot use parenting, modifiers, or constraints.')
+        payload = serialize(obj, source)
+        for vertex in payload['vertices']:
+            previous = vertices.get(vertex['id'])
+            if previous is not None and previous != vertex:
+                raise StageError('A collision vertex identity has conflicting coordinates across components.')
+            vertices[vertex['id']] = vertex
+        for line in payload['lines']:
+            if line['jointId'] != obj.get('mme_collision_joint_id'):
+                raise StageError(
+                    f'{obj.name}: collision geometry from different joints cannot be joined. '
+                    'Undo the native Join and use Connect Vertices within one joint.')
+            if line['id'] in lines:
+                raise StageError('A collision edge identity is duplicated across components.')
+            lines[line['id']] = line
+    return {'protocolVersion': SESSION_PROTOCOL, 'coordinateSpace': 'game',
+            'vertices': sorted(vertices.values(), key=lambda item: item['id']),
+            'lines': sorted(lines.values(), key=lambda item: item['id'])}
+
+
 def fingerprint(obj):
     # Do not update_from_editmode inside a dependency-graph handler.
     if obj.mode == 'EDIT':
@@ -192,6 +549,12 @@ def fingerprint(obj):
         return digest(values)
     except ValueError:
         return 'invalid-coordinates'
+
+
+def fingerprint_components(objects):
+    return digest([(obj.get('mme_collision_component_id'), fingerprint(obj))
+                   for obj in sorted(objects,
+                                     key=lambda item: item.get('mme_collision_component_id', ''))])
 
 
 def identity(source, kind, handle):

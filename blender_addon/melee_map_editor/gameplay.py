@@ -19,6 +19,7 @@ BOUND_COLORS = {
     'camera-boundary': (0.1, 0.8, 1.0, 1.0),
     'blast-zone': (1.0, 0.2, 0.05, 1.0),
 }
+SELECTION_COLOR = (1.0, 0.32, 0.02, 1.0)
 
 
 def _game_vector(value):
@@ -153,13 +154,17 @@ def draw():
         return
     try:
         batches = {}
+        selected_lines = []
         for obj in objects(context.scene):
-            if obj.type != 'MESH' or not obj.visible_get():
+            if obj.type != 'MESH' or not obj.visible_get() or obj.hide_get():
                 continue
             coordinates = batches.setdefault(tuple(obj.color), [])
             for edge in obj.data.edges:
-                coordinates.extend(obj.matrix_world @ obj.data.vertices[index].co
-                                   for index in edge.vertices)
+                points = [obj.matrix_world @ obj.data.vertices[index].co
+                          for index in edge.vertices]
+                coordinates.extend(points)
+                if obj.select_get():
+                    selected_lines.extend(points)
         if not batches:
             return
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -167,8 +172,13 @@ def draw():
         width = gpu.state.line_width_get()
         try:
             gpu.state.depth_test_set('NONE')
-            gpu.state.line_width_set(2)
             shader.bind()
+            if selected_lines:
+                gpu.state.line_width_set(6)
+                shader.uniform_float('color', SELECTION_COLOR)
+                batch_for_shader(shader, 'LINES',
+                                 {'pos': selected_lines}).draw(shader)
+            gpu.state.line_width_set(2)
             for color, coordinates in batches.items():
                 shader.uniform_float('color', color)
                 batch_for_shader(shader, 'LINES', {'pos': coordinates}).draw(shader)

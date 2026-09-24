@@ -34,6 +34,24 @@ def select(obj, vertices=(), edges=()):
     bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
 
 
+def collision_object_with_line(scene_value, handle):
+    for candidate in scene.collision_objects(scene_value):
+        if candidate.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(candidate.data)
+            layer = bm.edges.layers.int.get('mme_line')
+            if layer is not None and any(edge[layer] == handle for edge in bm.edges):
+                return candidate
+        else:
+            attr = candidate.data.attributes.get('mme_line')
+            if attr is not None and any(item.value == handle for item in attr.data):
+                return candidate
+    raise AssertionError(f'Collision edge handle {handle} is missing')
+
+
+def aggregate(scene_value, source):
+    return collision.serialize_components(scene.collision_objects(scene_value), source)
+
+
 with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     tmp = Path(tmp)
     run(CLI, 'dotnet', 'extract', CORPUS / 'GrNLa.dat', '--session', tmp / 'session')
@@ -44,14 +62,14 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     bpy.ops.object.mode_set(mode='EDIT')
-    original = collision.serialize(obj, source)
+    original = aggregate(s, source)
     # View rays are projected onto local Y=0 and create one selected isolated vertex.
     projected = topology.project_to_collision_plane(
         obj, Vector((125, -100, 75)), Vector((0, 1, 0)))
     assert projected == Vector((125, 0, 75))
     handle = topology.add_isolated_vertex(obj, source, projected)
     assert handle == len(source['vertices']) + 1
-    placed = collision.serialize(obj, source)
+    placed = aggregate(s, source)
     assert len(placed['vertices']) == len(original['vertices']) + 1
     assert placed['lines'] == original['lines']
     bm = bmesh.from_edit_mesh(obj.data)
@@ -61,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     assert sum(vertex.select for vertex in bm.verts) == 1
     bm.verts.remove(created)
     bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
-    assert collision.serialize(obj, source) == original
+    assert aggregate(s, source) == original
     try:
         topology.project_to_collision_plane(
             obj, Vector((0, 0, 0)), Vector((1, 0, 0)))
@@ -78,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
             pass
         else:
             raise AssertionError('Expected invalid selection rejection')
-        assert collision.serialize(obj, source) == original
+        assert aggregate(s, source) == original
     select(obj, edges=(1,))
     bpy.ops.ed.undo_push(message='Before collision split')
     assert bpy.ops.mme.collision_topology(operation='split') == {'FINISHED'}
@@ -86,16 +104,18 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     assert len(split['vertices']) == len(split['lines']) == 17
     bpy.ops.ed.undo_push(message='After collision split')
     bpy.ops.ed.undo()
-    obj = scene.collision_object(bpy.context.scene)
-    assert collision.serialize(obj, source) == original
+    obj = collision_object_with_line(bpy.context.scene, 1)
+    assert aggregate(bpy.context.scene, source) == original
     bpy.ops.ed.redo()
     s = bpy.context.scene
-    obj = scene.collision_object(s)
-    assert collision.serialize(obj, source) == split
+    obj = collision_object_with_line(s, 1)
+    assert aggregate(s, source) == split
     new_id = collision.identity(source, 'lines', 17)
     new = next(e for e in split['lines'] if e['id'] == new_id)
     old = next(e for e in split['lines'] if e['id'] == source['lines'][0]['id'])
     assert old['vertex1Id'] == new['vertex0Id']
+    midpoint_handle = len(source['vertices']) + 2  # The deleted placement identity is not reused.
+    assert new['vertex0Id'] == collision.identity(source, 'vertices', midpoint_handle)
     assert new['vertex1Id'] == source['lines'][0]['vertex1Id']
     assert new['lowFlags'] == old['lowFlags'] == source['lines'][0]['lowFlags']
     assert new['jointId'] == old['jointId']
@@ -111,12 +131,12 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
         assert 'COLLISION_FACING' in str(exc)
     else:
         raise AssertionError('Reversed edges with unchanged categories must fail')
-    reversed_lines = collision.serialize(obj, source)['lines']
+    reversed_lines = aggregate(s, source)['lines']
     previous = {e['id']: e for e in split['lines']}
     for edge in reversed_lines:
         assert edge['vertex0Id'] == previous[edge['id']]['vertex1Id']
     bpy.ops.mme.collision_topology(operation='reverse')
-    assert collision.serialize(obj, source) == split
+    assert aggregate(s, source) == split
     # Native edge deletion, then reconnect the gap with explicit settings.
     select(obj, edges=(1,))
     bpy.ops.mesh.delete(type='EDGE')
@@ -124,7 +144,7 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     assert len(deleted['lines']) == 16
     scene.validate(s, CLI, 'dotnet')
     start = next(i+1 for i, v in enumerate(source['vertices']) if v['id'] == source['lines'][0]['vertex0Id'])
-    select(obj, vertices=(start, 17))
+    select(obj, vertices=(start, midpoint_handle))
     s.mme_collision_type = 'floor'
     s.mme_collision_material = 7
     bpy.ops.mme.collision_topology(operation='connect')
@@ -143,6 +163,7 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     bpy.ops.mme.collision_topology(operation='extend', offset_x=0, offset_z=20)
     extended = scene.prepare(s)[1]
     assert len(extended['lines']) == 17 and len(extended['vertices']) == 18
+    terminal_handle = midpoint_handle + 1
     bm = bmesh.from_edit_mesh(obj.data)
     assert sum(v.select for v in bm.verts) == 1
     scene.apply(s, CLI, 'dotnet', tmp / 'extended.dat')
@@ -151,13 +172,13 @@ with tempfile.TemporaryDirectory(prefix='mme-topology-') as tmp:
     bpy.ops.wm.save_as_mainfile(filepath=str(tmp / 'topology.blend'))
     bpy.ops.wm.open_mainfile(filepath=str(tmp / 'topology.blend'))
     s = bpy.context.scene
-    obj = scene.collision_object(s)
+    obj = collision_object_with_line(s, 2)
     assert scene.prepare(s)[1] == extended
     scene.validate(s, CLI, 'dotnet')
     bpy.context.view_layer.objects.active = obj
     bpy.ops.object.mode_set(mode='EDIT')
     # Native deletion of the new terminal removes its edge and vertex cleanly.
-    select(obj, vertices=(18,))
+    select(obj, vertices=(terminal_handle,))
     bpy.ops.mesh.delete(type='VERT')
     assert len(scene.prepare(s)[1]['lines']) == 16
     scene.validate(s, CLI, 'dotnet')

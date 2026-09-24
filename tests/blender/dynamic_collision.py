@@ -29,25 +29,29 @@ with tempfile.TemporaryDirectory(prefix='mme-dynamic-collision-') as temporary:
     assert stage['capabilities']['dynamicCollisionEdit']
     assert stage['collisionBindingSummary']['oneToOnePreviewJoints'] == 5
 
-    obj = scene.import_session(bpy.context, directory)
+    scene.import_session(bpy.context, directory)
     source = read(directory / 'collision/collision.json')
-    bindings = {int(key): value for key, value in
-                json.loads(obj['mme_collision_bindings']).items()}
+    objects = scene.collision_objects(bpy.context.scene)
+    registry = json.loads(bpy.context.scene['mme_collision_joints'])
+    bindings = {entry['index']: entry['previewJobjId'] for entry in registry
+                if entry.get('previewJobjId')}
     assert set(bindings) == {0, 1, 2, 3, 5}
-    assert obj.hide_get()
-    assert bpy.ops.mme.edit_collision() == {'FINISHED'}
-    assert obj.mode == 'EDIT' and not obj.hide_get()
-    assert bpy.ops.mme.exit_collision() == {'FINISHED'}
-    assert obj.mode == 'OBJECT' and obj.hide_get()
-    transforms = collision.attachment_transforms(bpy.context.scene, obj)
-    assert set(transforms) == set(bindings)
+    assert len(objects) > 1
+    bpy.ops.object.select_all(action='DESELECT')
+    for candidate in objects:
+        candidate.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0]
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert all(obj.mode == 'EDIT' for obj in objects)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    assert all(obj.mode == 'OBJECT' for obj in objects)
 
-    joint_attr = obj.data.attributes['mme_joint']
-    edge = next(edge for edge in obj.data.edges
-                if joint_attr.data[edge.index].value - 1 in transforms)
-    joint_index = joint_attr.data[edge.index].value - 1
+    obj = next(obj for obj in objects
+               if obj['mme_collision_joint'] - 1 in bindings)
+    edge = obj.data.edges[0]
+    joint_index = obj['mme_collision_joint'] - 1
     before = collision.display_edge_points(
-        bpy.context.scene, obj, edge, transforms)[0]
+        bpy.context.scene, obj, edge)[0]
     jobj_id = bindings[joint_index]
     matches = [(armature, bone) for armature in bpy.context.scene.objects
                if armature.type == 'ARMATURE'
@@ -57,10 +61,12 @@ with tempfile.TemporaryDirectory(prefix='mme-dynamic-collision-') as temporary:
     original = bone.matrix_basis.copy()
     bone.matrix_basis.translation.x += 7
     bpy.context.view_layer.update()
+    collision.update_component_transforms(bpy.context.scene)
     after = collision.display_edge_points(bpy.context.scene, obj, edge)[0]
     assert (after - before).length > 1
     bone.matrix_basis = original
     bpy.context.view_layer.update()
+    collision.update_component_transforms(bpy.context.scene)
 
     output = temporary / 'unchanged.dat'
     scene.apply(bpy.context.scene, CLI, 'dotnet', output)
@@ -69,18 +75,22 @@ with tempfile.TemporaryDirectory(prefix='mme-dynamic-collision-') as temporary:
     baseline_attachments = source['attachments']
     vertex_index = edge.vertices[0]
     obj.data.vertices[vertex_index].co.z += 0.25
-    bpy.context.view_layer.objects.active = obj
-    obj.hide_set(False)
-    obj.select_set(True)
+    dynamic_obj = next(candidate for candidate in objects
+                       if any(value.value == collision.CATEGORIES.index('dynamic')
+                              for value in candidate.data.attributes['mme_category'].data))
+    bpy.ops.object.select_all(action='DESELECT')
+    dynamic_obj.select_set(True)
+    bpy.context.view_layer.objects.active = dynamic_obj
     bpy.ops.object.mode_set(mode='EDIT')
-    bm = bmesh.from_edit_mesh(obj.data)
+    bm = bmesh.from_edit_mesh(dynamic_obj.data)
     category = bm.edges.layers.int['mme_category']
     for candidate in bm.edges:
         candidate.select_set(False)
     dynamic_edge = next(candidate for candidate in bm.edges
                         if candidate[category] == collision.CATEGORIES.index('dynamic'))
     dynamic_edge.select_set(True)
-    topology.edit(obj, source, 'split')
+    topology.edit(dynamic_obj, source, 'split',
+                  objects=scene.collision_objects(bpy.context.scene))
     edited = temporary / 'edited.dat'
     scene.apply(bpy.context.scene, CLI, 'dotnet', edited)
     run(CLI, 'dotnet', 'validate', edited, '--json')

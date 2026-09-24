@@ -115,11 +115,20 @@ reload workflow headlessly:
    panel provides exact numeric transforms. Expand **Gameplay Tools** to see the
    selected set's item-spawn count or add a spawn with a viewport click. Select
    an item-spawn marker and use Blender's normal Delete command to remove it.
-4. Expand **Collision** and choose **Enter Collision Editing**. Front view
-   (`Numpad 1`) looks onto the gameplay plane. Move vertices along Blender X and
-   Z; keep Blender Y at zero. Choose **Exit Collision Editing** when finished;
-   attached stages then hide the local source mesh and return to the animated
-   collision overlay.
+   Selected player/item diamonds and camera/blast rectangles retain their guide
+   color with the same wide orange selection halo used by collision components.
+4. Expand **Collision** in the Outliner to find one collection per collision
+   joint and one mesh object per connected component. Hide components with the
+   normal eye toggle or `H` when overlapping edges get in the way; hidden
+   components remain part of export. Select one or more visible collision
+   components and press `Tab`, just like any other Blender mesh, to enter
+   multi-object Edit Mode. Front view (`Numpad 1`) looks onto the gameplay plane.
+   Move vertices along Blender X and Z; keep Blender Y at zero. Press `Tab` again
+   to return to Object Mode. If native deletion leaves disconnected geometry,
+   use **Separate Disconnected Islands** to rebuild the Outliner components.
+   Selected component lines retain their collision-type color with a wide orange
+   halo, so selection remains visible despite the always-on-top overlay. Selected
+   isolated construction vertices receive an orange cross.
    Use the dedicated topology tools below to add or reconnect collision. Native
    vertex/edge deletion is supported. Object transforms and modifiers are rejected.
 5. Select edges to assign a collision type or named surface type, or toggle
@@ -137,8 +146,10 @@ reload workflow headlessly:
    failed exports leave the previous file intact.
 7. Use **Open Export Directory** to find the result for manual insertion/testing.
 
-Vertex changes and property assignments can be exported while still in Edit
-Mode. An untouched scene exports a byte-identical copy of the input DAT. The
+Vertex changes and property assignments can be exported while still in
+multi-object Edit Mode. An untouched scene exports a byte-identical copy of the
+input DAT, regardless of component visibility, names, selection, or Outliner
+order. The
 sidebar tracks collision changes; validation/export also detects unsupported
 model or hierarchy changes and explains which class of edit must be undone.
 
@@ -147,7 +158,8 @@ geometry is editable in the local coordinate space stored by the DAT. Existing
 serialized attachment records are preserved exactly during geometry export;
 adding, deleting, and retargeting attachments is a separate pending tool. When a
 collision joint has exactly one serialized attachment to a JOBJ in the same DAT,
-its colored collision overlay follows that JOBJ's current pose and animation.
+all of its component objects and colored collision lines follow that JOBJ's
+current pose and animation while their stored vertices remain joint-local.
 External targets, repeated bindings, and bindings supplied only by stage code can
 limit animated preview, but do not lock the serialized collision geometry. The
 editor deliberately does not infer or modify stage-code behavior. `GrGb.dat`
@@ -524,24 +536,36 @@ edge selection for Split and Reverse. The overlay arrows show edge direction.
   Enter an X/Z offset in game units. The new edge inherits its neighbor's
   properties and continues its direction. The new vertex is selected so you can
   reposition it with `G`, constrained to X or Z as needed.
-- **Connect Vertices:** select two open endpoints or isolated surviving vertices.
-  Choose a collision type and named surface in the dialog. Direction and joint are inferred from
-  connected edges. Two isolated vertices use the chosen joint (numbered from 1)
-  and a stable endpoint order; use Reverse if needed. New connections start with
-  drop-through and ledge flags off; assign them afterward as appropriate.
+- **Connect Vertices:** select two open endpoints or isolated surviving vertices,
+  including endpoints in two different component objects. Components owned by
+  the same collision joint are merged and connected; cross-joint connections are
+  rejected before either object changes. Choose a collision type and named
+  surface in the dialog. Direction and joint are inferred from connected edges.
+  Two isolated vertices use the chosen joint (numbered from 1) and a stable
+  endpoint order; use Reverse if needed. New connections start with drop-through
+  and ledge flags off; assign them afterward as appropriate.
 - **Reverse Direction:** select edges to exchange their start/end directions.
   Direction also determines the collidable side; it must agree with the type.
   Reassigning a type automatically repairs direction. Reversing edges without
   updating their types can fail the facing check; inconsistent directions within
   a connected chain also fail validation.
 - **Native delete:** Blender's Delete Edges/Delete Vertices operations are
-  supported, including removal of unused vertices. Each existing collision joint
-  must retain at least one edge. Export rebuilds the connections and ranges.
+  supported, including removal of unused vertices. Return to Object Mode and use
+  **Separate Disconnected Islands** to split surviving islands into separate
+  Outliner objects. A whole component object may also be deleted in Object Mode.
+  Each existing collision joint must retain at least one edge. Export rebuilds
+  the connections and ranges.
 
 Do not use native Extrude, Subdivide, Merge, Dissolve, Duplicate, or Make Edge/Face
 for collision topology yet. They can destroy or duplicate collision metadata;
 validation rejects ambiguous results and asks you to undo them. Dedicated tools
 support Blender Undo/Redo, and new identities persist through `.blend` save/load.
+New edge and vertex identities come from saved scene-wide counters, so deleting a
+new element does not make a later component reuse its identity. For older
+`.blend` files using the former single collision mesh, run **Separate
+Disconnected Islands** before editing; validation/export also performs the same
+in-place conversion. Pending geometry and the aggregate dirty baseline are
+preserved.
 Edges carrying unknown source flag bits cannot be split or extended because
 those bits cannot safely be assigned to new collision records. Read-only stages
 remain read-only. Branches, inconsistent directions, and coincident endpoints
@@ -612,6 +636,8 @@ dotnet test MeleeMap.sln
   --python-exit-code 1 --python tests/blender/atmosphere.py
 /path/to/blender-4.5.0/blender --background --factory-startup \
   --python-exit-code 1 --python tests/blender/dynamic_collision.py
+/path/to/blender-4.5.0/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/blender/collision_components.py
 ```
 
 The smoke script checks registration, coordinate and inherited-scale rules,
@@ -630,6 +656,11 @@ The dynamic-collision script verifies that Mute City's five unambiguous
 serialized collision attachments resolve to their JOBJ pose bones, respond to a
 pose change, export edited local geometry, preserve all attachment records and
 the dynamic range after reimport, and preserve a no-edit DAT byte-for-byte.
+The component script verifies joint-local connectivity partitioning, hidden
+component export, same-joint merging, cross-joint rejection without mutation,
+native-delete repartitioning, whole-component deletion, and legacy saved-scene
+conversion. Outliner hide/isolate and overlay alignment still require an
+interactive Blender check because headless tests cannot render the viewport.
 
 ## Ceiling assignment correction
 

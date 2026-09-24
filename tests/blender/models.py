@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     bmesh.update_edit_mesh(target.data)
     replacement = modeling.edits(s, stage)
     assert len(replacement['meshes'][0]['triangleIndices']) == 6
-    collision = scene.collision_object(s)
+    collision = scene.collision_objects(s)[0]
     collision.data.vertices[0].co.z += 1
     result = scene.apply(s, CLI, 'dotnet', tmp / 'combined.dat')
     assert result['modelChanged'] and result['collisionChanged'] and result['modelTriangles'] == 2

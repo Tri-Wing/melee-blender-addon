@@ -19,7 +19,7 @@ def source(directory):
 
 def describe(obj, original):
     if obj.mode != 'EDIT':
-        raise StageError('Enter Collision Editing and select an edge.')
+        raise StageError('Enter Edit Mode on a collision component and select an edge.')
     bm = bmesh.from_edit_mesh(obj.data)
     selected = [e for e in bm.edges if e.select and not e.hide]
     if not selected:

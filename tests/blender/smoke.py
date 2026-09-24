@@ -244,7 +244,7 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
     finally:
         bpy.utils.user_resource = user_resource
     ds = bpy.context.scene
-    dynamic = scene.collision_object(ds)
+    dynamic = scene.collision_objects(ds)[0]
     assert read(scene.session(ds) / 'stage.json')['capabilities']['collisionEdit']
     scene.apply(ds, CLI, 'dotnet', tmp / 'dynamic-unchanged.dat')
     assert (tmp / 'dynamic-unchanged.dat').read_bytes() == (CORPUS / 'GrGb.dat').read_bytes()

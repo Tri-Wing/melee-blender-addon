@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
     bpy.ops.object.mode_set(mode='EDIT')
     edits = modeling.edits(s, stage)
     assert {m['id'] for m in edits['meshes']} == changed_ids
-    collision = scene.collision_object(s)
+    collision = scene.collision_objects(s)[0]
     collision.data.vertices[0].co.z += 1
     result = scene.apply(s, CLI, 'dotnet', tmp / 'multi.dat')
     assert result['modelChanged'] and result['collisionChanged']
