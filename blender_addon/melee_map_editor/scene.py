@@ -478,7 +478,7 @@ def import_session(context, directory):
         scene['mme_collision_baseline'] = digest(
             collision.serialize_components(collision_objects, source, scene))
         scene['mme_collision_fingerprint'] = collision.fingerprint_components(
-            collision_objects)
+            collision_objects, scene)
         scene['mme_stage_info'] = json.dumps({'filename': stage['source']['filename'],
             'groups': len(groups), 'lines': len(source['lines']), 'editable': stage['capabilities']['collisionEdit'],
             'collisionReadOnlyReason': stage.get('collisionEditReadOnlyReason'),

@@ -7,6 +7,7 @@ import tempfile
 
 import bmesh
 import bpy
+from mathutils import Matrix
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
@@ -115,21 +116,33 @@ with tempfile.TemporaryDirectory(prefix='mme-collision-components-') as temporar
     hidden.hide_viewport = False
     hidden.hide_set(False)
 
-    # Component object transforms are managed preview state, not implicit
-    # geometry edits, and are rejected rather than baked into local vertices.
+    # Object Mode transforms are baked relative to the managed JOBJ pose without
+    # changing the authoritative mesh-local coordinates.
     original_matrix = hidden.matrix_world.copy()
-    hidden.location.x += 3
+    original_coordinate = hidden.data.vertices[0].co.copy()
+    before_transform = collision.serialize_components(
+        scene.collision_objects(s), source, s)
+    hidden.matrix_world = original_matrix @ Matrix.Translation((3, 0, 0))
     bpy.context.view_layer.update()
     collision.update_component_transforms(s)
     assert hidden.matrix_world != original_matrix
+    transformed = collision.serialize_components(
+        scene.collision_objects(s), source, s)
+    assert transformed != before_transform
+    assert hidden.data.vertices[0].co == original_coordinate
+    scene.validate(s, CLI, 'dotnet')
+
+    # Collision remains two-dimensional in joint-local space.
+    hidden.matrix_world = original_matrix @ Matrix.Translation((0, 1, 0))
     try:
         scene.prepare(s)
     except StageError as exc:
-        assert 'display-managed' in str(exc)
+        assert 'joint-local X/Z plane' in str(exc)
     else:
-        raise AssertionError('Arbitrary collision object transforms must fail')
+        raise AssertionError('Off-plane collision object transforms must fail')
     hidden.matrix_world = original_matrix
     collision.update_component_transforms(s)
+    assert scene.prepare(s)[1] is None
 
     owner_collection = hidden.users_collection[0]
     owner_collection.objects.unlink(hidden)

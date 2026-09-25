@@ -1201,7 +1201,7 @@ def update_dirty(scene_arg, depsgraph):
         jobjs.update_dirty(scene_arg, depsgraph)
         objects = scene.collision_objects(scene_arg)
         # Small collision meshes make this cheap; model geometry is checked on export.
-        dirty = collision.fingerprint_components(objects) != scene_arg.get(
+        dirty = collision.fingerprint_components(objects, scene_arg) != scene_arg.get(
             'mme_collision_fingerprint')
         for obj in objects:
             if bool(obj.get('mme_dirty')) != dirty:

@@ -7,6 +7,7 @@ import tempfile
 
 import bpy
 import bmesh
+from mathutils import Matrix
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
@@ -66,6 +67,24 @@ with tempfile.TemporaryDirectory(prefix='mme-dynamic-collision-') as temporary:
     assert (after - before).length > 1
     bone.matrix_basis = original
     bpy.context.view_layer.update()
+    collision.update_component_transforms(bpy.context.scene)
+
+    # A user-authored Object Mode transform stays relative to the attachment
+    # while the JOBJ pose changes, rather than being lost or baking the pose.
+    managed_matrix = obj.matrix_world.copy()
+    user_transform = Matrix.Translation((2, 0, 0))
+    obj.matrix_world = managed_matrix @ user_transform
+    collision.update_component_transforms(bpy.context.scene)
+    bone.matrix_basis.translation.x += 4
+    bpy.context.view_layer.update()
+    collision.update_component_transforms(bpy.context.scene)
+    actual_transform = collision.component_transform(bpy.context.scene, obj)
+    assert all(abs(actual_transform[row][column] - user_transform[row][column]) < 0.00001
+               for row in range(4) for column in range(4))
+    bone.matrix_basis = original
+    bpy.context.view_layer.update()
+    collision.update_component_transforms(bpy.context.scene)
+    obj.matrix_world = managed_matrix
     collision.update_component_transforms(bpy.context.scene)
 
     output = temporary / 'unchanged.dat'

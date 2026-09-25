@@ -130,7 +130,12 @@ reload workflow headlessly:
    halo, so selection remains visible despite the always-on-top overlay. Selected
    isolated construction vertices receive an orange cross.
    Use the dedicated topology tools below to add or reconnect collision. Native
-   vertex/edge deletion is supported. Object transforms and modifiers are rejected.
+   vertex/edge deletion is supported. Object Mode translation on local X/Z,
+   scaling on local X/Z, and rotation around local Y are baked into the exported
+   collision vertices. The component origin is its collision-joint origin, which
+   is also the pivot for scaling and rotation. Moving on local Y or rotating around
+   local X/Z takes collision out of Melee's 2D plane and is rejected. Parenting,
+   modifiers, and constraints are also rejected.
 5. Select edges to assign a collision type or named surface type, or toggle
    drop-through and ledge-grab bits. Assigning a type also orients its endpoints
    for the game: floors left-to-right, ceilings right-to-left, right walls down,
@@ -159,7 +164,10 @@ serialized attachment records are preserved exactly during geometry export;
 adding, deleting, and retargeting attachments is a separate pending tool. When a
 collision joint has exactly one serialized attachment to a JOBJ in the same DAT,
 all of its component objects and colored collision lines follow that JOBJ's
-current pose and animation while their stored vertices remain joint-local.
+current pose and animation while their stored vertices remain joint-local. Any
+Object Mode transform made on top of that managed pose follows the attachment and
+is baked relative to the collision joint on export; the JOBJ's pose itself is not
+baked into collision coordinates.
 External targets, repeated bindings, and bindings supplied only by stage code can
 limit animated preview, but do not lock the serialized collision geometry. The
 editor deliberately does not infer or modify stage-code behavior. `GrGb.dat`

@@ -198,20 +198,24 @@ def _stored_matrix(obj):
 
 
 def update_component_transforms(scene):
-    """Place authoritative local component meshes at their resolved JOBJ pose."""
+    """Update JOBJ preview poses without discarding user object transforms."""
     for obj in collision_objects(scene):
         expected = _expected_matrix(scene, obj)
         previous = _stored_matrix(obj)
-        # A component transform is display state, not geometry. Preserve an
-        # unsupported user transform so export can explain it instead of
-        # silently snapping it back. A changed JOBJ pose remains authoritative.
-        if previous is not None and not _matrix_close(obj.matrix_world, previous) \
-                and _matrix_close(expected, previous):
-            continue
-        if not _matrix_close(expected, obj.matrix_world):
-            obj.matrix_world = expected
+        # Preserve the user's transform relative to the previous managed JOBJ
+        # pose when animation or an edited JOBJ changes that pose.
+        user_transform = (previous.inverted_safe() @ obj.matrix_world
+                          if previous is not None else Matrix.Identity(4))
+        target = expected @ user_transform
+        if not _matrix_close(target, obj.matrix_world):
+            obj.matrix_world = target
         obj['mme_collision_managed_matrix'] = json.dumps(
             [[expected[row][column] for column in range(4)] for row in range(4)])
+
+
+def component_transform(scene, obj):
+    """Return the object-space edit to bake into joint-local collision vertices."""
+    return _expected_matrix(scene, obj).inverted_safe() @ obj.matrix_world
 
 
 def collision_objects(scene):
@@ -419,10 +423,11 @@ def ensure_component_representation(scene, source):
         [len(source['vertices']), *vertex_handles]) + 1
     scene['mme_collision_next_line'] = max(
         [len(source['lines']), *line_handles]) + 1
+    scene['mme_collision_fingerprint'] = fingerprint_components(objects, scene)
     return True
 
 
-def serialize(obj, source):
+def serialize(obj, source, coordinate_matrix=None):
     if obj.mode == 'EDIT':
         import bmesh
         bm = bmesh.from_edit_mesh(obj.data)
@@ -448,6 +453,8 @@ def serialize(obj, source):
             if attr is None or attr.domain != domain or attr.data_type != 'INT':
                 raise StageError(f'Collision attribute missing or changed: {name}. Undo the edit or re-import.')
             return [item.value for item in attr.data]
+    if coordinate_matrix is not None:
+        coords = [coordinate_matrix @ coordinate for coordinate in coords]
     if face_count:
         raise StageError('Collision must contain edges only; delete faces before exporting.')
 
@@ -458,7 +465,9 @@ def serialize(obj, source):
     vertices = []
     for co, handle in zip(coords, handles):
         if not all(math.isfinite(x) for x in co) or abs(co.y) > 0.00001:
-            raise StageError(f'Collision vertex {handle} must stay on the X/Z plane (Blender Y = 0).')
+            raise StageError(
+                f'Collision vertex {handle} must stay on the joint-local X/Z plane. '
+                'Undo any Object Mode Y movement or X/Z-axis rotation.')
         vertices.append({'id': identity(source, 'vertices', handle), 'x': co.x, 'y': co.z})
     lines = []
     for i, edge in enumerate(endpoints):
@@ -502,17 +511,16 @@ def serialize_components(objects, source, scene=None):
         if not isinstance(joint, int) or not 1 <= joint <= len(source['joints']) \
                 or obj.get('mme_collision_joint_id') != source['joints'][joint-1]['id']:
             raise StageError(f'{obj.name}: collision joint ownership changed. Re-import the DAT.')
+        coordinate_matrix = None
         if scene is not None:
             if obj.name not in scene.objects or not obj.users_collection:
                 raise StageError(f'{obj.name}: collision component was unlinked rather than deleted.')
-            expected = _expected_matrix(scene, obj)
-            if not _matrix_close(expected, obj.matrix_world, 0.00001):
-                raise StageError(f'{obj.name}: collision object transforms are display-managed; edit its vertices instead.')
+            coordinate_matrix = component_transform(scene, obj)
         if obj.matrix_parent_inverse != Matrix.Identity(4) or obj.parent is not None \
                 or obj.modifiers or obj.constraints:
             raise StageError(
                 f'{obj.name}: collision components cannot use parenting, modifiers, or constraints.')
-        payload = serialize(obj, source)
+        payload = serialize(obj, source, coordinate_matrix)
         for vertex in payload['vertices']:
             previous = vertices.get(vertex['id'])
             if previous is not None and previous != vertex:
@@ -531,28 +539,36 @@ def serialize_components(objects, source, scene=None):
             'lines': sorted(lines.values(), key=lambda item: item['id'])}
 
 
-def fingerprint(obj):
+def fingerprint(obj, coordinate_matrix=None):
     # Do not update_from_editmode inside a dependency-graph handler.
     if obj.mode == 'EDIT':
         import bmesh
         bm = bmesh.from_edit_mesh(obj.data)
-        values = {'vertices': [list(v.co) for v in bm.verts], 'edges': len(bm.edges), 'faces': len(bm.faces)}
+        coordinates = [v.co.copy() for v in bm.verts]
+        values = {'edges': len(bm.edges), 'faces': len(bm.faces)}
         for key in ATTRS:
             layer = bm.edges.layers.int.get('mme_' + key)
             values[key] = [e[layer] for e in bm.edges] if layer is not None else None
     else:
-        values = {'vertices': [list(v.co) for v in obj.data.vertices], 'edges': len(obj.data.edges), 'faces': len(obj.data.polygons)}
+        coordinates = [v.co.copy() for v in obj.data.vertices]
+        values = {'edges': len(obj.data.edges), 'faces': len(obj.data.polygons)}
         for key in ATTRS:
             attr = obj.data.attributes.get('mme_' + key)
             values[key] = [e.value for e in attr.data] if attr is not None and attr.data_type == 'INT' else None
+    if coordinate_matrix is not None:
+        coordinates = [coordinate_matrix @ coordinate
+                       for coordinate in coordinates]
+    values['vertices'] = [list(coordinate) for coordinate in coordinates]
     try:
         return digest(values)
     except ValueError:
         return 'invalid-coordinates'
 
 
-def fingerprint_components(objects):
-    return digest([(obj.get('mme_collision_component_id'), fingerprint(obj))
+def fingerprint_components(objects, scene=None):
+    return digest([(obj.get('mme_collision_component_id'),
+                    fingerprint(obj, component_transform(scene, obj)
+                                if scene is not None else None))
                    for obj in sorted(objects,
                                      key=lambda item: item.get('mme_collision_component_id', ''))])
 
