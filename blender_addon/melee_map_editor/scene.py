@@ -61,7 +61,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
     for action in session_actions:
         if action.get('mme_role') != 'jobj-animation':
             raise StageError(f'{action.name}: unsupported animation data is not allowed.')
-        result['actions'].append({'props': properties(action), 'name': action.name,
+        result['actions'].append({'props': properties(action),
             'fakeUser': action.use_fake_user, 'curves': animations.structure(scene, action)})
     for c in collections:
         result['collections'].append({'props': properties(c),
@@ -103,7 +103,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
             if not valid:
                 raise StageError(f'{o.name}: unsupported modifiers are not allowed.')
             modifier = o.modifiers[0]
-            row['modifiers'] = [{'name': modifier.name, 'type': modifier.type,
+            row['modifiers'] = [{'type': modifier.type,
                 'object': modifier.object.get('mme_id'),
                 'useVertexGroups': modifier.use_vertex_groups,
                 'useBoneEnvelopes': modifier.use_bone_envelopes,
@@ -136,7 +136,7 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
                     if not valid:
                         raise StageError(f'{o.name} / {bone.name}: unsupported pose-bone constraints are not allowed.')
                     constraint = bone.constraints[0]
-                    record['constraints'] = [{'name': constraint.name, 'type': constraint.type,
+                    record['constraints'] = [{'type': constraint.type,
                         'target': constraint.target.get('mme_id'), 'subtarget': constraint.subtarget,
                         'targetSpace': constraint.target_space, 'ownerSpace': constraint.owner_space,
                         'influence': constraint.influence, 'mute': constraint.mute}]
@@ -151,7 +151,9 @@ def inventory(scene, editable_id=None, editable_transform_ids=None):
             row['geometry'] = digest({'vertices': [list(v.co) for v in o.data.vertices],
                 'edges': [list(e.vertices) for e in o.data.edges],
                 'faces': [list(p.vertices) for p in o.data.polygons],
-                'materials': [m.name if m else None for m in o.data.materials],
+                'materials': [(m.get('mme_model_material_id') or
+                               m.get('mme_id')) if m else None
+                              for m in o.data.materials],
                 'faceMaterials': [p.material_index for p in o.data.polygons],
                 'normals': [list(n.vector) for n in o.data.corner_normals]})
         result['objects'].append(row)
@@ -232,6 +234,7 @@ def import_session(context, directory):
         atmosphere.create(stage, scene, created_worlds)
         light_objects = lighting.create(lights, stage, tag, created_objects, created_data, collection)
         material = bpy.data.materials.new('Melee Preview Grey')
+        tag(material, 'preview-material', 'preview-grey')
         material.diffuse_color = (0.45, 0.45, 0.45, 1)
         source_materials = surface.create_materials(stage, directory, light_objects)
         scene['mme_model_materials'] = json.dumps(stage.get('modelMaterials', []))
@@ -248,11 +251,11 @@ def import_session(context, directory):
 
         animation_end = 0
         for entry, group in zip(stage['modelGroups'], groups):
-            c = collection(f"Group {group['index']:03d}", models, group['id'], index=group['index'])
+            c = collection('Model Group', models, group['id'], index=group['index'])
             group_joints = [node for node in group['nodes'] if node['id'] in joints]
             armature_obj = None
             if group_joints:
-                armature = bpy.data.armatures.new(f"Group {group['index']:03d} JOBJ Armature")
+                armature = bpy.data.armatures.new('JOBJ Armature')
                 created_armatures.append(armature)
                 armature_obj = bpy.data.objects.new(armature.name, armature)
                 created_objects.append(armature_obj)
@@ -267,24 +270,22 @@ def import_session(context, directory):
                 bpy.ops.object.mode_set(mode='EDIT')
                 edit_bones = {}
                 for node in group_joints:
-                    name = f"JOBJ {node['index']:03d}"
-                    edit_bone = armature.edit_bones.new(name)
+                    edit_bone = armature.edit_bones.new('JOBJ')
                     edit_bone.head = (0, 0, 0)
                     edit_bone.tail = (0, 0.25, 0)
                     edit_bone.use_deform = False
                     edit_bones[node['id']] = edit_bone
-                    bone_names[node['id']] = name
+                    bone_names[node['id']] = edit_bone.name
                 for node in group_joints:
                     if node['id'] not in deform_rests:
                         continue
-                    name = f"JOBJ {node['index']:03d} Deform"
-                    edit_bone = armature.edit_bones.new(name)
+                    edit_bone = armature.edit_bones.new('JOBJ Deform')
                     edit_bone.head = (0, 0, 0)
                     edit_bone.tail = (0, 0.25, 0)
                     edit_bone.matrix = AXES @ deform_rests[node['id']] @ AXES.inverted()
                     edit_bone.length = 0.25
                     edit_bone.use_deform = True
-                    deform_names[node['id']] = name
+                    deform_names[node['id']] = edit_bone.name
                 for node in group_joints:
                     if node['ownerId'] in edit_bones:
                         edit_bones[node['id']].parent = edit_bones[node['ownerId']]
@@ -324,7 +325,7 @@ def import_session(context, directory):
             for node in group['nodes']:
                 if node['kind'] in ('group', 'sentinel-group') or node['id'] in joints:
                     continue
-                obj = bpy.data.objects.new(f"{node['kind'].upper()} {node['index']:03d}", None)
+                obj = bpy.data.objects.new(node['kind'].upper(), None)
                 created_objects.append(obj)
                 c.objects.link(obj)
                 tag(obj, node['kind'], node['id'], group['index'])
@@ -360,7 +361,7 @@ def import_session(context, directory):
                     if payload.get('normals'):
                         from .transforms import vector
                         imported_normals = [vector(normal) for normal in payload['normals']]
-                mesh = bpy.data.meshes.new(f"Group {group['index']:03d} Mesh")
+                mesh = bpy.data.meshes.new('Stage Mesh')
                 created_meshes.append(mesh)
                 indices, reversed_faces = surface.display_triangle_indices(
                     payload, positions, imported_normals)
@@ -372,7 +373,10 @@ def import_session(context, directory):
                 if color_layers:
                     if payload['id'] not in source_materials:
                         preview_material = material.copy()
-                        preview_material.name = f"Vertex Colors - {mesh.name}"
+                        preview_material.name = 'Stage Vertex Colors'
+                        tag(preview_material, 'preview-material',
+                            f"preview-vertex-colors:{payload['id']}",
+                            group['index'])
                         source_materials[payload['id']] = preview_material
                         mesh.materials[0] = preview_material
                     surface.configure_color_preview(mesh.materials[0], color_layers[0])
@@ -429,7 +433,7 @@ def import_session(context, directory):
                     modifier.use_bone_envelopes = False
                 if payload.get('readOnlyReason'):
                     replacement['mme_read_only_reason'] = payload['readOnlyReason']
-                    replacement.name = f"Read-only Model - Group {group['index']:03d} POBJ {payload['pobjIndex']:03d}"
+                    replacement.name = 'Read-only Model'
                 objects[payload['id']] = replacement
                 created_objects.remove(obj)
                 bpy.data.objects.remove(obj, do_unlink=True)
@@ -463,9 +467,12 @@ def import_session(context, directory):
         transform_baselines = {}
         for info in editable_models:
             target = modeling.target_object(scene, info)
-            target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
-            if not modeling.allows(info, 'topologyReplacement'):
-                target.name = target.name.replace('Editable Model', 'Vertex Editable Model', 1)
+            full_edit = modeling.allows(info, 'topologyReplacement')
+            target.name = ('Editable Model' if full_edit
+                           else 'Vertex-editable Model')
+            target['mme_editable'] = True
+            target['mme_model_edit_scope'] = ('full-geometry' if full_edit
+                                              else 'vertex-movement')
             baselines[info['id']] = modeling.fingerprint(target)
             transform_baselines[info['id']] = modeling.matrix_values(
                 target.matrix_basis)

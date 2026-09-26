@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='mme-multi-') as tmp:
     bpy.ops.object.mode_set(mode='OBJECT')
     obj = modeling.target_object(s, chosen[1])
     obj.location.x += 1
-    rejects(lambda: scene.prepare(s))
+    scene.prepare(s)
     obj.location.x -= 1
     protected = next(o for o in s.objects if o.get('mme_role') == 'pobj'
                      and o.type == 'MESH' and o.get('mme_id') not in modeling.target_ids(s))

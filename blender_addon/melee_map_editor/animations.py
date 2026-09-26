@@ -133,7 +133,7 @@ def create(armature, group, source_file, source_hash, session_id, created):
             bone.bone['mme_animated'] = True
     made = []
     for slot, animation in sorted(slots.items()):
-        action = bpy.data.actions.new(f"Group {group['index']:03d} Stage Animation {slot:03d}")
+        action = bpy.data.actions.new('Stage Animation')
         created.append(action)
         made.append(action)
         action.use_fake_user = True

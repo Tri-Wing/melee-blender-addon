@@ -37,20 +37,27 @@ with tempfile.TemporaryDirectory(prefix='mme-gameplay-blender-') as temporary:
     bounds = [obj for obj in guides if obj.get('mme_role') == 'gameplay-bounds']
     assert len(guides) == 18
     assert len(points) == 16
-    assert {obj.name.split(' - ')[0] for obj in points if ' Spawn - ' in obj.name} >= {
-        'P1 Spawn', 'P2 Spawn', 'P3 Spawn', 'P4 Spawn'}
-    assert {obj.name.split(' - ')[0] for obj in bounds} == {'Camera Bounds', 'Blast Zone'}
+    assert {obj.get('mme_gameplay_player') for obj in points
+            if obj.get('mme_gameplay_kind') == 'player-spawn'} == {1, 2, 3, 4}
+    assert {obj.get('mme_gameplay_kind') for obj in bounds} == {
+        'camera-boundary', 'blast-zone'}
     assert all(obj.get('mme_gameplay_editable') for obj in guides)
     projected = gameplay.project_to_plane((0, -10, 0), (1, 1, 2), 0)
     assert tuple(projected) == (10, 0, 20)
     rejects(lambda: gameplay.project_to_plane((0, 0, 0), (1, 0, 0), 0),
             'more face-on')
+    # Managed names are user labels, not identities or serialized metadata.
+    for index, obj in enumerate(guides):
+        obj.name = f'Renamed Gameplay Guide {index}'
     assert gameplay.edits(bpy.context.scene, stage) is None
     scene.apply(bpy.context.scene, CLI, 'dotnet', temporary / 'unchanged.dat')
     assert (temporary / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
 
-    spawn = next(obj for obj in points if obj.name.startswith('P1 Spawn'))
-    blast = next(obj for obj in bounds if obj.name.startswith('Blast Zone'))
+    spawn = next(obj for obj in points
+                 if obj.get('mme_gameplay_kind') == 'player-spawn'
+                 and obj.get('mme_gameplay_player') == 1)
+    blast = next(obj for obj in bounds
+                 if obj.get('mme_gameplay_kind') == 'blast-zone')
     assert len(spawn.data.polygons) == 0
     assert len(spawn.data.edges) == 4
     assert len(spawn.data.materials) == 0

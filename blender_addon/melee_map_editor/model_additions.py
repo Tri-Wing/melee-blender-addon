@@ -116,7 +116,7 @@ def _new_jobj_bone(context, armature, parent_bone, index, addition_id, target, s
     armature.select_set(True)
     context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode='EDIT')
-    bone = armature.data.edit_bones.new(f'JOBJ {index:03d}')
+    bone = armature.data.edit_bones.new('JOBJ')
     bone.head = (0, 0, 0)
     bone.tail = (0, 0.25, 0)
     bone.parent = armature.data.edit_bones[parent_bone.name]
@@ -273,7 +273,7 @@ def register_selected(context, target_id):
             for partition, slot in enumerate(used_slots):
                 dobj_index = existing_dobjs + pending_dobjs + partition \
                     if target['placement'] == 'existing-jobj' else partition
-                dobj = bpy.data.objects.new(f'DOBJ {dobj_index:03d}', None)
+                dobj = bpy.data.objects.new('DOBJ', None)
                 created.append(dobj)
                 collection.objects.link(dobj)
                 dobj['mme_role'] = DOBJ_ROLE
@@ -289,12 +289,9 @@ def register_selected(context, target_id):
                     _bone_parent(dobj, armature, jobj)
                 else:
                     _bone_parent(dobj, armature, bone)
-                part_mesh = _part_mesh(mesh, slot,
-                    f"Group {target['groupIndex']:03d} Mesh")
+                part_mesh = _part_mesh(mesh, slot, f'{source.name} Mesh')
                 created_meshes.append(part_mesh)
-                pobj = bpy.data.objects.new(
-                    f"Editable Model - Group {target['groupIndex']:03d} JOBJ {jobj_index:03d} "
-                    f"DOBJ {dobj_index:03d} POBJ 000", part_mesh)
+                pobj = bpy.data.objects.new(source.name, part_mesh)
                 created.append(pobj)
                 collection.objects.link(pobj)
                 pobj['mme_role'] = ROLE
@@ -304,6 +301,8 @@ def register_selected(context, target_id):
                 pobj['mme_owner_id'] = dobj['mme_id']
                 pobj['mme_source_index'] = 0
                 pobj['mme_source_hash'] = stage['source']['sha256']
+                pobj['mme_editable'] = True
+                pobj['mme_model_edit_scope'] = 'full-geometry'
                 pobj.parent = dobj
                 pobj.matrix_world = source.matrix_world.copy()
             bpy.data.meshes.remove(mesh)

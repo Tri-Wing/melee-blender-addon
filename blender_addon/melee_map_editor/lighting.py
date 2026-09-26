@@ -46,7 +46,7 @@ def create(parent, stage, tag, created_objects, created_data, collection):
         group_index = light_set.get('groupIndex')
         group_index = group_index if group_index is not None else -1
         child = collection(
-            ('Preview ' if light_set['id'] == selected else '') + f"Light Set - {light_set['id']}",
+            'Preview Light Set' if light_set['id'] == selected else 'Light Set',
             parent, f"lights-{light_set['id']}", 'light-set', group_index)
         child.hide_render = True
         child.hide_viewport = light_set['id'] != selected
@@ -55,7 +55,7 @@ def create(parent, stage, tag, created_objects, created_data, collection):
             data = None
             if kind != 'ambient':
                 blender_kind = {'infinite': 'SUN', 'point': 'POINT', 'spot': 'SPOT'}[kind]
-                data = bpy.data.lights.new(f"{kind.title()} LOBJ {index:03d}", blender_kind)
+                data = bpy.data.lights.new(f'{kind.title()} Stage Light', blender_kind)
                 created_data.append(data)
                 data.color = linear_color(source['color'])
                 data.energy = 1
@@ -64,8 +64,7 @@ def create(parent, stage, tag, created_objects, created_data, collection):
                     interest = game_vector(source['interest'])
                     cutoff = source.get('parameters', {}).get('cutoff') or 45
                     data.spot_size = math.radians(max(1, min(179, cutoff * 2)))
-            obj = bpy.data.objects.new(
-                f"{kind.title()} LOBJ {index:03d} ({light_set['id']})", data)
+            obj = bpy.data.objects.new(f'{kind.title()} Stage Light', data)
             created_objects.append(obj)
             child.objects.link(obj)
             tag(obj, 'light', source['id'], group_index)
@@ -128,7 +127,7 @@ def edits(scene, stage):
             raise StageError('An imported light object is duplicated.')
         by_id[key] = obj
     if set(by_id) != set(sources):
-        raise StageError('The imported light inventory changed. Restore missing or renamed light objects.')
+        raise StageError('The imported light inventory changed. Restore missing light objects.')
 
     def game(value):
         return {'x': value.x, 'y': value.z, 'z': -value.y}

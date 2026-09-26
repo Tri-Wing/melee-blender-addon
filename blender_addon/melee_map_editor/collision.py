@@ -73,7 +73,7 @@ def create(collection, source, tag, collection_factory=None):
     if collection_factory is not None:
         for joint_index, joint in enumerate(source['joints']):
             parent = collection_factory(
-                f'Joint {joint_index + 1:03d}', collection,
+                'Collision Joint', collection,
                 f"collision-joint:{joint['id']}", 'collision-joint',
                 joint_index)
             parent['mme_collision_joint'] = joint_index + 1
@@ -91,12 +91,10 @@ def create(collection, source, tag, collection_factory=None):
         edges = [(local[source['lines'][index]['vertex0Id']],
                   local[source['lines'][index]['vertex1Id']])
                  for index in component_lines]
-        component_index = sum(obj.get('mme_collision_joint') == joint_index + 1
-                              for obj in objects) + 1
         component_seed = ('line:' + str(component_lines[0]) if component_lines
                           else 'vertices:' + ','.join(map(str, component_vertices)))
         component_id = uuid.uuid5(uuid.UUID(joint['id']), component_seed).hex
-        name = f'Component {component_index:03d}'
+        name = 'Collision Component'
         mesh = bpy.data.meshes.new(name)
         mesh.from_pydata(positions, edges, [])
         obj = bpy.data.objects.new(name, mesh)
@@ -395,7 +393,7 @@ def normalize_components(scene, source, legacy=False):
             target.display_type = 'WIRE'
             target.hide_viewport = viewport_hidden
             target.hide_set(hidden)
-            target.name = f'Component {island_index + 1:03d}'
+            target.name = 'Collision Component'
             created.append(target)
         if old_mesh.users == 0:
             bpy.data.meshes.remove(old_mesh)

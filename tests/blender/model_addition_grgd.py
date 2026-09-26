@@ -71,8 +71,7 @@ with tempfile.TemporaryDirectory(prefix='mme-addition-grgd-') as temporary:
     assert len(multi_pobj) == 2
     assert all(modeling.allows(info, 'topologyReplacement') for info in multi_pobj)
     split_obj = modeling.target_object(bpy.context.scene, multi_pobj[1])
-    assert split_obj.name.startswith(
-        'Editable Model - Group 002 JOBJ 007 DOBJ 002 POBJ 001')
+    assert split_obj.get('mme_id') == multi_pobj[1]['id']
     split_obj.data.clear_geometry()
     split_obj.data.from_pydata([(0, 0, 0), (2, 0, 0), (0, 2, 0)], [], [(0, 1, 2)])
     split_obj.data.update()

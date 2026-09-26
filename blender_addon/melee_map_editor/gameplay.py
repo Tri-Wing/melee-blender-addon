@@ -45,7 +45,7 @@ def _point_marker(group, point, tag, created_objects=None, created_meshes=None,
         vertices = [(-3, 0, -2), (3, 0, -2), (0, 0, 3)]
         edges = [(0, 1), (1, 2), (2, 0)]
         color = (0.75, 0.25, 1.0, 1.0)
-        label = f"Item Spawn {point['typeId'] - FIRST_ITEM_SPAWN + 1}"
+        label = 'Item Spawn'
     else:
         return None
     mesh = bpy.data.meshes.new(f'{label} Marker')
@@ -53,7 +53,7 @@ def _point_marker(group, point, tag, created_objects=None, created_meshes=None,
         created_meshes.append(mesh)
     mesh.from_pydata(vertices, edges, [])
     index = point['setIndex']
-    obj = bpy.data.objects.new(f'{label} - Set {index:03d}', mesh)
+    obj = bpy.data.objects.new(label, mesh)
     if created_objects is not None:
         created_objects.append(obj)
     group.objects.link(obj)
@@ -67,6 +67,8 @@ def _point_marker(group, point, tag, created_objects=None, created_meshes=None,
     obj['mme_gameplay_editable'] = bool(point.get('editable'))
     obj['mme_gameplay_kind'] = kind
     obj['mme_gameplay_type_id'] = point['typeId']
+    if player is not None:
+        obj['mme_gameplay_player'] = player
     obj['mme_source_points'] = json.dumps(
         {} if added else {point['id']: point['position']}, sort_keys=True)
     if added:
@@ -86,7 +88,7 @@ def create(parent, stage, tag, created_objects, created_meshes, collection):
     result = []
     for source_set in sets:
         index = source_set['index']
-        group = collection(f'Gameplay Set {index:03d}', root,
+        group = collection('Gameplay Set', root,
                            f'gameplay-set-{index:03d}', 'gameplay-set', index)
         points = {point['id']: point for point in source_set.get('points', [])}
         consumed = set()
@@ -99,13 +101,13 @@ def create(parent, stage, tag, created_objects, created_meshes, collection):
             reason = bounds.get('readOnlyReason')
             if bounds.get('editable') and not editable:
                 reason = 'Boundary corners use different depth values; rectangle editing is unavailable.'
-            mesh = bpy.data.meshes.new(f"{bounds['kind']} Guide {index:03d}")
+            mesh = bpy.data.meshes.new('Gameplay Bounds Guide')
             created_meshes.append(mesh)
             mesh.from_pydata([(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)],
                              [(0, 1), (1, 2), (2, 3), (3, 0)], [])
             color = BOUND_COLORS[bounds['kind']]
             label = 'Camera Bounds' if bounds['kind'] == 'camera-boundary' else 'Blast Zone'
-            obj = bpy.data.objects.new(f'{label} - Set {index:03d}', mesh)
+            obj = bpy.data.objects.new(label, mesh)
             created_objects.append(obj)
             group.objects.link(obj)
             tag(obj, 'gameplay-bounds', bounds['id'], index)
@@ -121,6 +123,7 @@ def create(parent, stage, tag, created_objects, created_meshes, collection):
             obj.lock_rotation = (True, True, True)
             obj.lock_scale[1] = True
             obj['mme_gameplay_editable'] = editable
+            obj['mme_gameplay_kind'] = bounds['kind']
             obj['mme_gameplay_point_ids'] = json.dumps(
                 [first['id'], second['id']])
             obj['mme_first_x_sign'] = -1 if a['x'] < b['x'] else 1
@@ -250,8 +253,6 @@ def item_spawn_slot(scene, index):
                                       obj.get('mme_id', '')))
     for obj, value in zip(pending, free):
         obj['mme_gameplay_type_id'] = value
-        obj.name = (f'Item Spawn {value - FIRST_ITEM_SPAWN + 1} '
-                    f'- Set {index:03d}')
     return free[len(pending)] if len(pending) < len(free) else None
 
 

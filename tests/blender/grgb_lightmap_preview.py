@@ -139,12 +139,10 @@ with tempfile.TemporaryDirectory(prefix='mme-grgb-lightmap-') as tmp:
     second = integer(first + 4)
     assert floating(first + 0x44) == .25 and floating(second + 0x44) == .75
 
-    smooth_obj = next(obj for obj in bpy.context.scene.objects
-                      if obj.name.endswith('Group 001 POBJ 000.007'))
     group_one = read(tmp / 'session/models/group-001/group.json')
-    smooth_payload = next(read(tmp / 'session/models/group-001' / name)
-                          for name in group_one['meshes']
-                          if read(tmp / 'session/models/group-001' / name)['id'] == smooth_obj.get('mme_id'))
+    smooth_payload = read(tmp / 'session/models/group-001' / group_one['meshes'][7])
+    smooth_obj = next(obj for obj in bpy.context.scene.objects
+                      if obj.get('mme_id') == smooth_payload['id'])
     assert smooth_obj.get('mme_enveloped') and smooth_payload['normals']
     assert all(polygon.use_smooth for polygon in smooth_obj.data.polygons)
     assert len(smooth_obj.data.corner_normals) == len(smooth_obj.data.loops)

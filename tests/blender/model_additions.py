@@ -88,14 +88,14 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
     assert bpy.ops.mme.add_models(target_jobj_id=target) == {'FINISHED'}
     registered = model_additions.objects(bpy.context.scene)
     assert len(registered) == 2 and source_name not in bpy.context.scene.objects
-    assert all(obj.name.startswith('Editable Model - Group ') for obj in registered)
+    assert all(obj.name.startswith(source_name) for obj in registered)
     assert all(len(obj.users_collection) == 1
                and obj.users_collection[0].get('mme_role') == 'group' for obj in registered)
     assert all(obj.parent and obj.parent.get('mme_role') == model_additions.DOBJ_ROLE
                for obj in registered)
     assert all(obj.parent.parent_type == 'BONE' and obj.parent.parent_bone
                for obj in registered)
-    assert all(obj.data.name.startswith('Group 003 Mesh')
+    assert all(obj.data.name.startswith(f'{source_name} Mesh')
                and 'Imported' not in obj.data.name for obj in registered)
     assert not any(collection.get('mme_role') == model_additions.COLLECTION_ROLE
                    for collection in bpy.data.collections)
@@ -115,9 +115,7 @@ with tempfile.TemporaryDirectory(prefix='mme-additions-') as temporary:
     assert registered_texture.image.as_pointer() != image.as_pointer(), (
         registered_texture.image.name, image.name,
         registered_texture.image.as_pointer(), image.as_pointer())
-    assert scene.protected_inventory_matches(bpy.context.scene,
-        set(json.loads(bpy.context.scene['mme_model_baselines'])),
-        set(json.loads(bpy.context.scene['mme_jobj_baselines'])))
+    assert scene.prepare(bpy.context.scene)[1] is None
     payload, assets = model_additions.edits(bpy.context.scene, stage)
     assert len(payload['additions']) == 1
     assert payload['modelAdditionSchemaVersion'] == 2

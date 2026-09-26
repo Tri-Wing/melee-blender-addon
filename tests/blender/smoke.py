@@ -11,7 +11,7 @@ from mathutils import Matrix, Vector
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
 import melee_map_editor as addon
-from melee_map_editor import animations, scene, collision, modeling, transforms
+from melee_map_editor import animations, scene, collision, metadata, modeling, transforms
 from melee_map_editor.protocol import StageError, read, run
 
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
@@ -135,6 +135,29 @@ with tempfile.TemporaryDirectory(prefix='mme-blender-smoke-') as tmp:
         armature.animation_data.action = action
     animations.apply(s)
     bpy.context.view_layer.update()
+    structural_tokens = ('Group 000', 'JOBJ 000', 'DOBJ 000',
+                         'POBJ 000', 'Set 000')
+    assert not any(token in managed.name for managed in s.objects
+                   if managed.get('mme_session_id') == sid
+                   for token in structural_tokens)
+    # Object, collection, and Action names are user-facing labels. Rename all
+    # of them before a no-op export to prove identity comes only from metadata.
+    for index, managed in enumerate(obj for obj in s.objects
+                                    if obj.get('mme_session_id') == sid):
+        managed.name = f'User Object Label {index}'
+    for index, managed in enumerate(collection for collection in bpy.data.collections
+                                    if collection.get('mme_session_id') == sid):
+        managed.name = f'User Collection Label {index}'
+    for index, action in enumerate(action for action in bpy.data.actions
+                                   if action.get('mme_session_id') == sid):
+        action.name = f'User Animation Label {index}'
+    described_model = modeling.target_object(s)
+    details = dict(metadata.describe(s, described_model))
+    assert details['Type'] == 'Model' and all(
+        token in details['Source path'] for token in ('JOBJ', 'DOBJ', 'POBJ'))
+    collision_details = dict(metadata.describe(s, obj))
+    assert collision_details['Type'] == 'Collision Component'
+    assert collision_details['Attachment'] == 'No DAT attachment'
     assert scene.prepare(s)[1] is None
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()

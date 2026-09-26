@@ -13,7 +13,9 @@ from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProp
                        FloatVectorProperty, IntProperty, StringProperty)
 from bpy_extras import view3d_utils
 from bpy_extras.io_utils import ExportHelper, ImportHelper
-from . import animations, atmosphere, camera, collision, gameplay, scene, topology, materials, inspector, modeling, model_additions, surface, material_properties, jobjs
+from . import (animations, atmosphere, camera, collision, gameplay, inspector,
+               jobjs, material_properties, materials, metadata,
+               model_additions, modeling, scene, surface, topology)
 from .protocol import StageError, read, run
 
 
@@ -656,10 +658,35 @@ class MME_PT_viewport(MME_PT_sidebar, bpy.types.Panel):
         layout.operator('mme.toggle_models')
 
 
+class MME_PT_selection(MME_PT_sidebar, bpy.types.Panel):
+    bl_label = 'Selected Stage Object'
+    bl_idname = 'MME_PT_selection'
+    bl_order = 2
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.mme_session and metadata.selected(context))
+
+    def draw(self, context):
+        layout = self.layout
+        item = metadata.selected(context)
+        if isinstance(item, bpy.types.PoseBone):
+            layout.label(text=f'Name: {item.name}')
+        else:
+            layout.prop(item, 'name', text='Name')
+        for key, value in metadata.describe(context.scene, item):
+            if key in {'Reason', 'Stable ID'}:
+                box = layout.box()
+                box.label(text=key)
+                _wrapped_labels(box, value)
+            else:
+                layout.label(text=f'{key}: {value}')
+
+
 class MME_PT_models(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Models'
     bl_idname = 'MME_PT_models'
-    bl_order = 2
+    bl_order = 3
 
     @classmethod
     def poll(cls, context):
@@ -706,7 +733,7 @@ class MME_PT_models(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_import_models(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Import Models'
     bl_idname = 'MME_PT_import_models'
-    bl_order = 3
+    bl_order = 4
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -763,7 +790,7 @@ class MME_PT_import_report(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_jobj_animation(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'JOBJ & Animation'
     bl_idname = 'MME_PT_jobj_animation'
-    bl_order = 4
+    bl_order = 5
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -810,7 +837,7 @@ class MME_PT_jobj_animation(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_gameplay(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Gameplay Tools'
     bl_idname = 'MME_PT_gameplay'
-    bl_order = 5
+    bl_order = 6
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -855,7 +882,7 @@ class MME_PT_gameplay(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_collision(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Collision'
     bl_idname = 'MME_PT_collision'
-    bl_order = 6
+    bl_order = 7
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -931,7 +958,7 @@ class MME_PT_collision_legend(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_export(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Validate & Export'
     bl_idname = 'MME_PT_export'
-    bl_order = 7
+    bl_order = 8
 
     @classmethod
     def poll(cls, context):
@@ -951,7 +978,7 @@ class MME_PT_export(MME_PT_sidebar, bpy.types.Panel):
 class MME_PT_diagnostics(MME_PT_sidebar, bpy.types.Panel):
     bl_label = 'Diagnostics'
     bl_idname = 'MME_PT_diagnostics'
-    bl_order = 8
+    bl_order = 9
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -1326,7 +1353,7 @@ CLASSES = (MME_Preferences, MME_OT_import, MME_OT_export, MME_OT_validate, MME_O
            MME_OT_model_material,
            MME_OT_assign, MME_OT_topology, MME_OT_place_collision_vertex,
            MME_OT_place_item_spawn, MME_OT_open_export,
-           MME_PT_stage, MME_PT_viewport, MME_PT_models, MME_PT_import_models,
+           MME_PT_stage, MME_PT_viewport, MME_PT_selection, MME_PT_models, MME_PT_import_models,
            MME_PT_import_report, MME_PT_jobj_animation, MME_PT_gameplay,
            MME_PT_collision,
            MME_PT_collision_legend, MME_PT_edge, MME_PT_edge_raw, MME_PT_export,

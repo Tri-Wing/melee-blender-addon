@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='mme-animation-blender-') as temp:
     bird_animation = bird_group['jointAnimations'][0]
     bird_payload = read((directory / group_entry['file']).parent / bird_group['meshes'][29])
     bird = next(obj for obj in current.objects if obj.get('mme_id') == bird_payload['id'])
-    assert bird.get('mme_enveloped') and bird.name.endswith('POBJ 000.029')
+    assert bird.get('mme_enveloped') and bird.get('mme_role') == 'pobj'
     worst_skin_error = 0
     for source_frame in (0, 100, 200, 400, 600, 900, 1199):
         animated_group = copy.deepcopy(bird_group)
@@ -137,8 +137,6 @@ with tempfile.TemporaryDirectory(prefix='mme-animation-blender-') as temp:
     assert scene.prepare(current)[1] is None
     original_name = first.name
     first.name = original_name + ' changed'
-    rejects(lambda: scene.prepare(current), 'protected')
-    first.name = original_name
     assert scene.prepare(current)[1] is None
     armature_id = armature['mme_id']
     saved = temp / 'animations.blend'

@@ -218,9 +218,9 @@ import extension), select its mesh objects, expand **Import Models**, and choose
 render behavior. The new-chain mode creates an identity-transform child with its
 own opaque lighting flags, so it can use the stage's diffuse lights without
 changing any existing model's lighting mode. After every selected mesh validates,
-the add-on replaces it with an evaluated, bone-parented **Editable Model** inside
-the selected **Melee Stage → Models → Group NNN** collection. Its name follows
-the other imported model objects. Each material partition is represented as a
+the add-on replaces it with an evaluated, bone-parented model inside the selected
+**Melee Stage → Models → Model Group** collection. Its object name starts with
+the imported source object's name and remains user-editable. Each material partition is represented as a
 POBJ mesh beneath its own DOBJ object; new-chain placement also adds a generated
 identity-transform JOBJ bone to the group's existing armature and bone-parents
 those DOBJ branches to it. This matches the hierarchy emitted to
@@ -285,9 +285,9 @@ Their geometry and weights remain read-only.
 
 ## Edit and preview stage animations
 
-Each model-group joint or material animation slot imports as a Blender Action named
-`Group NNN Stage Animation NNN`. Joint and material data sharing a source slot
-play together. The first slot is active by default. Move the
+Each model-group joint or material animation slot imports as a Blender Action
+with the user-facing name `Stage Animation`. Joint and material data sharing a
+source slot play together. The first slot is active by default. Move the
 timeline to preview the stage motion. The sidebar shows the current Action for
 the selected armature and provides **Previous** and **Next** controls when a
 group has multiple slots. You can also choose an imported Action in Blender's
@@ -355,10 +355,11 @@ supply terrain-dependent contact responses to `ft_80084A80`.
 ## Edit the supported model
 
 New imports advertise **90 of 93 meshes in the original GrNLa.dat**: 45 support
-full geometry editing and 45 support vertex movement with animated materials. Select an object named **Editable Model** in the
-Outliner or viewport, then use **Edit Selected Model**. Read-only meshes have a
-**Read-only Model** prefix, and selecting one shows the reason in the sidebar.
-Meshes named **Vertex Editable Model** have animated materials: move vertices
+full geometry editing and 45 support vertex movement with animated materials.
+Select a model in the Outliner or viewport, then use **Edit Selected Model**.
+The **Selected Stage Object** panel reports its live source Group/JOBJ/DOBJ/POBJ
+path, editing capability, and any read-only reason. Vertex-only models with
+animated materials can move vertices
 using Blender's native tools, but keep topology, UVs and material assignments
 unchanged. Their original normals, materials, textures and animation data are
 preserved on export. Blender previews supported material and texture animation,
@@ -381,9 +382,6 @@ model is rejected.
    carry per-model operation capabilities. Older sessions and saved scene
    bookkeeping are not migrated. To carry over work, export it with its matching
    build first, then import that edited DAT.
-   Scenes imported before rigid Object Mode transform support can reuse their
-   protected transform snapshot after an add-on reload; no transform is silently
-   rebased.
 3. Select an **Editable Model**, then click **Edit Selected Model** to enter
    Edit Mode. The sidebar displays the selected model's edit status.
 4. Move vertices. For fully editable models, use native Blender mesh tools to add/delete faces and replace
@@ -445,9 +443,12 @@ assigned stage material or opaque grey. Source-hidden
 models are editable, but their original visibility and joint animation remain
 intact: editing them does not force them to become visible in game.
 
-**Existing saved scenes retain their old permissions.** Export any work you want
-to keep, reload the add-on, and import that DAT into a fresh scene to enable the
-full target list. No automatic rebasing of protected geometry is performed.
+Blender object, collection, and Action names are user-facing labels, not stage
+identities. Rename them freely. Stable `mme_id` metadata and actual ownership
+relationships drive validation and export; the **Selected Stage Object** panel
+derives source locators and attachment state from that metadata instead of
+parsing names. Bone names remain internal Blender binding keys for animation and
+skinning and should not be renamed.
 
 ## Materials and UVs on new geometry
 

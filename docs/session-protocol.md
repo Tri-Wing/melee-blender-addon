@@ -110,6 +110,10 @@ IDs are opaque UUID strings created once per extraction. Offsets, array position
 group indices, JOBJ preorder, and list positions are separate source locators.
 Re-extracting creates a new session. Retain IDs when editing an existing session;
 new collision vertices/lines receive new UUIDs. Do not recycle an ID for a new role.
+Blender object, collection, and Action names are presentation labels and are not
+serialized identities or source locators. The adapter selects managed data by
+session ID, stable `mme_id`, role metadata, and actual ownership relationships.
+Bone names remain Blender-internal animation/skinning binding keys.
 
 Apply verifies `source.dat`'s hash before parsing it, verifies the protected file
 hashes and inventory, and restores the persisted model identity catalog against
@@ -416,7 +420,8 @@ are never patched in place. Original normals and strip degenerates are retained.
 
 The Blender adapter sends the original triangle expansion when indexed faces and
 vertex count match the baseline, avoiding degenerate-corner rotations introduced
-by re-triangulation. Older sessions and `.blend` files do not need migration.
+by re-triangulation. Adapter/schema changes require a fresh DAT import rather
+than saved-scene migration.
 
 When topology differs, the replacement path uses an explicitly assigned source
 material or the grey fallback. UV/material-only replacements retain original
