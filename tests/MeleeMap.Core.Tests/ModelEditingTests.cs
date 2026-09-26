@@ -29,6 +29,8 @@ public class ModelEditingTests
     [InlineData("indices", "MODEL_INDEX")]
     [InlineData("empty", "MODEL_EMPTY")]
     [InlineData("nonfinite", "MODEL_NONFINITE")]
+    [InlineData("normal", "MODEL_NORMAL")]
+    [InlineData("winding", "MODEL_WINDING")]
     [InlineData("limit", "MODEL_EDIT_COUNT")]
     [InlineData("space", "MODEL_EDIT_VERSION")]
     public void RejectsInvalidModelEdits(string kind, string code)
@@ -41,6 +43,10 @@ public class ModelEditingTests
             case "indices": mesh.TriangleIndices[2] = 9; break;
             case "empty": mesh.TriangleIndices[2] = 0; break;
             case "nonfinite": mesh.Positions[0] = new(float.NaN, 0, 0); break;
+            case "normal": input.Meshes[0] = mesh with {
+                Normals = [new(1, 0, 0), new(1, 0, 0), new(1, 0, 0)]
+            }; break;
+            case "winding": input.Meshes[0] = mesh with { ReverseWinding = true }; break;
             case "limit": input.Meshes[0] = mesh with { TriangleIndices = new int[(ModelEditing.MaxTriangles + 1) * 3] }; break;
             case "space": input = input with { CoordinateSpace = "blender" }; break;
         }
@@ -57,6 +63,60 @@ public class ModelEditingTests
         Assert.Equal(original.Normals, ModelEditing.Compile(edit, target, original).Normals);
         edit.Meshes[0] = edit.Meshes[0] with { TriangleIndices = [0, 2, 1] };
         Assert.All(ModelEditing.Compile(edit, target, original).Normals!, normal => Assert.Equal(new Vector3Data(0, 0, -1), normal));
+    }
+
+    [Fact]
+    public void ReplacementReflectionReversesGeometryNormalsAndUvs()
+    {
+        var target = new EditableModel("target", 0, 0, 0, 0, 0, 0);
+        Vector3Data[] positions = [new(-1, 0, 0), new(1, 0, 0), new(-1, 1, 0)];
+        Vector3Data[] normals = [new(1, 0, 0), new(0, 1, 0), new(0, 0, 1)];
+        Vector2Data[] uvs = [new(0, 0), new(1, 0), new(0, 1)];
+        var original = new MeshData(positions, normals, [0, 1, 2],
+            TexCoords0: uvs);
+        var edit = new ModelEdit(target.Id, positions, [0, 1, 2],
+            SourceMaterialId: "other", TexCoords: uvs,
+            Normals: normals, ReverseWinding: true);
+        var compiled = ModelEditing.Compile(new(SessionExtractor.ProtocolVersion,
+            "game-joint-local", [edit]), target, original);
+
+        Assert.Equal(new[] { positions[0], positions[2], positions[1] },
+            compiled.Positions);
+        Assert.Equal(new[] { normals[0], normals[2], normals[1] },
+            compiled.Normals!);
+        Assert.Equal(new[] { uvs[0], uvs[2], uvs[1] },
+            compiled.TexCoords0!);
+    }
+
+    [PrimaryFixtureFact]
+    public void AppearancePreservingEditCanRewriteNormals()
+    {
+        using var session = new Fixture();
+        var snapshot = ModelSourceSnapshot.Capture(session.Source.Layout,
+            session.Identity);
+        var target = snapshot.Models.Values.First(model =>
+            model.EditableTarget != null && model.Geometry?.Normals != null)
+            .EditableTarget!;
+        var original = GxMeshDecoder.Decode(session.Source.Layout, target.PobjOffset);
+        Assert.NotNull(original.Normals);
+        var normals = original.Normals!.Select(normal =>
+        {
+            float length = MathF.Sqrt(normal.X * normal.X + normal.Y * normal.Y
+                + normal.Z * normal.Z);
+            return new Vector3Data(-normal.Y / length, normal.X / length,
+                normal.Z / length);
+        }).ToArray();
+        var edit = new ModelEdit(target.Id, original.Positions,
+            original.TriangleIndices, Normals: normals);
+        session.Write(new(SessionExtractor.ProtocolVersion,
+            "game-joint-local", [edit]));
+
+        SessionApplier.Apply(session.Directory, session.Output);
+        var output = new StageArchive(session.Output);
+        var decoded = GxMeshDecoder.Decode(output.Layout, target.PobjOffset);
+        Assert.Equal(original.Positions, decoded.Positions);
+        Assert.Equal(original.TriangleIndices, decoded.TriangleIndices);
+        Assert.Equal(normals, decoded.Normals);
     }
 
     [PrimaryFixtureFact]

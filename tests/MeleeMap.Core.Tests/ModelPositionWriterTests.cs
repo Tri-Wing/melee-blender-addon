@@ -71,5 +71,40 @@ public class ModelPositionWriterTests
         Assert.Equal(256, output.Pointers[newAttrs + 24 + 20]);
         Assert.Equal(384, output.Pointers[newAttrs + 72 + 20]);
         Assert.False(output.Pointers.ContainsKey(newAttrs + 20));
+
+        // A reflected transform reverses triangle winding while carrying every
+        // source corner's attributes to the matching reflected corner.
+        var reflectedNormals = original.Normals!.Select((_, i) =>
+            new Vector3Data(i == 0 ? 1 : 0, i == 1 ? 1 : 0,
+                i == 2 ? 1 : 0)).ToArray();
+        var reflected = original with { Positions = moved, Normals = reflectedNormals };
+        var reflectedOutput = new ArchiveLayout(ModelPositionWriter.Write(source,
+            target, reflected, reverseWinding: true));
+        ModelPositionWriter.Verify(reflectedOutput, source, target, reflected,
+            reverseWinding: true);
+        var decoded = GxMeshDecoder.Decode(reflectedOutput, polygon);
+        int[] order = [0, 2, 1];
+        Assert.Equal(order.Select(i => moved[i]), decoded.Positions);
+        Assert.Equal(order.Select(i => reflectedNormals[i]), decoded.Normals!);
+        Assert.Equal(order.Select(i => original.TexCoords0![i]), decoded.TexCoords0!);
+        Assert.Equal(order.Select(i => original.Colors0![i]), decoded.Colors0!);
+        Assert.Equal(new[] { 0, 1, 2 }, decoded.TriangleIndices);
+
+        var painted = new[] {
+            new ColorData(1, 0, 0, 1), new ColorData(0, 1, 0, 1),
+            new ColorData(0, 0, 1, 1)
+        };
+        var expanded = reflected with {
+            Positions = original.TriangleIndices.Select(i => moved[i]).ToArray(),
+            Normals = original.TriangleIndices.Select(i => reflectedNormals[i]).ToArray(),
+            TriangleIndices = Enumerable.Range(0, original.TriangleIndices.Length).ToArray(),
+            Colors0 = painted
+        };
+        var paintedOutput = new ArchiveLayout(ModelPositionWriter.Write(source,
+            target, expanded, reverseWinding: true));
+        ModelPositionWriter.Verify(paintedOutput, source, target, expanded,
+            reverseWinding: true);
+        decoded = GxMeshDecoder.Decode(paintedOutput, polygon);
+        Assert.Equal(order.Select(i => painted[i]), decoded.Colors0!);
     }
 }

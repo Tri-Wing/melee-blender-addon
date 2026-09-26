@@ -1,8 +1,10 @@
 """Rigid edits preserve source appearance when vertex count and faces are unchanged."""
 import json
+import math
 from pathlib import Path
 import bpy
 import bmesh
+from mathutils import Matrix, Vector
 from .protocol import StageError, SESSION_PROTOCOL, digest, read
 from . import surface
 
@@ -20,6 +22,72 @@ def target_ids(scene):
 
 def baselines(scene):
     return json.loads(scene.get('mme_model_baselines', '{}'))
+
+
+def transform_baselines(scene):
+    try:
+        values = json.loads(scene.get('mme_model_transform_baselines', '{}'))
+    except (TypeError, ValueError):
+        values = {}
+    if values:
+        return values
+    # Scenes imported before Object Mode transform baking already carry the
+    # original matrices in their protected inventory. Reuse that immutable
+    # snapshot so an add-on reload can enable the feature without rebasing an
+    # existing user transform or requiring a fresh import.
+    try:
+        inventory = json.loads(scene.get('mme_guard_inventory', '{}'))
+        values = {row['props']['mme_id']: row['matrix']
+                  for row in inventory.get('objects', [])
+                  if row.get('props', {}).get('mme_id') in target_ids(scene)
+                  and isinstance(row.get('matrix'), list)}
+    except (TypeError, ValueError, KeyError):
+        values = {}
+    return values
+
+
+def ensure_transform_baselines(scene):
+    """Upgrade a pre-feature protected inventory without rebasing transforms."""
+    if scene.get('mme_model_transform_baselines'):
+        return
+    try:
+        inventory = json.loads(scene.get('mme_guard_inventory', '{}'))
+        ids = target_ids(scene)
+        values = {row['props']['mme_id']: row['matrix']
+                  for row in inventory.get('objects', [])
+                  if row.get('props', {}).get('mme_id') in ids
+                  and isinstance(row.get('matrix'), list)}
+        if set(values) != ids:
+            raise KeyError
+        for row in inventory['objects']:
+            if row.get('props', {}).get('mme_id') in ids:
+                row.pop('matrix', None)
+    except (TypeError, ValueError, KeyError):
+        raise StageError(
+            'Editable model transform baselines are missing. Re-import the DAT.')
+    scene['mme_model_transform_baselines'] = json.dumps(values)
+    scene['mme_guard_inventory'] = json.dumps(inventory)
+    scene['mme_guard'] = digest(inventory)
+
+
+def matrix_values(matrix):
+    return [[matrix[row][column] for column in range(4)] for row in range(4)]
+
+
+def transform_delta(scene, obj, info):
+    values = transform_baselines(scene).get(info['id'])
+    if not isinstance(values, list) or len(values) != 4:
+        raise StageError('Editable model transform baselines are missing. Re-import the DAT.')
+    baseline = Matrix(values)
+    if not all(math.isfinite(value) for row in obj.matrix_basis for value in row):
+        raise StageError(f'{obj.name}: object transform values must be finite.')
+    return baseline.inverted_safe() @ obj.matrix_basis
+
+
+def transform_changed(scene, obj, info, tolerance=0.000001):
+    delta = transform_delta(scene, obj, info)
+    return any(abs(delta[row][column] - (1 if row == column else 0)) > tolerance
+               for row in range(4) for column in range(4))
 
 
 def capability(info, operation):
@@ -115,15 +183,19 @@ def edits(scene, stage):
         if len(matches) != 1 or matches[0].type != 'MESH':
             raise StageError('The editable model object is duplicated or has an invalid type. Undo the change.')
         obj = matches[0]
+        coordinate_matrix = transform_delta(scene, obj, info)
+        transformed = transform_changed(scene, obj, info)
         changed = (fingerprint(obj) != baseline.get(info['id'])
                    or surface.fingerprint(obj, appearance_locked(info))
-                   != appearance_baseline.get(info['id'], digest(None)))
+                   != appearance_baseline.get(info['id'], digest(None))
+                   or transformed)
         obj['mme_dirty'] = changed
         if changed or color_fingerprint(obj) != color_baseline.get(info['id']):
             source = read(Path(bpy.path.abspath(scene.mme_session)) / info['file'])
             edit = mesh_edit(obj, info, source, stage,
                              surface.fingerprint(obj, appearance_locked(info))
-                             != appearance_baseline.get(info['id'], digest(None)))
+                             != appearance_baseline.get(info['id'], digest(None)),
+                             coordinate_matrix if transformed else None)
             changed = changed or 'colors0' in edit or 'colors1' in edit
             obj['mme_dirty'] = changed
             if changed:
@@ -133,15 +205,16 @@ def edits(scene, stage):
             if meshes or deleted_ids else None)
 
 
-def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
+def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True,
+              coordinate_matrix=None):
     if obj.mode == 'EDIT':
         obj.update_from_editmode()
     # A copy exposes synchronized edit-mode data without changing the user's mesh.
     mesh = obj.data.copy()
     try:
-        mesh.calc_loop_triangles()
-        if not mesh.loop_triangles or len(mesh.loop_triangles) > info['maxTriangles'] or len(mesh.vertices) > 65535:
-            raise StageError(f"Editable model needs triangles (maximum {info['maxTriangles']} triangles and 65535 vertices).")
+        if coordinate_matrix is not None:
+            mesh.transform(coordinate_matrix, shape_keys=True)
+            mesh.update()
         positions = [{'x': v.co.x, 'y': v.co.z, 'z': -v.co.y} for v in mesh.vertices]
         # Use the original primitive expansion, including GX strip degenerates,
         # when the indexed Blender faces still match the imported topology.
@@ -153,6 +226,18 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
                          and len(mesh.polygons) * 3 == len(original_indices)
                          and all(list(face.vertices) == display_indices[i * 3:i * 3 + 3]
                                  for i, face in enumerate(mesh.polygons)))
+        reflected = (coordinate_matrix is not None
+                     and coordinate_matrix.to_3x3().determinant() < 0)
+        # Appearance-preserving reflections retain the imported indices in the
+        # request and ask the DAT writer to reverse each source triangle. For
+        # replacement topology, mirror Blender's Apply Transform behavior on
+        # the temporary copy before triangulation.
+        if reflected and not same_topology:
+            mesh.flip_normals()
+            mesh.update()
+        mesh.calc_loop_triangles()
+        if not mesh.loop_triangles or len(mesh.loop_triangles) > info['maxTriangles'] or len(mesh.vertices) > 65535:
+            raise StageError(f"Editable model needs triangles (maximum {info['maxTriangles']} triangles and 65535 vertices).")
         require_operation(info, 'vertexMovement')
         if not same_topology:
             require_operation(info, 'topologyReplacement')
@@ -162,6 +247,25 @@ def mesh_edit(obj, info, source=None, stage=None, appearance_changed=True):
         result = {'id': info['id'], 'positions': positions,
                   'triangleIndices': original_indices if same_topology else
                       [i for triangle in mesh.loop_triangles for i in triangle.vertices]}
+        if reflected and same_topology:
+            result['reverseWinding'] = True
+        if same_topology and coordinate_matrix is not None and source.get('normals'):
+            normal_matrix = coordinate_matrix.to_3x3()
+            if abs(normal_matrix.determinant()) < 0.000000000001:
+                raise StageError(
+                    f'{obj.name}: a zero-scale transform cannot preserve source normals.')
+            normal_matrix = normal_matrix.inverted().transposed()
+            normals = []
+            for value in source['normals']:
+                normal = normal_matrix @ Vector(
+                    (value['x'], -value['z'], value['y']))
+                if normal.length_squared < 0.000000000001:
+                    raise StageError(
+                        f'{obj.name}: transformed source normal has zero length.')
+                normal.normalize()
+                normals.append({'x': normal.x, 'y': normal.z,
+                                'z': -normal.y})
+            result['normals'] = normals
         for channel in range(2):
             key = f'colors{channel}'
             original_colors = source.get(key) if source else None
@@ -234,7 +338,8 @@ def update_dirty(scene, depsgraph):
         try:
             changed = (fingerprint(obj) != baseline.get(info['id'])
                    or surface.fingerprint(obj, appearance_locked(info))
-                   != appearance_baseline.get(info['id'], digest(None)))
+                   != appearance_baseline.get(info['id'], digest(None))
+                   or transform_changed(scene, obj, info))
             if info['id'] in color_baseline:
                 changed = changed or color_fingerprint(obj) != color_baseline[info['id']]
         except ValueError:

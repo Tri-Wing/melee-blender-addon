@@ -381,14 +381,22 @@ model is rejected.
    carry per-model operation capabilities. Older sessions and saved scene
    bookkeeping are not migrated. To carry over work, export it with its matching
    build first, then import that edited DAT.
+   Scenes imported before rigid Object Mode transform support can reuse their
+   protected transform snapshot after an add-on reload; no transform is silently
+   rebased.
 3. Select an **Editable Model**, then click **Edit Selected Model** to enter
    Edit Mode. The sidebar displays the selected model's edit status.
 4. Move vertices. For fully editable models, use native Blender mesh tools to add/delete faces and replace
    geometry **inside this object**. Unlike collision, render geometry can be
    edited freely in all three dimensions. Quads/ngons are triangulated on export.
    Delete the mesh object with Blender's normal **Delete** command to remove that
-   model from the exported stage. Do not change its parenting or object transforms,
-   or add other identity-bearing objects. Apply desired shape changes in Edit Mode.
+   model from the exported stage. Object Mode move, rotate, and scale
+   transforms on editable rigid models are applied to a temporary mesh copy and
+   baked into exported positions and normals; the Blender object is not mutated.
+   Negative scale also reverses the exported triangle winding and retains each
+   source corner's UV and color data, so mirrored models remain outward-facing
+   without losing their appearance. Parenting changes and other identity-bearing
+   objects remain unsupported. Apply other desired shape changes in Edit Mode.
 5. Validate and export normally. Model and collision changes can be exported
    together. Editing model geometry does **not** automatically change collision.
 
@@ -421,8 +429,10 @@ retain original primitive topology, including strip degenerates. Loose vertices/
 can contain separate vertices at the same position; native Merge by Distance is
 available for this model if appropriate for your edit.
 
-Object transforms, group/JOBJ/DOBJ/POBJ identities, and unsupported meshes remain
-protected except for the SRT of explicitly marked **Editable JOBJ** nodes. Eligible meshes must be rigid and unbound,
+Object transforms on read-only models, group/JOBJ/DOBJ/POBJ identities, and
+unsupported meshes remain protected. Editable rigid meshes accept Object Mode
+transforms, and explicitly marked **Editable JOBJ** nodes accept SRT edits.
+Eligible meshes must be rigid and unbound,
 have no custom class, and have no group shape animation. A sole POBJ in a DOBJ
 supports full topology and material editing. Multiple POBJs under one DOBJ are
 also fully editable and deletable. Vertex-only edits retain their shared source

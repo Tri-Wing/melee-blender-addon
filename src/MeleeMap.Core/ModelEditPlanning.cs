@@ -155,7 +155,8 @@ public static class ModelEditPlanner
 }
 
 public sealed record ResolvedModelChange(EditableModel Target, MeshData Geometry,
-    ModelGeometryChangeKind Kind, ModelMaterial? AssignedMaterial, int Culling);
+    ModelGeometryChangeKind Kind, ModelMaterial? AssignedMaterial, int Culling,
+    bool ReverseWinding);
 
 public sealed record ModelEditExecution(byte[] Bytes,
     ModelIdentitySnapshot GraphIdentity,
@@ -177,10 +178,12 @@ public static class ModelEditExecutor
         var currentIdentity = ModelIdentity.Capture(builder.BuildLayout(), catalog);
         var resolved = plan.Changes.Select(change => new ResolvedModelChange(
             ResolveTarget(currentIdentity, change.Source), change.Geometry, change.Kind,
-            change.AssignedMaterial, change.Culling)).ToArray();
+            change.AssignedMaterial, change.Culling,
+            change.Request.ReverseWinding)).ToArray();
         foreach (var change in resolved)
             if (change.Kind == ModelGeometryChangeKind.AppearancePreserving)
-                ModelPositionWriter.Write(builder, change.Target, change.Geometry);
+                ModelPositionWriter.Write(builder, change.Target, change.Geometry,
+                    change.ReverseWinding);
             else ModelArchiveWriter.Write(builder, change.Target, change.Geometry,
                 change.AssignedMaterial?.MobjOffset, change.Culling);
         MaterialPropertyWrite? materialWrite = null;

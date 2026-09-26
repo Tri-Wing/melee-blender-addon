@@ -35,7 +35,8 @@ public static class ModelEditVerifier
                     execution.MaterialWrite != null
                         && execution.MaterialWrite.Bindings.TryGetValue(change.Target.Id,
                             out int positionMaterial)
-                            ? positionMaterial : null);
+                            ? positionMaterial : null,
+                    change.ReverseWinding);
             else
                 ModelArchiveWriter.Verify(archive, change.Target, change.Geometry,
                     execution.MaterialWrite != null

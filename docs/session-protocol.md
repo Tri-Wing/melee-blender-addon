@@ -370,6 +370,13 @@ Optional model-edit fields:
   (corner order), required when the assigned source material uses a texture.
 - `useGreyMaterial`: force grey replacement even if topology is unchanged;
   mutually exclusive with `sourceMaterialId`.
+- `normals`: optional finite normalized game-space normals, one per position.
+  This lets appearance-preserving rigid transforms update source normals without
+  replacing the mesh's material or topology.
+- `reverseWinding`: optional boolean set by adapters when a same-topology
+  transform has a negative determinant. The appearance-preserving writer emits
+  reversed triangles and remaps every source UV, color, and normal corner so a
+  Blender mirror remains outward-facing without replacing its material.
 - `deletedIds`: unique eligible POBJ IDs to detach from their owning DOBJ. An ID
   cannot appear in both `meshes` and `deletedIds`.
 

@@ -1,17 +1,18 @@
 """One-target model edits, replacement geometry, combined export and scene guards."""
 import os
 import math
+import json
 from pathlib import Path
 import sys
 import tempfile
 import bpy
 import bmesh
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'blender_addon'))
 from melee_map_editor import scene, modeling
-from melee_map_editor.protocol import read, run, StageError
+from melee_map_editor.protocol import digest, read, run, StageError
 CLI = ROOT / 'src/MeleeMap.Cli/bin/Debug/net8.0/meleemap.dll'
 CORPUS = Path(os.environ.get('MELEEMAP_CORPUS', ROOT / 'example_assets'))
 bpy.ops.preferences.addon_enable(module='melee_map_editor')
@@ -36,12 +37,119 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     s = bpy.context.scene
     assert stage['capabilities']['modelEdit']
     target_info = next(info for info in modeling.targets(s)
-                       if modeling.allows(info, 'topologyReplacement'))
+                       if modeling.allows(info, 'topologyReplacement')
+                       and read(directory / info['file']).get('normals'))
     target_info, target = modeling.resolve(s, info=target_info,
                                            operation='vertexMovement')
     assert modeling.edits(s, stage) is None
     scene.apply(s, CLI, 'dotnet', tmp / 'unchanged.dat')
     assert (tmp / 'unchanged.dat').read_bytes() == (CORPUS / 'GrNLa.dat').read_bytes()
+
+    # Object Mode transforms are applied to a temporary export copy. The live
+    # mesh and its matrix remain untouched, while positions and source normals
+    # are rewritten in joint-local coordinates.
+    original_basis = target.matrix_basis.copy()
+    original_coordinate = target.data.vertices[0].co.copy()
+    # Simulate a scene imported before model matrices became authorable. Its
+    # immutable guard contains the original matrices rather than a dedicated
+    # transform-baseline property.
+    transform_baselines = json.loads(s['mme_model_transform_baselines'])
+    legacy_guard = json.loads(s['mme_guard_inventory'])
+    for row in legacy_guard['objects']:
+        identity = row.get('props', {}).get('mme_id')
+        if identity in transform_baselines:
+            row['matrix'] = transform_baselines[identity]
+    s['mme_guard_inventory'] = json.dumps(legacy_guard)
+    s['mme_guard'] = digest(legacy_guard)
+    del s['mme_model_transform_baselines']
+    target.location = (3, -2, 5)
+    target.rotation_euler.z = 0.25
+    target.scale = (1.2, 0.8, 1.1)
+    bpy.context.view_layer.update()
+    transformed = modeling.edits(s, stage)
+    assert transformed is not None
+    transformed_mesh = transformed['meshes'][0]
+    assert transformed_mesh.get('normals')
+    delta = Matrix(transform_baselines[target_info['id']]).inverted() \
+        @ target.matrix_basis
+    expected_coordinate = delta @ original_coordinate
+    expected_position = {'x': expected_coordinate.x,
+                         'y': expected_coordinate.z,
+                         'z': -expected_coordinate.y}
+    assert all(math.isclose(transformed_mesh['positions'][0][key], value,
+                            rel_tol=1e-6, abs_tol=1e-5)
+               for key, value in expected_position.items())
+    assert target.data.vertices[0].co == original_coordinate
+    scene.apply(s, CLI, 'dotnet', tmp / 'object-transform.dat')
+    assert s.get('mme_model_transform_baselines')
+    run(CLI, 'dotnet', 'extract', tmp / 'object-transform.dat',
+        '--session', tmp / 'object-transform')
+    transformed_stage = read(tmp / 'object-transform/stage.json')
+    locator = tuple(target_info[key] for key in
+                    ('groupIndex', 'jobjIndex', 'dobjIndex', 'pobjIndex'))
+    transformed_info = next(info for info in transformed_stage['editableMeshes']
+                            if tuple(info[key] for key in
+                                     ('groupIndex', 'jobjIndex', 'dobjIndex', 'pobjIndex')) == locator)
+    transformed_output = read(tmp / 'object-transform' / transformed_info['file'])
+    for actual, expected in zip(transformed_output['positions'],
+                                transformed_mesh['positions']):
+        assert all(math.isclose(actual[key], expected[key], rel_tol=1e-6,
+                                abs_tol=1e-5) for key in ('x', 'y', 'z'))
+    for actual, expected in zip(transformed_output['normals'],
+                                transformed_mesh['normals']):
+        assert all(math.isclose(actual[key], expected[key], rel_tol=1e-6,
+                                abs_tol=1e-5) for key in ('x', 'y', 'z'))
+    target.matrix_basis = original_basis
+    bpy.context.view_layer.update()
+    assert modeling.edits(s, stage) is None
+
+    # Negative Object Mode scale is exported as a true reflection: positions
+    # and normals are transformed, triangle winding is reversed, and source
+    # corner attributes remain attached to the corresponding corners.
+    target.scale.x = -1
+    bpy.context.view_layer.update()
+    reflected = modeling.edits(s, stage)
+    reflected_mesh = reflected['meshes'][0]
+    assert reflected_mesh['reverseWinding'] is True
+    assert target.data.vertices[0].co == original_coordinate
+    scene.apply(s, CLI, 'dotnet', tmp / 'reflected.dat')
+    run(CLI, 'dotnet', 'extract', tmp / 'reflected.dat',
+        '--session', tmp / 'reflected')
+    reflected_stage = read(tmp / 'reflected/stage.json')
+    reflected_info = next(info for info in reflected_stage['editableMeshes']
+                          if tuple(info[key] for key in
+                                   ('groupIndex', 'jobjIndex', 'dobjIndex', 'pobjIndex')) == locator)
+    reflected_output = read(tmp / 'reflected' / reflected_info['file'])
+    source_output = read(directory / target_info['file'])
+    corner_order = []
+    for i in range(0, len(source_output['triangleIndices']), 3):
+        corner_order.extend((i, i + 2, i + 1))
+    source_vertices = [source_output['triangleIndices'][corner]
+                       for corner in corner_order]
+    for actual, source_vertex in zip(reflected_output['positions'], source_vertices):
+        expected = reflected_mesh['positions'][source_vertex]
+        assert all(math.isclose(actual[key], expected[key], rel_tol=1e-6,
+                                abs_tol=1e-5) for key in ('x', 'y', 'z'))
+    for actual, source_vertex in zip(reflected_output['normals'], source_vertices):
+        expected = reflected_mesh['normals'][source_vertex]
+        assert all(math.isclose(actual[key], expected[key], rel_tol=1e-6,
+                                abs_tol=1e-5) for key in ('x', 'y', 'z'))
+    for attribute in ('texCoords0', 'texCoords1', 'colors0', 'colors1'):
+        if source_output.get(attribute) is not None:
+            assert reflected_output[attribute] == [source_output[attribute][i]
+                                                    for i in source_vertices]
+    assert reflected_output['triangleIndices'] == list(range(len(source_vertices)))
+    target.matrix_basis = original_basis
+    bpy.context.view_layer.update()
+    assert modeling.edits(s, stage) is None
+
+    # Keep the established topology/material test target for the remaining
+    # cases; the transform target above was selected specifically for normals.
+    target_info = next(info for info in modeling.targets(s)
+                       if modeling.allows(info, 'topologyReplacement'))
+    target_info, target = modeling.resolve(s, info=target_info,
+                                           operation='vertexMovement')
+
     bpy.ops.object.select_all(action='DESELECT')
     target.select_set(True)
     bpy.context.view_layer.objects.active = target
@@ -123,10 +231,13 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
         expected = {'x': local.x, 'y': local.z, 'z': -local.y}
         assert any(all(math.isclose(p[k], expected[k], rel_tol=1e-6, abs_tol=1e-5)
                        for k in expected) for p in joined['positions']), expected
-    # Scene guards reject protected edits.
-    target.location.x = 1
-    rejects(lambda: scene.prepare(s), 'protected')
-    target.location.x = 0
+    # Reflections also work after arbitrary topology replacement; the temporary
+    # export mesh receives Blender's reflected winding without mutating the scene.
+    target.scale.x = -1
+    replacement_reflection = modeling.edits(s, stage)
+    assert not replacement_reflection['meshes'][0].get('reverseWinding')
+    scene.validate(s, CLI, 'dotnet')
+    target.scale.x = 1
     other = next(o for o in s.objects if o.type == 'MESH' and o.get('mme_role') == 'pobj'
                  and o.get('mme_id') not in modeling.target_ids(s))
     original = other.data.vertices[0].co.copy()
@@ -160,4 +271,4 @@ with tempfile.TemporaryDirectory(prefix='mme-models-') as tmp:
     rejects(lambda: scene.apply(s, CLI, 'dotnet', tmp / 'combined.dat'), 'needs triangles')
     assert (tmp / 'combined.dat').read_bytes() == saved
     assert not list((directory / 'edits').iterdir())
-print('BLENDER_MODELS_OK: no-op, movement, replacement, native join, scene guards, combined export, protected transforms/materials, save/load, failure safety')
+    print('BLENDER_MODELS_OK: no-op, Object Mode transforms/reflections/normals, movement, replacement, native join, scene guards, combined export, protected read-only transforms/materials, save/load, failure safety')

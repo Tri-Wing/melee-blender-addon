@@ -460,18 +460,24 @@ def import_session(context, directory):
             jobj_baselines[info['id']] = jobjs.matrix_values(target.matrix_basis)
         scene['mme_jobj_baselines'] = json.dumps(jobj_baselines)
         baselines = {}
+        transform_baselines = {}
         for info in editable_models:
             target = modeling.target_object(scene, info)
             target.name = f"Editable Model - Group {info['groupIndex']:03d} JOBJ {info['jobjIndex']:03d} DOBJ {info['dobjIndex']:03d} POBJ {info['pobjIndex']:03d}"
             if not modeling.allows(info, 'topologyReplacement'):
                 target.name = target.name.replace('Editable Model', 'Vertex Editable Model', 1)
             baselines[info['id']] = modeling.fingerprint(target)
+            transform_baselines[info['id']] = modeling.matrix_values(
+                target.matrix_basis)
         scene['mme_model_baselines'] = json.dumps(baselines)
+        scene['mme_model_transform_baselines'] = json.dumps(transform_baselines)
         scene['mme_color_baselines'] = json.dumps({info['id']: modeling.color_fingerprint(modeling.target_object(scene, info)) for info in editable_models})
         scene['mme_appearance_baselines'] = json.dumps({info['id']: surface.fingerprint(
             modeling.target_object(scene, info), modeling.appearance_locked(info))
             for info in editable_models})
-        editable_transforms = jobjs.target_ids(scene) | gameplay.editable_transform_ids(scene)
+        editable_transforms = (jobjs.target_ids(scene)
+                               | gameplay.editable_transform_ids(scene)
+                               | modeling.target_ids(scene))
         guard = inventory(scene, modeling.target_ids(scene), editable_transforms)
         scene['mme_guard_inventory'] = json.dumps(guard)
         scene['mme_guard'] = digest(guard)
@@ -528,7 +534,10 @@ def import_session(context, directory):
 def prepare(scene):
     directory = session(scene)
     stage = load_session(directory)
-    editable_transforms = jobjs.target_ids(scene) | gameplay.editable_transform_ids(scene)
+    modeling.ensure_transform_baselines(scene)
+    editable_transforms = (jobjs.target_ids(scene)
+                           | gameplay.editable_transform_ids(scene)
+                           | modeling.target_ids(scene))
     if not protected_inventory_matches(scene, modeling.target_ids(scene),
                                        editable_transforms,
                                        gameplay.deletable_ids(scene, stage)):
